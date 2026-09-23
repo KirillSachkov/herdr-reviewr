@@ -888,7 +888,8 @@ struct PaintedDetails {
     x_start: u16,
     x_end: u16,
     y: u16,
-    summary: std::sync::Arc<str>,
+    /// The disclosure's [`crate::markdown::DetailsHit::key`].
+    key: std::sync::Arc<str>,
 }
 
 #[derive(Debug)]
@@ -2022,21 +2023,44 @@ impl App {
     }
 
     /// Render `text` as markdown wrapped to `width`, through the memo, with the
-    /// current body's expanded `<details>` summaries.
+    /// current body's open `<details>` keys.
     #[must_use]
     pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
-        let expanded = if self.tab == Tab::Pr {
-            &self.pr_expanded_details
-        } else {
-            &self.preview_expanded_details
-        };
         self.markdown_cache.borrow_mut().get_expanded(
             text,
             width,
             &self.highlighter,
             &self.palette,
-            expanded,
+            &self.preview_expanded_details,
         )
+    }
+
+    /// Render one body of the open PR thread — `body` is its place in
+    /// [`Self::pr_markdown_bodies`]'s order. Each body keys its disclosures in its own
+    /// namespace, so a reply's `Details#0` never opens with the description's.
+    pub(crate) fn pr_body_render(
+        &self,
+        text: &str,
+        width: usize,
+        body: usize,
+    ) -> crate::markdown::Rendered {
+        let ns = format!("{body}/");
+        let expanded: HashSet<String> = self
+            .pr_expanded_details
+            .iter()
+            .filter_map(|k| k.strip_prefix(&ns).map(str::to_string))
+            .collect();
+        let mut rendered = self.markdown_cache.borrow_mut().get_expanded(
+            text,
+            width,
+            &self.highlighter,
+            &self.palette,
+            &expanded,
+        );
+        for d in rendered.meta.iter_mut().filter_map(|m| m.details.as_mut()) {
+            d.key = std::sync::Arc::from(format!("{ns}{}", d.key));
+        }
+        rendered
     }
 
     fn active_expanded_details_mut(&mut self) -> &mut HashSet<String> {
@@ -2052,9 +2076,9 @@ impl App {
         x_start: u16,
         x_end: u16,
         y: u16,
-        summary: std::sync::Arc<str>,
+        key: std::sync::Arc<str>,
     ) {
-        self.painted_details.borrow_mut().push(PaintedDetails { x_start, x_end, y, summary });
+        self.painted_details.borrow_mut().push(PaintedDetails { x_start, x_end, y, key });
     }
 
     #[must_use]
@@ -2063,28 +2087,29 @@ impl App {
             .borrow()
             .iter()
             .find(|d| d.y == row && col >= d.x_start && col < d.x_end)
-            .map(|d| d.summary.clone())
+            .map(|d| d.key.clone())
     }
 
-    pub fn toggle_details(&mut self, summary: &str) {
+    /// Open or close the `<details>` with this [`crate::markdown::DetailsHit::key`].
+    pub fn toggle_details(&mut self, key: &str) {
         let set = self.active_expanded_details_mut();
-        if !set.remove(summary) {
-            set.insert(summary.to_string());
+        if !set.remove(key) {
+            set.insert(key.to_string());
         }
     }
 
     pub fn expand_pr_details(&mut self) {
         let width = self.pane_width.get().max(1);
         let bodies = self.pr_markdown_bodies();
-        let mut summaries = HashSet::new();
-        for text in &bodies {
-            for m in &self.markdown_render(text, width).meta {
+        let mut keys = HashSet::new();
+        for (i, text) in bodies.iter().enumerate() {
+            for m in &self.pr_body_render(text, width, i).meta {
                 if let Some(d) = &m.details {
-                    summaries.insert(d.summary.to_string());
+                    keys.insert(d.key.to_string());
                 }
             }
         }
-        self.pr_expanded_details.extend(summaries);
+        self.pr_expanded_details.extend(keys);
     }
 
     pub fn collapse_pr_details(&mut self) {
@@ -5389,6 +5414,31 @@ mod tests {
         assert!(app.set_tab(super::Tab::AllFiles).is_err());
         assert!(app.move_cursor(1).is_err());
         assert!(app.select_file(0).is_err());
+    }
+
+    #[test]
+    fn pr_bodies_open_their_disclosures_independently() {
+        let mut app = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        let one = "first\n\n<details><summary>Details</summary>\n\nbody one\n\n</details>\n";
+        let two = "second\n\n<details><summary>Details</summary>\n\nbody two\n\n</details>\n";
+        app.tab = super::Tab::Pr;
+        let key_of = |app: &App, text: &str, body| {
+            app.pr_body_render(text, 80, body)
+                .meta
+                .iter()
+                .find_map(|m| m.details.clone())
+                .unwrap()
+                .key
+        };
+        assert_ne!(key_of(&app, one, 0), key_of(&app, two, 1), "same summary, two bodies");
+        let key = key_of(&app, one, 0);
+        app.toggle_details(&key);
+        let opened = |app: &App, text: &str, body| {
+            app.pr_body_render(text, 80, body).lines.iter().any(|l| l.to_string().contains("body"))
+        };
+        assert!(opened(&app, one, 0));
+        assert!(!opened(&app, two, 1), "the other body's disclosure stays closed");
+        assert!(!opened(&app, one, 1), "identical text in another body is another body");
     }
 
     /// A read pane showing `src/lib.rs`: an insertion at new line 10, a deletion of old line

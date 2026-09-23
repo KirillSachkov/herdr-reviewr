@@ -4408,7 +4408,7 @@ fn note_markdown_regions(
             let x1 = inner.x + d.start.min(inner.width as usize) as u16;
             let x2 = inner.x + d.end.min(inner.width as usize) as u16;
             if x1 < x2 {
-                app.note_painted_details(x1, x2, inner.y + display as u16, d.summary.clone());
+                app.note_painted_details(x1, x2, inner.y + display as u16, d.key.clone());
             }
         }
     }
@@ -4574,11 +4574,11 @@ fn pr_read_content(app: &App, inner: Rect) -> PrReadContent {
         // names who spoke and when, including the root, so a reply cannot look like
         // the next paragraph of the same comment.
         push_comment_byline(&mut lines, &cm.author, cm.author_is_bot, &cm.created_at, now, p);
-        let mut rendered = app.markdown_render(&cm.body, width.max(1));
+        let mut rendered = app.pr_body_render(&cm.body, width.max(1), 0);
         let offset = lines.len();
         lines.append(&mut rendered.lines);
         body_meta.push((offset, rendered));
-        for reply in &cm.replies {
+        for (i, reply) in cm.replies.iter().enumerate() {
             push_comment_rule(&mut lines, width, p);
             push_comment_byline(
                 &mut lines,
@@ -4588,14 +4588,14 @@ fn pr_read_content(app: &App, inner: Rect) -> PrReadContent {
                 now,
                 p,
             );
-            let mut rendered = app.markdown_render(&reply.body, width.max(1));
+            let mut rendered = app.pr_body_render(&reply.body, width.max(1), i + 1);
             let offset = lines.len();
             lines.append(&mut rendered.lines);
             body_meta.push((offset, rendered));
         }
     } else if app.pr_on_description() {
         if let Some(s) = app.pr_snapshot() {
-            let mut rendered = app.markdown_render(&s.body, width.max(1));
+            let mut rendered = app.pr_body_render(&s.body, width.max(1), 0);
             let offset = lines.len();
             lines.append(&mut rendered.lines);
             body_meta.push((offset, rendered));

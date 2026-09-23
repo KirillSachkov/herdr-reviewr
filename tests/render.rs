@@ -2347,8 +2347,8 @@ fn details_expand_on_the_pr_tab_and_reset_on_row_change() {
     let hit = (0..40u16)
         .flat_map(|y| (0..140u16).map(move |x| (x, y)))
         .find_map(|(x, y)| app.painted_details_at(x, y));
-    let summary = hit.expect("summary is clickable after a paint");
-    app.toggle_details(&summary);
+    let key = hit.expect("summary is clickable after a paint");
+    app.toggle_details(&key);
     let out = render(&app);
     assert!(out.contains("chrome lives here"), "click opens:\n{out}");
 }

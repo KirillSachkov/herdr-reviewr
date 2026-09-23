@@ -35,25 +35,35 @@ pub struct Rendered {
     pub meta: Vec<LineMeta>,
     /// Each heading's GitHub slug and the rendered line it starts on.
     pub anchors: Vec<(String, usize)>,
+    /// The 1-based source lines whose content does not render, wholly or in part: HTML
+    /// comments (block or inline, single or multi-line), link reference definitions, a
+    /// collapsed `<details>` body. A change there is invisible rendered, so review
+    /// surfaces it by these.
+    pub silent: Vec<usize>,
 }
 
-/// One rendered line's metadata: the 1-based source line it maps to (its block's first
-/// line, or the exact line inside a code block) and the link spans it carries.
+/// One rendered line's metadata: the 1-based source lines it maps to — its block's
+/// `source_line..=source_end`, one line for a code line or a table row — and the link
+/// spans it carries. A block ends where the next one begins, so ranges never overlap.
 #[derive(Clone, Debug)]
 pub struct LineMeta {
     pub source_line: usize,
+    pub source_end: usize,
     pub links: Vec<LinkSpan>,
     /// A `<details>` summary on this line, when the line is that disclosure.
     pub details: Option<DetailsHit>,
 }
 
-/// Click target for a `<details>` summary: display columns and the summary text the
-/// expand state keys on.
+/// Click target for a `<details>` summary: display columns, the summary text, and the
+/// key the expand state keys on — the summary plus how many earlier disclosures share it
+/// (`Details#1`). Two disclosures sharing a summary open independently, and an edit above
+/// keeps every key unless it adds a disclosure with that same summary.
 #[derive(Clone, Debug)]
 pub struct DetailsHit {
     pub start: usize,
     pub end: usize,
     pub summary: std::sync::Arc<str>,
+    pub key: std::sync::Arc<str>,
 }
 
 /// A clickable span on one rendered line: `start..end` display columns and where it
@@ -71,7 +81,7 @@ pub fn render(text: &str, width: usize, hl: &Highlighter, p: &Palette) -> Render
     render_expanded(text, width, hl, p, &HashSet::new())
 }
 
-/// Like [`render`], with the `<details>` summaries in `expanded` opened.
+/// Like [`render`], with the `<details>` whose [`DetailsHit::key`] is in `expanded` opened.
 pub fn render_expanded<S: std::hash::BuildHasher>(
     text: &str,
     width: usize,
@@ -93,6 +103,14 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         source: text,
         line_starts,
         block_src: 1,
+        block_end: 1,
+        covered: Vec::new(),
+        comment_lines: Vec::new(),
+        in_comment: false,
+        summary_counts: std::collections::HashMap::new(),
+        event_lines: (1, 1),
+        inline_span: None,
+        marker_line: None,
         out: Rendered::default(),
         inline: Vec::new(),
         styles: Vec::new(),
@@ -117,10 +135,10 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         r.event(event, range);
     }
     r.flush_block(false);
-    r.out
+    r.finish(text)
 }
 
-/// A render memo keyed by `(text, width, expanded summaries)`. Several bodies can sit
+/// A render memo keyed by `(text, width, expanded details keys)`. Several bodies can sit
 /// on one PR thread, so it keeps the last few. Cleared on a theme switch.
 #[derive(Debug, Default)]
 pub struct RenderCache {
@@ -198,10 +216,11 @@ struct CodeBlock {
 }
 
 /// An in-progress table: its source range (the wide-table fallback), rows of cells of
-/// chunks, and how many leading rows are the header.
+/// chunks with each row's source lines, and how many leading rows are the header.
 struct Table {
     range: Range<usize>,
     rows: Vec<Vec<Vec<Chunk>>>,
+    row_lines: Vec<(usize, usize)>,
     head_rows: usize,
 }
 
@@ -212,8 +231,26 @@ struct Renderer<'a> {
     source: &'a str,
     /// Byte offset of each 1-based source line's start, for offset → line mapping.
     line_starts: Vec<usize>,
-    /// The 1-based source line the block being emitted starts on.
+    /// The 1-based source lines the block being emitted spans.
     block_src: usize,
+    block_end: usize,
+    /// Every emitted block's full source range, fences and delimiter rows included — the
+    /// lines a render shows even where no rendered line maps to them one by one.
+    covered: Vec<(usize, usize)>,
+    /// Lines holding HTML comment text: hidden even inside a block that renders.
+    comment_lines: Vec<(usize, usize)>,
+    /// An HTML comment opened on an earlier line of the same HTML block, not yet closed.
+    in_comment: bool,
+    /// Disclosures seen so far per summary, for their keys' occurrence count.
+    summary_counts: std::collections::HashMap<String, usize>,
+    /// The source lines of the event being handled.
+    event_lines: (usize, usize),
+    /// The source lines the pending inline run was fed from. The run maps to these when it
+    /// flushes, whatever block started before or after it.
+    inline_span: Option<(usize, usize)>,
+    /// The source line of the pending item marker: the run that consumes the marker shows
+    /// that line too.
+    marker_line: Option<usize>,
     out: Rendered,
     inline: Vec<Chunk>,
     /// The emphasis/link/heading style stack; the current style folds base + every entry.
@@ -271,16 +308,34 @@ impl Renderer<'_> {
     }
 
     fn event(&mut self, event: Event<'_>, range: Range<usize>) {
+        self.event_lines = (self.src_line(range.start), self.end_line(&range));
+        // A comment never outlives its HTML block: pulldown ends the block by then.
+        if matches!(event, Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock)) {
+            self.in_comment = false;
+        }
         match event {
-            Event::InlineHtml(t) => self.handle_html(&t, true),
+            Event::InlineHtml(t) => {
+                let shown = self.emitting() && !self.collecting_summary();
+                // A tag-only inline tag shows as much as a tag-only HTML block line does.
+                if !self.handle_html(&t, true, &range) && shown {
+                    self.covered.push(self.event_lines);
+                }
+            }
             Event::Html(t) => {
-                self.block_src = self.src_line(range.start);
                 if self.emitting() && !self.collecting_summary() {
                     // A tight list item's text can still be pending: it emits first,
                     // with its marker, so the HTML block never jumps ahead of it.
                     self.flush_block(true);
                 }
-                self.handle_html(&t, false);
+                self.block_src = self.src_line(range.start);
+                self.block_end = self.end_line(&range);
+                let shown_before = self.emitting() || self.collecting_summary();
+                let commented = self.handle_html(&t, false, &range);
+                // A tag-only line of HTML that shows — a wrapper's open or close, a
+                // disclosure's structure, a summary's text — is shown source.
+                if !commented && (shown_before || self.emitting() || self.collecting_summary()) {
+                    self.covered.push((self.block_src, self.block_end));
+                }
             }
             Event::Start(tag) if self.emitting() && !self.collecting_summary() => {
                 self.start(tag, range);
@@ -310,6 +365,7 @@ impl Renderer<'_> {
             Event::Rule if self.emitting() => {
                 self.flush_block(true);
                 self.block_src = self.src_line(range.start);
+                self.block_end = self.block_src;
                 self.blank_before_block();
                 let budget = self.budget(self.prefix(None).0.width());
                 let line = Line::from(vec![
@@ -335,6 +391,12 @@ impl Renderer<'_> {
             Tag::Paragraph | Tag::Heading { .. } | Tag::Item | Tag::CodeBlock(_) | Tag::Table(_)
         ) {
             self.block_src = self.src_line(range.start);
+            self.block_end = self.end_line(&range);
+            // An item's range spans its nested blocks, which cover themselves; a leaf
+            // block covers its whole range, fences and delimiter rows included.
+            if !matches!(tag, Tag::Item) {
+                self.covered.push((self.block_src, self.block_end));
+            }
         }
         match tag {
             Tag::Heading { level, .. } => {
@@ -351,6 +413,7 @@ impl Renderer<'_> {
                 self.lists.push(start);
             }
             Tag::Item => {
+                self.marker_line = Some(self.event_lines.0);
                 self.marker = Some(match self.lists.last().copied().flatten() {
                     Some(n) => {
                         if let Some(slot) = self.lists.last_mut() {
@@ -388,11 +451,14 @@ impl Renderer<'_> {
             }
             Tag::Table(_) => {
                 self.flush_block(true);
-                self.table = Some(Table { range, rows: Vec::new(), head_rows: 0 });
+                self.table =
+                    Some(Table { range, rows: Vec::new(), row_lines: Vec::new(), head_rows: 0 });
             }
             Tag::TableHead | Tag::TableRow => {
+                let lines = (self.src_line(range.start), self.end_line(&range));
                 if let Some(t) = &mut self.table {
                     t.rows.push(Vec::new());
+                    t.row_lines.push(lines);
                 }
             }
             Tag::TableCell => {
@@ -462,6 +528,13 @@ impl Renderer<'_> {
     }
 
     fn push_chunk(&mut self, text: String, style: Style, link: Option<usize>) {
+        if self.table.is_none() {
+            let (start, end) = self.event_lines;
+            self.inline_span = Some(match self.inline_span {
+                Some((s, e)) => (s.min(start), e.max(end)),
+                None => (start, end),
+            });
+        }
         self.chunks_mut().push(Chunk { text, style, link });
     }
 
@@ -542,11 +615,31 @@ impl Renderer<'_> {
         self.push_chunk(text, style, link);
     }
 
-    fn handle_html(&mut self, html: &str, inline: bool) {
+    /// Handle one HTML event. Returns whether it holds comment text, which never renders.
+    fn handle_html(&mut self, html: &str, inline: bool, range: &Range<usize>) -> bool {
+        let lines = (self.src_line(range.start), self.end_line(range));
+        let mut html = html;
+        let mut commented = false;
+        // A comment an earlier HTML line opened swallows everything up to its close.
+        if self.in_comment {
+            commented = true;
+            match html.find("-->") {
+                Some(at) => {
+                    html = &html[at + 3..];
+                    self.in_comment = false;
+                }
+                None => html = "",
+            }
+        }
+        if let Some(open) = html.rfind("<!--")
+            && !html[open..].contains("-->")
+        {
+            self.in_comment = true;
+        }
         let produced = self.inline.len();
         for tok in html_tokens(html) {
             match tok {
-                HtmlTok::Comment => {}
+                HtmlTok::Comment => commented = true,
                 HtmlTok::Text(t) => {
                     if self.collecting_summary() {
                         self.append_summary(t);
@@ -559,10 +652,14 @@ impl Renderer<'_> {
                 }
             }
         }
+        if commented {
+            self.comment_lines.push(lines);
+        }
         if !inline && self.inline.len() > produced && self.emitting() && !self.collecting_summary()
         {
             self.flush_block(true);
         }
+        commented
     }
 
     fn handle_html_tag(&mut self, name: &str, closing: bool, self_closing: bool, raw: &str) {
@@ -637,16 +734,19 @@ impl Renderer<'_> {
         let summary = d.summary.split_whitespace().collect::<Vec<_>>().join(" ");
         let summary = sanitize(&summary);
         d.summary.clone_from(&summary);
-        let open = self.expanded.contains(&summary);
+        let seen = self.summary_counts.entry(summary.clone()).or_insert(0);
+        let key = format!("{summary}#{seen}");
+        *seen += 1;
+        let open = self.expanded.contains(&key);
         if let Some(d) = self.details.last_mut() {
             d.skip = !open;
         }
         if !self.details.iter().rev().skip(1).any(|d| d.skip) {
-            self.emit_details_summary(&summary, open);
+            self.emit_details_summary(&summary, &key, open);
         }
     }
 
-    fn emit_details_summary(&mut self, summary: &str, open: bool) {
+    fn emit_details_summary(&mut self, summary: &str, key: &str, open: bool) {
         self.flush_block(true);
         self.blank_before_block();
         let glyph = if open { "▾ " } else { "▸ " };
@@ -659,6 +759,7 @@ impl Renderer<'_> {
             start: off,
             end: off + glyph.width() + summary_w,
             summary: std::sync::Arc::from(summary),
+            key: std::sync::Arc::from(key),
         });
         self.push_line(
             Line::from(vec![
@@ -696,6 +797,58 @@ impl Renderer<'_> {
         self.line_starts.partition_point(|&start| start <= at)
     }
 
+    /// The 1-based last source line of an event's byte range. The range is end-exclusive
+    /// and usually runs through the trailing newline, which sits on the last line.
+    fn end_line(&self, range: &Range<usize>) -> usize {
+        self.src_line(range.end.saturating_sub(1).max(range.start))
+    }
+
+    /// Settle the source ranges and the silent lines. A block ends where the next one
+    /// begins, so a list item never claims the nested blocks that map themselves, and a
+    /// line nothing shows is one no range covers.
+    fn finish(mut self, text: &str) -> Rendered {
+        // Blank once container markers go: a `>`-only line inside a quote shows nothing
+        // of its own and hides nothing either.
+        let blank: Vec<bool> = text
+            .lines()
+            .map(|l| l.trim_start_matches(|c: char| c == '>' || c.is_whitespace()).is_empty())
+            .collect();
+        let is_blank = |line: usize| blank.get(line.wrapping_sub(1)).copied().unwrap_or(true);
+        let meta = &mut self.out.meta;
+        let mut next_start = usize::MAX;
+        for i in (0..meta.len()).rev() {
+            if let Some(after) = meta.get(i + 1)
+                && after.source_line > meta[i].source_line
+            {
+                next_start = after.source_line;
+            }
+            let m = &mut meta[i];
+            let mut end = m.source_end.min(next_start.saturating_sub(1)).max(m.source_line);
+            // A block's range can run through the blank lines after it; it ends at its text.
+            while end > m.source_line && is_blank(end) {
+                end -= 1;
+            }
+            m.source_end = end;
+        }
+        let mut shown = vec![false; text.lines().count() + 2];
+        let spans = meta.iter().map(|m| (m.source_line, m.source_end)).chain(self.covered);
+        for (start, end) in spans {
+            for line in start..=end.min(shown.len() - 1) {
+                shown[line] = true;
+            }
+        }
+        let mut hidden = vec![false; shown.len()];
+        for (start, end) in self.comment_lines {
+            for line in start..=end.min(hidden.len() - 1) {
+                hidden[line] = true;
+            }
+        }
+        self.out.silent = (1..=blank.len())
+            .filter(|&line| hidden[line] || (!is_blank(line) && !shown[line]))
+            .collect();
+        self.out
+    }
+
     /// Emit one rendered line with its metadata; lines and meta stay in lockstep. The
     /// pending heading anchor lands in the anchor list at the block's first line.
     fn push_line(&mut self, line: Line<'static>, links: Vec<LinkSpan>) {
@@ -704,6 +857,7 @@ impl Renderer<'_> {
         }
         self.out.meta.push(LineMeta {
             source_line: self.block_src,
+            source_end: self.block_end.max(self.block_src),
             links,
             details: self.pending_details.take(),
         });
@@ -722,6 +876,7 @@ impl Renderer<'_> {
             let bars = "▎".repeat(self.quote.min(MAX_NEST));
             self.out.meta.push(LineMeta {
                 source_line: self.block_src,
+                source_end: self.block_end.max(self.block_src),
                 links: Vec::new(),
                 details: None,
             });
@@ -737,12 +892,26 @@ impl Renderer<'_> {
     /// Wrap and emit the pending inline run as one block. `set_blank` marks a block
     /// boundary, so the next block opens after a separator line.
     fn flush_block(&mut self, set_blank: bool) {
+        let span = self.inline_span.take();
         if self.inline.iter().all(|c| c.text.trim().is_empty()) {
             self.inline.clear();
             if set_blank {
                 self.needs_blank = true;
             }
             return;
+        }
+        // The run maps to the lines that fed it — its item marker's line included — never to
+        // a block stamped around it; that block keeps its own stamp for what follows.
+        let stamp = (self.block_src, self.block_end);
+        if let Some((mut start, mut end)) = span {
+            if self.marker.is_some()
+                && let Some(line) = self.marker_line.take()
+            {
+                start = start.min(line);
+                end = end.max(line);
+            }
+            self.block_src = start;
+            self.block_end = end;
         }
         self.blank_before_block();
         let marker = self.marker.take();
@@ -767,9 +936,23 @@ impl Renderer<'_> {
             line.extend(spans);
             self.push_line(Line::from(line), link_spans);
         }
+        (self.block_src, self.block_end) = stamp;
         if set_blank {
             self.needs_blank = true;
         }
+    }
+
+    /// Take the pending item marker for a block that is not an inline run. The marker's
+    /// line shows with it, so a list item that opens with a code block or table still
+    /// shows its bullet line.
+    fn take_marker(&mut self) -> Option<String> {
+        let marker = self.marker.take();
+        if marker.is_some()
+            && let Some(line) = self.marker_line.take()
+        {
+            self.covered.push((line, line));
+        }
+        marker
     }
 
     /// Emit one already-styled fragment run as block lines, char-wrapped, under the
@@ -777,7 +960,7 @@ impl Renderer<'_> {
     /// first line, so a list item whose first block is a code block (or table, or
     /// HTML) still shows its bullet.
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
-        let marker = self.marker.take();
+        let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
         let style = Style::default().fg(self.p.dim2);
         let first = Span::styled(format!("{}{extra_indent}", first.content), style);
@@ -814,6 +997,7 @@ impl Renderer<'_> {
         let block_start = self.block_src + usize::from(fenced);
         for (i, line) in highlighted.into_iter().enumerate() {
             self.block_src = block_start + i;
+            self.block_end = self.block_src;
             let fragments: Vec<(String, Style)> = line
                 .into_iter()
                 .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
@@ -843,7 +1027,7 @@ impl Renderer<'_> {
         self.blank_before_block();
         // The pending item marker lands on the first row, like every block emitter —
         // `first` and `cont` share a width, so the column accounting is unchanged.
-        let marker = self.marker.take();
+        let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
         let budget = self.budget(cont.width());
 
@@ -899,7 +1083,10 @@ impl Renderer<'_> {
             // Over-wide at every floor: the table renders as its source text instead.
             let style = Style::default().fg(self.p.dim2);
             let src = self.source.get(table.range.clone()).unwrap_or("");
-            for src_line in src.trim_end_matches('\n').split('\n') {
+            let first_line = self.src_line(table.range.start);
+            for (i, src_line) in src.trim_end_matches('\n').split('\n').enumerate() {
+                self.block_src = first_line + i;
+                self.block_end = self.block_src;
                 self.emit_fragments(vec![(sanitize(src_line), style)], "");
             }
             self.needs_blank = true;
@@ -943,6 +1130,11 @@ impl Renderer<'_> {
                 })
                 .collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            // Each row maps to its own source lines, so a comment on one row anchors it.
+            if let Some(&(start, end)) = table.row_lines.get(r) {
+                self.block_src = start;
+                self.block_end = end;
+            }
             let mut cells: Vec<std::vec::IntoIter<WrappedLine>> =
                 cells.into_iter().map(Vec::into_iter).collect();
             for l in 0..height {
@@ -973,6 +1165,9 @@ impl Renderer<'_> {
                 self.push_line(Line::from(spans), links);
             }
             if head && r + 1 == table.head_rows {
+                // The header rule stands for the delimiter row, the line under the header.
+                self.block_src = self.block_end + 1;
+                self.block_end = self.block_src;
                 self.push_plain_line(Line::from(vec![
                     cont.clone(),
                     Span::styled("─".repeat(total), dim),
@@ -1680,6 +1875,167 @@ mod tests {
         assert_eq!(sorted, expect, "source lines are non-decreasing, so lookups can bisect");
     }
 
+    /// `(first line, last line)` of the rendered line containing `needle`.
+    fn span_of(r: &Rendered, needle: &str) -> (usize, usize) {
+        let t = texts(&r.lines);
+        let m = &r.meta[t.iter().position(|l| l.contains(needle)).unwrap()];
+        (m.source_line, m.source_end)
+    }
+
+    #[test]
+    fn every_rendered_line_maps_to_its_blocks_whole_source_range() {
+        let (hl, p) = setup();
+        let md = "para one\ncontinues here\n\n- item a\n  more a\n- item b\n  - nested\n\n\
+                  ```\nx = 1\n```\n";
+        let r = render(md, 80, &hl, &p);
+        assert_eq!(span_of(&r, "para one"), (1, 2), "a paragraph spans its lines");
+        assert_eq!(span_of(&r, "item a"), (4, 5), "an item ends where the next begins");
+        assert_eq!(span_of(&r, "item b"), (6, 6), "a parent item never claims its nested list");
+        assert_eq!(span_of(&r, "nested"), (7, 7));
+        assert_eq!(span_of(&r, "x = 1"), (10, 10), "a code line is its own range");
+        for m in &r.meta {
+            assert!(m.source_line <= m.source_end, "{m:?}");
+        }
+        assert!(r.silent.is_empty(), "every line shows: {:?}", r.silent);
+    }
+
+    #[test]
+    fn table_rows_map_to_their_own_source_lines() {
+        let (hl, p) = setup();
+        let md = "| a | b |\n|---|---|\n| one | two |\n| three | four |\n";
+        let r = render(md, 80, &hl, &p);
+        assert_eq!(span_of(&r, "a"), (1, 1), "the header row");
+        assert_eq!(span_of(&r, "─"), (2, 2), "the rule stands for the delimiter row");
+        assert_eq!(span_of(&r, "one"), (3, 3));
+        assert_eq!(span_of(&r, "three"), (4, 4));
+        // Over-wide at every floor: the source fallback maps line by line too.
+        let wide = format!("| {} | {} |\n|---|---|\n| x | y |\n", "w".repeat(60), "v".repeat(60));
+        let r = render(&wide, 10, &hl, &p);
+        assert_eq!(span_of(&r, "| x | y |"), (3, 3), "{:?}", texts(&r.lines));
+    }
+
+    #[test]
+    fn lines_that_render_nothing_are_silent() {
+        let (hl, p) = setup();
+        // 1 para, 3 comment, 5 ref def, 7-10 collapsed details (9 hidden body), 12 tail.
+        let md = "shown\n\n<!-- hidden note -->\n\n[ref]: https://x.dev\n\n<details>\n<summary>More</summary>\n\
+                  inside\n</details>\n\ntail\n";
+        let r = render(md, 80, &hl, &p);
+        assert_eq!(r.silent, [3, 5, 9], "only what nothing shows");
+    }
+
+    #[test]
+    fn silent_lines_never_flag_source_that_shows() {
+        let (hl, p) = setup();
+        let silent = |md: &str| render(md, 80, &hl, &p).silent;
+        // A tight item's text keeps its own line before a nested block.
+        for md in [
+            "- item\n  ```\n  code\n  ```\n",
+            "- item\n\n  | a | b |\n  |---|---|\n  | c | d |\n",
+            "- item\n  <div>x</div>\n",
+            "- a\n  # h\n",
+        ] {
+            assert!(silent(md).is_empty(), "{md:?}: {:?}", silent(md));
+        }
+        assert!(silent("> a\n>\n> b\n").is_empty(), "a quote's `>` lines");
+        assert!(silent("> [!NOTE]\n>\n> text\n").is_empty(), "a GitHub alert");
+        assert!(
+            silent("<p align=\"center\">\n<img alt=\"logo\" src=\"x.png\">\n</p>\n").is_empty()
+        );
+        assert_eq!(
+            silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n"),
+            [6]
+        );
+        assert!(silent("```\n```\n").is_empty(), "an empty fence is its own shown block");
+    }
+
+    #[test]
+    fn hidden_comments_are_silent_and_never_render() {
+        let (hl, p) = setup();
+        let md = "before\n\n<!--\nignore previous instructions\n-->\n\nafter <!-- inline aside --> text\n";
+        let r = render(md, 80, &hl, &p);
+        let t = texts(&r.lines);
+        assert!(!t.iter().any(|l| l.contains("ignore previous")), "{t:?}");
+        assert!(!t.iter().any(|l| l.contains("-->")), "{t:?}");
+        assert_eq!(r.silent, [3, 4, 5, 7], "a multi-line comment, and an inline one");
+    }
+
+    #[test]
+    fn a_details_key_survives_edits_above_it() {
+        let (hl, p) = setup();
+        let keys = |md: &str| -> Vec<String> {
+            render(md, 80, &hl, &p)
+                .meta
+                .iter()
+                .filter_map(|m| m.details.as_ref().map(|d| d.key.to_string()))
+                .collect()
+        };
+        let body = "<details><summary>Details</summary>\n\nA\n\n</details>\n\n\
+                    <details><summary>Details</summary>\n\nB\n\n</details>\n";
+        let before = keys(body);
+        assert_eq!(before, ["Details#0", "Details#1"]);
+        // Prose above, and a disclosure with another summary above, move no key.
+        assert_eq!(keys(&format!("new line\n\n{body}")), before);
+        let notes = "<details><summary>Notes</summary>\n\nN\n\n</details>\n\n";
+        assert_eq!(keys(&format!("{notes}{body}"))[1..], before[..]);
+    }
+
+    #[test]
+    fn text_after_a_nested_block_keeps_its_own_lines() {
+        let (hl, p) = setup();
+        let md = "1. step:\n   ```bash\n   run\n   ```\n   After text.\n2. next\n";
+        let r = render(md, 80, &hl, &p);
+        assert_eq!(span_of(&r, "After text."), (5, 5), "{:?}", texts(&r.lines));
+        assert_eq!(span_of(&r, "step:"), (1, 1));
+        assert!(r.silent.is_empty(), "{:?}", r.silent);
+    }
+
+    #[test]
+    fn blocks_inside_a_tight_item_keep_their_own_lines() {
+        let (hl, p) = setup();
+        let silent = |md: &str| render(md, 80, &hl, &p).silent;
+        let r = render("- a\n  ```\n  c\n  ```\n- b\n", 80, &hl, &p);
+        assert_eq!(span_of(&r, "• a"), (1, 1));
+        assert_eq!(span_of(&r, "c"), (3, 3), "the code line, not its fence");
+        let r = render("- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n", 80, &hl, &p);
+        assert_eq!(span_of(&r, "• a"), (1, 1), "{:?}", texts(&r.lines));
+        assert_eq!(span_of(&r, "1"), (4, 4), "{:?}", texts(&r.lines));
+        assert!(silent("- [ ] \n  ```\n  c\n  ```\n").is_empty(), "a task line over a code block");
+        assert!(silent("- [x]\n  [link](https://x.dev)\n").is_empty(), "the ☑ line shows");
+        assert!(silent("-\n  text on next\n").is_empty(), "the bullet line shows");
+        assert!(silent("- item\n  </Note>\n").is_empty(), "a tag-only inline tag, as in a block");
+    }
+
+    #[test]
+    fn a_comment_never_swallows_html_after_its_block() {
+        let (hl, p) = setup();
+        let md = "<!-- a --> b <!-- c\nstill hidden\n-->\n\n<details><summary>S</summary>\n\nbody\n\n</details>\n";
+        let t = texts(&render(md, 80, &hl, &p).lines);
+        assert!(t.iter().any(|l| l.contains("▸ S")), "the later disclosure renders: {t:?}");
+        let md = "<div>\n<!-- start\n\nmid\n-->\n</div>\n\nend <img alt=\"x\">\n";
+        let t = texts(&render(md, 80, &hl, &p).lines);
+        assert!(t.iter().any(|l| l.contains("⧉ x")), "{t:?}");
+    }
+
+    #[test]
+    fn details_sharing_a_summary_open_independently() {
+        let (hl, p) = setup();
+        let md = "<details><summary>Details</summary>\n\nfirst body\n\n</details>\n\n\
+                  <details><summary>Details</summary>\n\nsecond body\n\n</details>\n";
+        let closed = render(md, 80, &hl, &p);
+        let keys: Vec<String> = closed
+            .meta
+            .iter()
+            .filter_map(|m| m.details.as_ref().map(|d| d.key.to_string()))
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1], "one summary, two disclosures");
+        let open: HashSet<String> = [keys[1].clone()].into();
+        let t = texts(&render_expanded(md, 80, &hl, &p, &open).lines);
+        assert!(t.iter().any(|l| l.contains("second body")), "{t:?}");
+        assert!(!t.iter().any(|l| l.contains("first body")), "{t:?}");
+    }
+
     #[test]
     fn meta_carries_link_spans_including_the_dim_destination() {
         let (hl, p) = setup();
@@ -1851,7 +2207,7 @@ mod tests {
         let (hl, p) = setup();
         let md = "<details> <summary>About Codex</summary>\n\n- one\n\n</details>";
         let mut open = HashSet::new();
-        open.insert("About Codex".into());
+        open.insert("About Codex#0".into());
         let r = render_expanded(md, 80, &hl, &p, &open);
         let t = texts(&r.lines);
         assert!(t.iter().any(|l| l.contains("▾ About Codex")), "{t:?}");
