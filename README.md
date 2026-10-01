@@ -500,6 +500,12 @@ named-key notation for keybindings, OSC light/dark theme autodetect, more themes
 (`kanagawa`, `vesper`, `everforest`, `ayu`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 
+## Sponsors
+
+reviewr is built and maintained by one person. If it saves you review time, you can
+[sponsor its development](https://github.com/sponsors/persiyanov). Company sponsors get their
+logo here.
+
 ## License
 
 [MIT](LICENSE). Syntax highlighting comes from [syntect](https://github.com/trishume/syntect)
