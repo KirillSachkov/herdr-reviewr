@@ -116,16 +116,6 @@ struct TabStash {
     visited: bool,
 }
 
-/// A picked comment ([`App::comment_target`]): its store index and the anchor it had when
-/// picked — a store change can shift indices, so the anchor must still match. Keyed on the
-/// comment alone, never on a row: a poll that moves the rows keeps the pick, and the
-/// reviewer's own cursor moves drop it ([`App::drop_pick_on_move`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CommentTarget {
-    index: usize,
-    anchor: (String, Side, u32, u32),
-}
-
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
 /// direction it crosses in, and the file it resolved to open. Holding the file spares the second
 /// press the walk the first one already paid for.
@@ -766,12 +756,12 @@ pub struct App {
     pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
-    /// The comment a card step or a card click picked, so `e`/`d` reach it where several
-    /// comments cover the cursor's row. It holds only while the cursor rests where it put it.
-    comment_target: Option<CommentTarget>,
-    /// How many picks the session has made: a reviewer's input that moved the cursor without
-    /// raising it moved off the pick.
-    pick_seq: u64,
+    /// The comment a card step or a card click picked — which of the comments under the
+    /// cursor the reviewer chose, by its store id — so `e`/`d` reach it where several cover
+    /// the cursor's row. Live while the store holds it and it covers the cursor's row
+    /// ([`Self::live_target`]); the reviewer's input that leaves it not live clears it
+    /// ([`Self::settle_pick`]), and a poll never does.
+    comment_target: Option<u64>,
     /// The one live mouse gesture — born at mouse-down, ended on release or an interrupting event.
     pub gesture: crate::selection::Gesture,
     /// The settled selection: the last copy's span and its copied text, kept highlighted as
@@ -978,7 +968,6 @@ impl App {
             view_reload_held: false,
             select_anchor: None,
             comment_target: None,
-            pick_seq: 0,
             store: CommentStore::new(),
             list_cursor: 0,
             picker_rows: Vec::new(),
@@ -1821,14 +1810,16 @@ impl App {
             (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
         });
         let mut rows = Vec::with_capacity(doc.lines.len());
-        // A line's wrap: its index among its block's lines starting on the same source line.
-        let mut prev: Option<(usize, usize, u32)> = None;
+        // A content line's wrap: how many of its block's content lines start on the same
+        // source line before it. A gap carries none: a block gains or loses its gap with the
+        // blocks around it, never its own lines' wraps.
+        let mut seen: HashMap<(usize, usize), u32> = HashMap::new();
         for (i, (line, meta)) in doc.lines.iter().zip(&doc.meta).enumerate() {
-            let wrap = match prev {
-                Some((src, first, n)) if (src, first) == (meta.source_line, meta.lines.0) => n + 1,
-                _ => 0,
-            };
-            prev = Some((meta.source_line, meta.lines.0, wrap));
+            let wrap = (!meta.gap).then(|| {
+                let n = seen.entry((meta.source_line, meta.lines.0)).or_insert(0);
+                *n += 1;
+                *n - 1
+            });
             let source = (meta.lines.0 as u32, meta.lines.1 as u32);
             rows.push(Row::Rendered {
                 src: meta.source_line as u32,
@@ -1846,7 +1837,7 @@ impl App {
             MarkMap::default()
         };
         mark_rendered(&mut rows, &doc, &marks, &input.details);
-        self.rendered.index = RenderedIndex::build(&rows, &doc.meta);
+        self.rendered.index = RenderedIndex::build(&rows);
         self.rendered.marks = marks;
         self.rendered.doc = doc;
         self.rendered.built = Some(Built { input, empty: false });
@@ -3013,7 +3004,6 @@ impl App {
                         target = self.fold_clamped(a, target);
                     }
                     self.diff_cursor = target;
-                    self.comment_target = None;
                     self.reveal_diff = true;
                 }
             }
@@ -4251,36 +4241,21 @@ impl App {
 
     /// Pick comment `index` at the cursor's row: the card a step landed on, or a clicked card.
     pub fn target_comment_card(&mut self, index: usize) {
-        self.pick_seq += 1;
-        self.comment_target = self
-            .store
-            .get(index)
-            .map(|c| CommentTarget { index, anchor: (c.file.clone(), c.side, c.start, c.end) });
+        self.comment_target = self.store.id(index);
     }
 
-    /// The picked comment's store index, while the store still holds that comment and its
-    /// covered rows (`rows`, [`Self::comment_rows`]) include the cursor's row.
+    /// The picked comment's store index, while the store still holds it and its covered rows
+    /// (`rows`, [`Self::comment_rows`]) include the cursor's row.
     fn live_target(&self, rows: &[(usize, Vec<usize>)]) -> Option<usize> {
-        let t = self.comment_target.as_ref()?;
-        let c = self.store.get(t.index)?;
-        if t.anchor != (c.file.clone(), c.side, c.start, c.end) {
-            return None;
-        }
-        let covers = rows.iter().any(|(ci, r)| *ci == t.index && r.contains(&self.diff_cursor));
-        covers.then_some(t.index)
+        let index = self.store.index_of(self.comment_target?)?;
+        let covers = rows.iter().any(|(ci, r)| *ci == index && r.contains(&self.diff_cursor));
+        covers.then_some(index)
     }
 
-    /// The pick's generation and the cursor, before a reviewer's input, for
-    /// [`Self::drop_pick_on_move`].
-    #[must_use]
-    pub fn pick_place(&self) -> (u64, usize) {
-        (self.pick_seq, self.diff_cursor)
-    }
-
-    /// Drop the pick when the reviewer's own input moved the cursor without picking anew: the
-    /// event loop calls this after each key and mouse event with the place it had before.
-    pub fn drop_pick_on_move(&mut self, (seq, cursor): (u64, usize)) {
-        if self.diff_cursor != cursor && self.pick_seq == seq {
+    /// Clear the pick once it is no longer live: after each of the reviewer's inputs, so a
+    /// move off the comment's rows and back never revives it. Polls never call it.
+    pub fn settle_pick(&mut self) {
+        if self.comment_target.is_some() && self.live_target(&self.comment_rows()).is_none() {
             self.comment_target = None;
         }
     }
@@ -5500,7 +5475,7 @@ fn mark_rendered(
     if marks.blocks.is_empty() && marks.markers.is_empty() {
         return;
     }
-    let index = RenderedIndex::build(rows, &doc.meta);
+    let index = RenderedIndex::build(rows);
     let collapsed = |line: u32| {
         doc.meta
             .get(line as usize)

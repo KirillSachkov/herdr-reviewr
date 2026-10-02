@@ -151,10 +151,14 @@ impl Comment {
     }
 }
 
-/// The in-memory comment list for one worktree review session.
+/// The in-memory comment list for one worktree review session. Every comment gets an id on
+/// add — monotonic, never reused, kept through an edit — so a reference to one never lands
+/// on another after the list shifts.
 #[derive(Default, Debug)]
 pub struct CommentStore {
     items: Vec<Comment>,
+    ids: Vec<u64>,
+    next_id: u64,
 }
 
 impl CommentStore {
@@ -181,7 +185,19 @@ impl CommentStore {
     /// Append a comment; returns its index.
     pub fn add(&mut self, comment: Comment) -> usize {
         self.items.push(comment);
+        self.ids.push(self.next_id);
+        self.next_id += 1;
         self.items.len() - 1
+    }
+
+    /// The id of the comment at `index`.
+    pub fn id(&self, index: usize) -> Option<u64> {
+        self.ids.get(index).copied()
+    }
+
+    /// The index of the comment with id `id`, while the store holds it.
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.ids.iter().position(|&i| i == id)
     }
 
     /// Replace the text of the comment at `index`. Returns `false` if out of range.
@@ -196,11 +212,17 @@ impl CommentStore {
 
     /// Remove and return the comment at `index` (delete, or consume one on export).
     pub fn take(&mut self, index: usize) -> Option<Comment> {
-        if index < self.items.len() { Some(self.items.remove(index)) } else { None }
+        if index < self.items.len() {
+            self.ids.remove(index);
+            Some(self.items.remove(index))
+        } else {
+            None
+        }
     }
 
     /// Remove and return every comment (consume-all on a successful export).
     pub fn take_all(&mut self) -> Vec<Comment> {
+        self.ids.clear();
         std::mem::take(&mut self.items)
     }
 }
@@ -275,5 +297,21 @@ mod tests {
         assert_eq!(rest.len(), 1);
         assert!(s.is_empty());
         assert!(s.take(0).is_none());
+    }
+
+    #[test]
+    fn ids_are_never_reused_and_survive_an_edit() {
+        let mut s = CommentStore::new();
+        s.add(comment("a.rs", 1, 1, "one"));
+        let two = s.add(comment("a.rs", 2, 2, "two"));
+        let id = s.id(two).unwrap();
+        s.take(0);
+        assert_eq!(s.index_of(id), Some(0), "the list shifted, the id followed");
+        s.edit(0, "edited".into());
+        assert_eq!(s.id(0), Some(id));
+        s.take_all();
+        let three = s.add(comment("a.rs", 3, 3, "three"));
+        assert_ne!(s.id(three), Some(id), "a fresh comment never takes an old id");
+        assert_eq!(s.index_of(id), None);
     }
 }

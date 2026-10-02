@@ -418,7 +418,7 @@ impl Renderer<'_> {
             }
             Event::Code(t) if self.emitting() && !self.collecting_summary() => {
                 let style = self.current_style().fg(self.p.orange);
-                self.push_text(&t, style);
+                self.push_code_span(&t, &range, style);
             }
             Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
             Event::SoftBreak if self.emitting() => self.push_text(" ", self.current_style()),
@@ -598,8 +598,41 @@ impl Renderer<'_> {
                 None => (start, end),
             });
         }
-        let source = self.event_lines.0;
+        // A run reads forward through its source: text emitted at an inline's end — a link's
+        // url, an image's — never goes back to an earlier line than the text before it.
+        let after = self.chunks_mut().last().map_or(0, |c| c.line);
+        let source = self.event_lines.0.max(after);
         self.chunks_mut().push(Chunk { text, style, link, line: source });
+    }
+
+    /// Push an inline code span's text, each piece on the source line it came from: a span
+    /// crossing a line break reads as one run with a space where the break was.
+    fn push_code_span(&mut self, text: &str, range: &Range<usize>, style: Style) {
+        let raw = self.source.get(range.clone()).unwrap_or_default();
+        let inner = raw.trim_matches('`');
+        let pieces: Vec<&str> = inner.split('\n').collect();
+        if pieces.len() < 2 {
+            self.push_text(text, style);
+            return;
+        }
+        let first = self.event_lines.0;
+        let chars: Vec<char> = text.chars().collect();
+        let mut at = 0;
+        for (i, piece) in pieces.iter().enumerate() {
+            let piece = if i == 0 { piece.trim_end() } else { piece.trim() };
+            let end = if i + 1 == pieces.len() {
+                chars.len()
+            } else {
+                (at + piece.trim_start_matches(' ').chars().count().max(1)).min(chars.len())
+            };
+            let part: String = chars[at.min(chars.len())..end].iter().collect();
+            self.event_lines.0 = first + i;
+            if !part.is_empty() {
+                self.push_text(&part, style);
+            }
+            at = end;
+        }
+        self.event_lines.0 = first;
     }
 
     /// The innermost open link's url index, stamped onto every chunk inside it.
@@ -2028,6 +2061,28 @@ mod tests {
             assert!(m.source_line <= m.source_end, "{m:?}");
         }
         assert!(r.silent.is_empty(), "every line shows: {:?}", r.silent);
+    }
+
+    #[test]
+    fn a_lines_own_source_lines_run_forward_through_links_and_code_spans() {
+        let (hl, p) = setup();
+        // A link and a code span each crossing a line break: the url shows after the text of
+        // line 2, and each piece of the code span keeps its own line.
+        let md = "aaa [link text\nmore words](http://example.com/a/b/c) end of\n\n\
+                  x `code one\ncode two` y\n";
+        for width in [16, 17, 80] {
+            let r = render(md, width, &hl, &p);
+            for (line, m) in r.lines.iter().zip(&r.meta) {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert!(m.lines.0 <= m.lines.1, "{text:?} at {width}: {:?}", m.lines);
+            }
+        }
+        let r = render(md, 16, &hl, &p);
+        let t = texts(&r.lines);
+        let at = |needle: &str| r.meta[t.iter().position(|l| l.contains(needle)).unwrap()].lines;
+        assert_eq!(at("://example.com/a"), (2, 2), "the url follows line 2's text: {t:?}");
+        assert_eq!(at("x code one code"), (4, 5), "`code` and `one` from line 4: {t:?}");
+        assert_eq!(at("two y"), (5, 5), "{t:?}");
     }
 
     #[test]

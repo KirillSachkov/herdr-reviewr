@@ -59,11 +59,12 @@ pub enum Row {
 /// What a rendered row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderedKind {
-    /// A block's line: the source lines its own text comes from (first, last) and its index
-    /// among the block's lines starting on that first line — together its identity across a
-    /// rebuild; the styled line it paints; its change bar in the `Changes` tab; and, on a
-    /// collapsed `<details>` summary, how many changed lines its body hides.
-    Block { source: (u32, u32), wrap: u32, line: u32, bar: Option<Bar>, hides: Option<u32> },
+    /// A block's line: the source lines its own text comes from (first, last) and its wrap —
+    /// how many of the block's content lines start on that first line before it, `None` for
+    /// the blank gap set above the block — together its identity across a rebuild; the
+    /// styled line it paints; its change bar in the `Changes` tab; and, on a collapsed
+    /// `<details>` summary, how many changed lines its body hides.
+    Block { source: (u32, u32), wrap: Option<u32>, line: u32, bar: Option<Bar>, hides: Option<u32> },
     /// A marker row standing for `lines` changed source lines no block shows. `gone` when
     /// they are on the old side only: a block deleted whole.
     Marker { kind: MarkerKind, lines: u32, gone: bool },

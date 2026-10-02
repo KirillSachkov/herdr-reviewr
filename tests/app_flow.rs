@@ -4279,7 +4279,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     app.diff_cursor = 4; // "## Section two" (source line 5)
     app.toggle_rendered();
     assert!(app.rendered_active());
-    assert_eq!(block_of(&app), (5, 5, 1), "rendered lands on the heading's text row");
+    assert_eq!(block_of(&app), (5, 5, Some(0)), "rendered lands on the heading's text row");
     assert_eq!(app.visible[app.diff_cursor].text(), "Section two");
 
     // A blank source line between blocks paints as the gap above the next block.
@@ -4470,7 +4470,10 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
         .visible
         .iter()
         .position(|row| {
-            matches!(row, Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: 1, .. }, .. })
+            matches!(
+                row,
+                Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: Some(1), .. }, .. }
+            )
         })
         .expect("the paragraph wraps at 60 columns");
     app.diff_scroll = app.diff_cursor - 1;
@@ -4478,18 +4481,18 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     // A poll that rewrites the text above the cursor keeps it on the same line.
     r.write("doc.md", &doc("intro line, now rewritten at length to change its own wrapping"));
     app.reload().unwrap();
-    assert_eq!(id(&app), (12, 1), "a poll edit above keeps the cursor's line");
+    assert_eq!(id(&app), (12, Some(1)), "a poll edit above keeps the cursor's line");
     assert!(matches!(
         app.visible[app.diff_scroll],
-        Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: 0, .. }, .. }
+        Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: Some(0), .. }, .. }
     ));
 
-    // A narrower pane rewraps; the line holds. A wide one folds the paragraph to one line,
-    // so the cursor takes the block's nearest surviving line.
+    // A narrower pane rewraps; the line holds. A wide one folds the paragraph to one row, so
+    // the wrap clamps to the line's last row.
     app.sync_rendered_width(40);
-    assert_eq!(id(&app), (12, 1), "a resize keeps the cursor's line");
+    assert_eq!(id(&app), (12, Some(1)), "a resize keeps the cursor's line");
     app.sync_rendered_width(400);
-    assert_eq!(id(&app), (12, 0), "a vanished line falls back to its block");
+    assert_eq!(id(&app), (12, Some(0)), "a vanished wrap clamps to its line");
 
     // A modal freezes the view under it: a resize waits for its close, then lands.
     let frozen = app.visible.clone();
@@ -4500,14 +4503,14 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     app.sync_rendered_width(40);
     assert_ne!(app.visible, frozen, "the held resize lands once the modal closes");
     app.sync_rendered_width(400);
-    assert_eq!(id(&app), (12, 0));
+    assert_eq!(id(&app), (12, Some(0)));
 
     // Opening the `<details>` above adds rows; the cursor stays on its line.
     let rows = app.visible.len();
     app.toggle_details("More#0");
     assert!(app.visible.len() > rows, "the opened body adds rows");
     assert!(app.visible.iter().any(|row| row.text().contains("hidden body")));
-    assert_eq!(id(&app), (12, 0), "a details toggle keeps the cursor's line");
+    assert_eq!(id(&app), (12, Some(0)), "a details toggle keeps the cursor's line");
 }
 
 // --- world completions ---------------------------------------------------------
@@ -9101,10 +9104,15 @@ fn a_picked_comment_stays_picked_across_a_poll_that_moves_its_row() {
         app.start_edit();
         assert_eq!(app.input, "second");
         app.cancel_comment();
-        // The reviewer's own move off the row and back drops the pick.
+        // The reviewer's own move off the comment's rows and back drops the pick.
         let keymap = Keymap::default();
-        press(&mut app, &keymap, KeyCode::Up);
-        press(&mut app, &keymap, KeyCode::Down);
+        let back = app.diff_cursor;
+        while app.comment_marks().1.contains(&app.diff_cursor) {
+            press(&mut app, &keymap, KeyCode::Up);
+        }
+        while app.diff_cursor < back {
+            press(&mut app, &keymap, KeyCode::Down);
+        }
         app.start_edit();
         assert_eq!(app.input, "first", "a move of the reviewer's own drops the pick");
         app.cancel_comment();
@@ -9120,5 +9128,161 @@ fn a_picked_comment_stays_picked_across_a_poll_that_moves_its_row() {
         app.cancel_comment();
         app.delete_comment();
         assert_eq!(app.store.get(0).map(|c| c.text.as_str()), Some("first"), "{rewrite:?}");
+    }
+}
+
+/// Two comments, "first" then "second", over the same rows — rendered: a paragraph wrapping to
+/// four rows at width 60; source: a two-line range — with the cursor at the top.
+fn two_comments_app(rendered: bool) -> (Repo, App) {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    let para = "word ".repeat(44);
+    r.write("doc.md", &format!("# A\n\n{para}\n"));
+    r.write("a.rs", "one\ntwo\nthree\nfour\n");
+    r.write("z.rs", "z\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    let path = if rendered { "doc.md" } else { "a.rs" };
+    app.select_file(file_row(&app, path)).unwrap();
+    app.focus = Focus::Diff;
+    app.sync_rendered_width(60);
+    for text in ["first", "second"] {
+        if rendered {
+            let lead = rendered_row(&app, "word");
+            assert_eq!(
+                app.visible.iter().filter(|r| r.text().starts_with("word")).count(),
+                4,
+                "the paragraph wraps to four rows"
+            );
+            app.diff_cursor = lead;
+        } else {
+            app.diff_cursor = 1;
+            app.toggle_select();
+            app.diff_cursor = 2;
+        }
+        app.start_comment();
+        write_comment(&mut app, text);
+    }
+    app.diff_cursor = 0;
+    (r, app)
+}
+
+/// The comment `e` opens, cancelled again.
+fn edit_target_text(app: &mut App, keymap: &Keymap) -> String {
+    press(app, keymap, KeyCode::Char('e'));
+    let text = app.input.clone();
+    press(app, keymap, KeyCode::Esc);
+    text
+}
+
+#[test]
+fn a_pick_is_the_comment_chosen_under_the_cursor() {
+    let keymap = Keymap::default();
+    for rendered in [true, false] {
+        let n = |app: &mut App| {
+            press(app, &keymap, KeyCode::Char('n'));
+            press(app, &keymap, KeyCode::Char('n'));
+        };
+
+        // (a) `e` moves the cursor to the card's row, inside the comment: `d` still deletes
+        // the pick.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        assert_eq!(edit_target_text(&mut app, &keymap), "second", "rendered {rendered}");
+        press(&mut app, &keymap, KeyCode::Char('d'));
+        let left: Vec<_> = app.store.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(left, ["first"], "rendered {rendered}");
+
+        // (b) A flip keeps the pick: the comment still covers the cursor's row.
+        if rendered {
+            let (_r, mut app) = two_comments_app(rendered);
+            n(&mut app);
+            press(&mut app, &keymap, KeyCode::Char('m'));
+            assert!(!app.rendered_active());
+            assert_eq!(edit_target_text(&mut app, &keymap), "second");
+        }
+
+        // (c) An export empties the store: new comments on the same rows never inherit the
+        // pick through a recycled index.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        let cursor = app.diff_cursor;
+        assert!(app.export(&FakeTarget::ok()));
+        for text in ["third", "fourth"] {
+            app.diff_cursor = cursor;
+            app.start_comment();
+            write_comment(&mut app, text);
+        }
+        app.diff_cursor = cursor;
+        assert_eq!(edit_target_text(&mut app, &keymap), "third", "rendered {rendered}");
+
+        // (d) Away to another file and back: the cursor reopens at the top, off the
+        // comment, so the pick is gone and `e` there opens nothing.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        press(&mut app, &keymap, KeyCode::Char('f'));
+        press(&mut app, &keymap, KeyCode::Char('F'));
+        assert_eq!(app.diff_cursor, 0);
+        // Back onto the comments' rows by hand: the normal rule picks the first.
+        let row = app.card_rows()[0].0;
+        app.diff_cursor = row;
+        assert_eq!(edit_target_text(&mut app, &keymap), "first", "rendered {rendered}");
+    }
+}
+
+#[test]
+fn the_rendered_cursor_keeps_its_source_line_and_wrap() {
+    use herdr_reviewr::app::Tab;
+    let para = "word ".repeat(30);
+    let link = "aaa [link text\nmore words](http://example.com/a/b/c) end of\n\nlater\n";
+    // (before, cursor row, poll rewrite, cursor row after, width, then width, row after it)
+    let cases: Vec<(String, &str, String, &str, usize, usize, &str)> = vec![
+        // A block appears above a wrapped first paragraph: it gains a gap row, its rows keep
+        // their wraps.
+        (format!("{para}\n"), "2nd", format!("# T\n\n{para}\n"), "2nd", 60, 60, "2nd"),
+        // And the block above goes again.
+        (format!("# T\n\n{para}\n"), "2nd", format!("{para}\n"), "2nd", 60, 60, "2nd"),
+        // A link's url wrapped on line 2's rows: a poll below keeps the row, a resize keeps
+        // its line and wrap.
+        (
+            link.to_string(),
+            "://example.com/a",
+            link.replace("later", "later edited"),
+            "://example.com/a",
+            16,
+            17,
+            "//example.com/a/b",
+        ),
+    ];
+    for (before, at, rewrite, after, width, then, resized) in cases {
+        let r = Repo::init();
+        r.write("doc.md", &before);
+        r.commit_all("init");
+        let mut app = app_on(&r);
+        enter_tab(&mut app, Tab::AllFiles);
+        app.focus = Focus::Diff;
+        app.sync_rendered_width(width);
+        // `2nd` names the paragraph's second row.
+        let row = |app: &App, at: &str| {
+            if at == "2nd" {
+                app.visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.text().starts_with("word"))
+                    .nth(1)
+                    .unwrap()
+                    .0
+            } else {
+                rendered_row(app, at)
+            }
+        };
+        app.diff_cursor = row(&app, at);
+        r.write("doc.md", &rewrite);
+        app.reload().unwrap();
+        assert_eq!(app.diff_cursor, row(&app, after), "{before:?} → {rewrite:?}");
+        app.sync_rendered_width(then);
+        assert_eq!(app.diff_cursor, row(&app, resized), "{rewrite:?} at {then}");
     }
 }

@@ -115,13 +115,13 @@ pub(crate) struct RenderedInput {
 }
 
 /// A rendered row's identity across rebuilds, by source: its unit, the source line its own
-/// text starts on, and its wrap — its index among its block's rows starting on that line. A
-/// marker row's line is its own.
+/// text starts on, and its wrap — how many of its block's content rows start on that line
+/// before it; `None` for a block's gap row. A marker row's line is its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
     pub unit: Unit,
     pub line: u32,
-    pub wrap: u32,
+    pub wrap: Option<u32>,
 }
 
 impl RowId {
@@ -132,7 +132,7 @@ impl RowId {
             Row::Rendered { kind: RenderedKind::Block { source, wrap, .. }, .. } => {
                 (source.0, *wrap)
             }
-            _ => (unit.src(), 0),
+            _ => (unit.src(), Some(0)),
         };
         Some(RowId { unit, line, wrap })
     }
@@ -181,8 +181,9 @@ pub(crate) struct RenderedIndex {
     blocks: Vec<usize>,
     block_ranges: Vec<(u32, u32)>,
     /// Per row: the source lines its own text comes from ([`RenderedKind::Block`]'s `source`;
-    /// a marker's own line).
+    /// a marker's own line), and whether it is a block's gap.
     row_source: Vec<(u32, u32)>,
+    gap: Vec<bool>,
     /// The units a new-side line can sit in — blocks, and markers over new lines — and their
     /// ranges: where a new-side comment shows.
     new_side: Vec<usize>,
@@ -190,15 +191,9 @@ pub(crate) struct RenderedIndex {
 }
 
 impl RenderedIndex {
-    /// The index over `rows`, whose block lines' styled-line metadata `meta` holds: a unit's
-    /// lead is its first row that is no gap ([`crate::markdown::LineMeta::gap`]).
-    pub(crate) fn build(rows: &[Row], meta: &[crate::markdown::LineMeta]) -> Self {
-        let gap = |row: &Row| match row {
-            Row::Rendered { kind: RenderedKind::Block { line, .. }, .. } => {
-                meta.get(*line as usize).is_some_and(|m| m.gap)
-            }
-            _ => false,
-        };
+    /// The index over `rows`: a unit's lead is its first row that is no gap (a block row with
+    /// no wrap).
+    pub(crate) fn build(rows: &[Row]) -> Self {
         let row_source = rows
             .iter()
             .map(|r| match r {
@@ -207,7 +202,13 @@ impl RenderedIndex {
                 _ => (0, 0),
             })
             .collect();
-        let mut index = Self { row_source, ..Self::default() };
+        let gap: Vec<bool> = rows
+            .iter()
+            .map(|r| {
+                matches!(r, Row::Rendered { kind: RenderedKind::Block { wrap: None, .. }, .. })
+            })
+            .collect();
+        let mut index = Self { row_source, gap: gap.clone(), ..Self::default() };
         let mut start = 0;
         while start < rows.len() {
             let (Some(unit), Row::Rendered { src, src_end, kind, .. }) =
@@ -217,7 +218,7 @@ impl RenderedIndex {
                 continue;
             };
             let end = start + rows[start..].iter().take_while(|r| unit_of(r) == Some(unit)).count();
-            let lead = start + rows[start..end].iter().position(|r| !gap(r)).unwrap_or(0);
+            let lead = start + (start..end).position(|k| !gap[k]).unwrap_or(0);
             let k = index.units.len();
             match kind {
                 RenderedKind::Block { .. } => {
@@ -294,10 +295,11 @@ impl RenderedIndex {
     }
 
     /// The row `id` reconciles onto (Continuity), by source: a marker its own row while it
-    /// stands; a block's line the row starting on the same source line in the block that
-    /// holds it, at the same wrap clamped to that line's rows, else the first row showing that
-    /// line — however the rows around it rewrap. Else the lead row of the block the line
-    /// lands on. `None` only over no rows.
+    /// stands; a block's content line the content row starting on the same source line in the
+    /// block that holds it, at the same wrap clamped to that line's rows, else the first row
+    /// showing that line — however the rows around it rewrap, and whether or not the block
+    /// gained or lost its gap. A gap row the first row of the block its line lands on, and any
+    /// line no row shows that block's lead. `None` only over no rows.
     pub(crate) fn row_of(&self, id: RowId) -> Option<usize> {
         if let Unit::Marker(..) = id.unit
             && let Some(u) = self.get(id.unit)
@@ -305,11 +307,13 @@ impl RenderedIndex {
             return Some(u.start);
         }
         let u = self.land(Some(id.line))?;
+        // A gap row lands on the block's first row: its gap when it has one.
+        let Some(wrap) = id.wrap else { return Some(u.start) };
         let rows = u.start..u.end;
         let starts: Vec<usize> =
-            rows.clone().filter(|&k| self.row_source[k].0 == id.line).collect();
+            rows.clone().filter(|&k| !self.gap[k] && self.row_source[k].0 == id.line).collect();
         if let Some(&last) = starts.last() {
-            return Some(starts.get(id.wrap as usize).copied().unwrap_or(last));
+            return Some(starts.get(wrap as usize).copied().unwrap_or(last));
         }
         let shows = |k: &usize| (self.row_source[*k].0..=self.row_source[*k].1).contains(&id.line);
         Some(rows.clone().find(shows).unwrap_or(u.lead))
