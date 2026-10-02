@@ -9255,6 +9255,21 @@ fn a_pick_is_the_comment_chosen_under_the_cursor() {
         }
         assert_eq!(edit_target_text(&mut app, &keymap), "second", "rendered {rendered}");
 
+        // (h) Deleting another comment from the list leaves the pick alone.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        press(&mut app, &keymap, KeyCode::Char('c'));
+        for ch in "third".chars() {
+            press(&mut app, &keymap, KeyCode::Char(ch));
+        }
+        press(&mut app, &keymap, KeyCode::Enter);
+        press(&mut app, &keymap, KeyCode::Char('l'));
+        app.list_cursor = 0;
+        press(&mut app, &keymap, KeyCode::Char('d'));
+        press(&mut app, &keymap, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(edit_target_text(&mut app, &keymap), "third", "rendered {rendered}");
+
         // (d) Away to another file and back: the cursor reopens at the top, off the
         // comment, so the pick is gone and `e` there opens nothing.
         let (_r, mut app) = two_comments_app(rendered);

@@ -4272,7 +4272,6 @@ impl App {
         if let Some(i) = self.target_comment() {
             logln!("comment delete [{i}]");
             self.store.take(i);
-            self.comment_target = None;
             self.clamp_list_cursor();
             self.status = "comment deleted".to_string();
             // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.

@@ -633,7 +633,8 @@ impl Renderer<'_> {
                     if ch == ' ' {
                         break;
                     }
-                } else if r == ch {
+                } else if r == ch || (r == '\r' && ch == ' ') {
+                    // CommonMark turns a span's line ending into a space, `\r` included.
                     break;
                 }
             }
@@ -2100,6 +2101,8 @@ mod tests {
             ("- x `aa\n  bb\n  cc` y\n", 4, "bb", (2, 2)),
             ("- x `aa\n  bb\n  cc` y\n", 6, "bb", (2, 2)),
             ("> - x `aa\n>   bb\n>   cc` y\n", 6, "cc", (3, 3)),
+            ("Z0 `e\r\nff hfi\r\nn` Z1\n", 6, "ff", (2, 2)),
+            ("Z0 `e\r\nff hfi\r\nn` Z1\n", 6, "n Z1", (3, 3)),
         ] {
             let r = render(md, width, &hl, &p);
             let t = texts(&r.lines);
