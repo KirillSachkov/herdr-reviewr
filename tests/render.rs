@@ -1571,15 +1571,15 @@ fn a_markdown_file_paints_rendered_rows_numbered_by_block() {
     assert!(footer.contains("c comment"), "rendered rows take comments:\n{footer}");
 
     // Source view: raw markdown, and the footer leads back.
-    app.toggle_preview();
+    app.toggle_rendered();
     let source = render(&app);
     assert!(source.contains("# Install"), "source shows raw markdown:\n{source}");
     let footer = source.lines().last().unwrap();
-    assert!(footer.contains("m preview"), "source leads back to the rendered view:\n{footer}");
+    assert!(footer.contains("m rendered"), "source leads back to the rendered view:\n{footer}");
 }
 
 #[test]
-fn a_deleted_markdown_file_offers_no_preview_in_the_footer() {
+fn a_deleted_markdown_file_offers_no_rendered_toggle_in_the_footer() {
     let r = Repo::init();
     r.write("gone.md", "# Doc\n\nbody\n");
     r.commit_all("init");
@@ -1589,11 +1589,11 @@ fn a_deleted_markdown_file_offers_no_preview_in_the_footer() {
     app.focus = Focus::Diff;
 
     // The deletion rows are commentable, but a deleted file has no current content, so
-    // the footer never offers the inert preview toggle.
+    // the footer never offers the inert rendered toggle.
     let out = render(&app);
     let footer = out.lines().last().unwrap();
     assert!(footer.contains("c comment"), "a deletion row is commentable:\n{footer}");
-    assert!(!footer.contains("m preview"), "a deleted file offers no preview:\n{footer}");
+    assert!(!footer.contains("m rendered"), "a deleted file offers no rendered view:\n{footer}");
 }
 
 #[test]
@@ -2106,12 +2106,12 @@ the target body
     enter_tab(&mut app, Tab::AllFiles);
 
     // In source view an anchor click is inert: no heading anchors are rendered there.
-    app.toggle_preview();
+    app.toggle_rendered();
     let _ = render(&app);
     app.open_link("#section-two");
     assert_eq!(app.diff_cursor, 0, "source view ignores anchor destinations");
 
-    app.toggle_preview();
+    app.toggle_rendered();
     let _ = render(&app);
     assert_eq!(app.diff_cursor, 0);
     app.open_link("#section-two");
@@ -2170,7 +2170,7 @@ fn rendered_rows_paint_link_and_details_regions() {
     // The regions sit where the text paints, right of the gutter: the link's first cell
     // resolves and the cell before it does not.
     let buf = render_buffer(&app);
-    assert!(dump(&buf).contains("README.md · preview"), "the title names the mode");
+    assert!(dump(&buf).contains("README.md · rendered"), "the title names the mode");
     let (x, y) = cell_of(&buf, "docs");
     assert_eq!(app.painted_link_at(x, y).as_deref(), Some("https://docs.example/x"));
     assert_eq!(app.painted_link_at(x - 1, y), None, "the region starts at the link text");
@@ -2193,9 +2193,9 @@ fn rendered_rows_paint_link_and_details_regions() {
     assert!(render(&app).contains("hidden body"), "the click opened the disclosure");
 
     // Source paints no regions.
-    app.toggle_preview();
+    app.toggle_rendered();
     let source = render(&app);
-    assert!(!source.contains("· preview"), "source view has no rendered marker");
+    assert!(!source.contains("· rendered"), "source view has no rendered marker");
     assert_eq!(first_painted_link(&app), None, "raw source paints no link regions");
 }
 
@@ -2210,7 +2210,7 @@ fn the_changes_tab_paints_rendered_markdown() {
 
     // The Changes tab opens the markdown file rendered and names the mode in the title.
     let out = render(&app);
-    assert!(out.contains("README.md · preview"), "the title names the mode:\n{out}");
+    assert!(out.contains("README.md · rendered"), "the title names the mode:\n{out}");
     assert!(out.contains("Install"), "the heading text renders:\n{out}");
     assert!(!out.contains("# Install"), "the # markers are gone rendered:\n{out}");
     // "checks" is on the new side only (the committed side is the bare heading), so this
@@ -2220,11 +2220,11 @@ fn the_changes_tab_paints_rendered_markdown() {
     assert!(footer.contains("m source"), "the footer leads to the diff:\n{footer}");
 
     // The toggle paints the diff of the raw markdown.
-    app.toggle_preview();
+    app.toggle_rendered();
     let source = render(&app);
     assert!(source.contains("# Install"), "the diff shows raw markdown:\n{source}");
     let footer = source.lines().last().unwrap();
-    assert!(footer.contains("m preview"), "the diff leads back:\n{footer}");
+    assert!(footer.contains("m rendered"), "the diff leads back:\n{footer}");
 }
 
 #[test]
@@ -4432,7 +4432,7 @@ fn rendered_cards_sit_under_the_last_row_of_their_block() {
 
     // From source: a new-side comment on the paragraph's first line, an old-side one on
     // the deletion.
-    app.toggle_preview();
+    app.toggle_rendered();
     for (marker, text) in [(' ', "on alpha"), ('-', "on the removal")] {
         app.diff_cursor = app
             .visible
@@ -4447,7 +4447,7 @@ fn rendered_cards_sit_under_the_last_row_of_their_block() {
     }
     assert_eq!(app.store.len(), 2);
 
-    app.toggle_preview();
+    app.toggle_rendered();
     assert!(app.rendered_active());
     let out = render(&app);
     let lines: Vec<&str> = out.lines().collect();
@@ -4557,4 +4557,30 @@ fn rendered_change_marks_paint_bars_and_marker_rows() {
         app.visible.iter().position(|r| matches!(r, Row::Rendered { mark: Mark::Unrendered, .. }));
     let text = app.painted_text(i.expect("the marker row")).unwrap();
     assert!(text.ends_with('…') && text.width() <= 20, "{text:?}");
+}
+
+#[test]
+fn find_lights_its_matches_on_rendered_rows() {
+    let r = Repo::init();
+    r.write("doc.md", "# Head\n\nsome **needle** here\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    assert!(app.rendered_active());
+    app.open_find();
+    for ch in "needle".chars() {
+        app.input_push(ch);
+    }
+    let buf = render_buffer(&app);
+    let pal = *app.palette();
+    let area = Rect::new(0, 0, 140, 40);
+    let inner = ui::read_inner_rect(area, &app);
+    let lit: String = (inner.y..inner.y + inner.height)
+        .flat_map(|y| (inner.x..inner.x + inner.width).map(move |x| (x, y)))
+        .filter_map(|(x, y)| {
+            buf.cell((x, y)).filter(|c| c.bg == pal.yellow).map(|c| c.symbol().to_string())
+        })
+        .collect();
+    assert_eq!(lit, "needle", "only the match lights:\n{}", dump(&buf));
 }

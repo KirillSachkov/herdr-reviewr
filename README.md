@@ -25,7 +25,7 @@ One persistent pane, pointed at a git worktree:
 - **Search** — fuzzy file names and live code grep across the worktree, powered by [fff](https://github.com/dmtrKovalenko/fff).
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
-- **Markdown preview** — flip a `.md` file between source and rendered view.
+- **Markdown review** — a `.md` file opens rendered. Comment on it like the diff, with every change marked.
 - **Themes** — 18 palettes in dark and light.
 
 It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
@@ -120,7 +120,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `/` | Search files and code |
 | `Ctrl+F` | Find in file |
 | `w` | Toggle line wrap |
-| `m` | Preview markdown file |
+| `m` | Flip markdown between rendered and source |
 | `p` | Rotate navigator |
 | `z` | Hide / show navigator |
 | `<` `>` | Grow / shrink navigator |
@@ -337,7 +337,7 @@ The action names and their defaults:
 | `base-pick` / `commit-pick` | `B` / `G` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
-| `preview` | `m` |
+| `rendered` | `m` |
 | `navigator-position` | `p` |
 | `navigator-hide` | `z` |
 | `navigator-grow` / `navigator-shrink` | `<` / `>` |

@@ -1848,7 +1848,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         .to_string(),
     };
     if app.rendered_active() {
-        title.push_str(" · preview");
+        title.push_str(" · rendered");
     }
     let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
@@ -2091,7 +2091,13 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         } else {
             spans.push(Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(num_color)));
         }
-        spans.extend(rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default());
+        let body = rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default();
+        // The find lights its matches in the row's own text, which the styled line opens with;
+        // a synthetic note after it never matches.
+        let hits = find
+            .map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs))
+            .unwrap_or_default();
+        spans.extend(light_ranges(body, &hits, Style::default().bg(pal.yellow).fg(pal.surface0)));
         let mut out = Line::from(spans);
         if let Some(pad) = width.checked_sub(out.width()).filter(|p| *p > 0) {
             out.push_span(Span::raw(" ".repeat(pad)));
@@ -2239,6 +2245,39 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
             }
         })
         .collect()
+}
+
+/// `spans` with the chars in `ranges` (char indices over their joined text) restyled by `hl`,
+/// split where a range starts or ends.
+fn light_ranges(
+    spans: Vec<Span<'static>>,
+    ranges: &[crate::diff::CharRange],
+    hl: Style,
+) -> Vec<Span<'static>> {
+    if ranges.is_empty() {
+        return spans;
+    }
+    let mut out = Vec::new();
+    let mut at = 0u32;
+    for span in spans {
+        let mut run = String::new();
+        let mut lit = None;
+        for ch in span.content.chars() {
+            let on = ranges.iter().any(|&(a, b)| a <= at && at < b);
+            if lit.is_some_and(|l| l != on) {
+                let style = if lit == Some(true) { span.style.patch(hl) } else { span.style };
+                out.push(Span::styled(std::mem::take(&mut run), style));
+            }
+            lit = Some(on);
+            run.push(ch);
+            at += 1;
+        }
+        if !run.is_empty() {
+            let style = if lit == Some(true) { span.style.patch(hl) } else { span.style };
+            out.push(Span::styled(run, style));
+        }
+    }
+    out
 }
 
 pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
@@ -2622,7 +2661,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::TogglePane => {
             return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
-        A::Preview => (hint(K::Preview), if app.rendered_active() { "source" } else { "preview" }),
+        A::Rendered => {
+            (hint(K::Rendered), if app.rendered_active() { "source" } else { "rendered" })
+        }
         A::NavigatorPosition => (hint(K::NavigatorPosition), "layout"),
         A::NavigatorHide => {
             (hint(K::NavigatorHide), if app.navigator_hidden_here() { "show" } else { "hide" })

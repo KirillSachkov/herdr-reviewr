@@ -1067,10 +1067,10 @@ mod tests {
     #[test]
     fn a_new_default_collision_invalidates_the_resolved_keymap() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[keybindings]\npreview = [\"p\"]\n")
+        std::fs::write(dir.path().join("config.toml"), "[keybindings]\nrendered = [\"p\"]\n")
             .unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
-        assert!(error.contains("`preview`") && error.contains("`navigator-position`"), "{error}");
+        assert!(error.contains("`rendered`") && error.contains("`navigator-position`"), "{error}");
         assert!(error.contains("p is bound"), "{error}");
     }
 

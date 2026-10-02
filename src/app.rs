@@ -610,8 +610,8 @@ pub enum FooterAction {
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
     /// Flip a markdown file between rendered and source; the label names the destination
-    /// view (`m preview` on source, `m source` rendered).
-    Preview,
+    /// view (`m rendered` on source, `m source` rendered).
+    Rendered,
     NavigatorPosition,
     /// Hide the navigator or show it back; the label names the direction (`z hide` / `z show`).
     /// Visible, it waits in the `go` band; hidden, it joins row 1.
@@ -1810,7 +1810,7 @@ impl App {
             },
             theme: self.theme_name,
             changes,
-            see: self.keymap().hint(crate::keymap::Action::Preview).label(),
+            see: self.keymap().hint(crate::keymap::Action::Rendered).label(),
             empty: false,
         }
     }
@@ -2297,7 +2297,7 @@ impl App {
     /// markdown empties it and makes the toggle inert. The footer offers `m` exactly when
     /// this holds.
     #[must_use]
-    fn previewable(&self) -> bool {
+    fn renderable(&self) -> bool {
         self.tab.is_file_tab() && !self.rendered_text.is_empty()
     }
 
@@ -2332,8 +2332,8 @@ impl App {
 
     /// `m`: flip the open markdown file between rendered and source, at the same block;
     /// inert anywhere else. A live line selection clears first, its rows are about to go.
-    pub fn toggle_preview(&mut self) {
-        if !self.previewable() {
+    pub fn toggle_rendered(&mut self) {
+        if !self.renderable() {
             return;
         }
         self.clear_selection();
@@ -2343,14 +2343,6 @@ impl App {
             self.flip(false);
         } else {
             self.flip(true);
-        }
-    }
-
-    /// Show the open file as source, when it shows rendered — the cursor on the first line
-    /// of its rendered block.
-    fn show_source(&mut self) {
-        if self.renders_markdown() {
-            self.flip(false);
         }
     }
 
@@ -2369,7 +2361,26 @@ impl App {
         self.diff_scroll = self.diff_cursor.saturating_sub(above);
         self.settled_sel = None;
         self.settle_read();
+        self.refind();
         self.reveal_diff = true;
+    }
+
+    /// Re-run a live find over rows that just replaced the ones it searched: the cursor
+    /// lands on the match nearest it, here the block it crossed to. Nothing moves when no
+    /// match shows on screen; a step then reaches one hidden in a fold.
+    fn refind(&mut self) {
+        let Some(query) = self.find.as_ref().map(|f| f.query.clone()).filter(|q| !q.is_empty())
+        else {
+            return;
+        };
+        let cursor = self.diff_cursor;
+        let nearest = self.find_hits(&query).0.into_iter().filter_map(|h| match h {
+            FindHit::Visible(v) => Some(v),
+            FindHit::Folded { .. } => None,
+        });
+        if let Some(v) = nearest.min_by_key(|v| v.abs_diff(cursor)) {
+            self.diff_cursor = v;
+        }
     }
 
     /// The styled lines the rendered rows paint, indexed by a `Row::Rendered`'s `line`.
@@ -3899,11 +3910,14 @@ impl App {
         // The nearest row at or above the cursor carrying a worktree line number. A deletion
         // and a fold carry none, and a notice diff paints no rows at all, so each falls back
         // to the file's start.
+        // Rendered, the cursor row names its block's first source line, and a marker row the
+        // line it sits at — past the file's end for a deletion at its tail, so that clamps.
+        let last = self.rendered_text.lines().count().max(1) as u32;
         let line = numbered
             .then(|| self.visible.get(..=self.diff_cursor))
             .flatten()
             .and_then(|above| above.iter().rev().find_map(Row::new_no))
-            .unwrap_or(1);
+            .map_or(1, |l| if self.rendered_active() { l.clamp(1, last) } else { l });
         Some(EditTarget { path, line })
     }
 
@@ -4589,9 +4603,7 @@ impl App {
     /// not rendered markdown, at least one content row. A notice (binary, too large) and an
     /// empty file carry no content rows, so `any(is_content)` excludes them.
     pub fn find_available(&self) -> bool {
-        self.tab.is_file_tab()
-            && !self.rendered_active()
-            && self.visible.iter().any(Row::is_content)
+        self.tab.is_file_tab() && self.visible.iter().any(Row::is_content)
     }
 
     /// `ctrl+f`: open the find band over the read pane, inert with nothing to search. Opening is a
@@ -4626,6 +4638,20 @@ impl App {
     fn find_hits(&self, query: &str) -> (Vec<FindHit>, usize, bool) {
         let cs = find_case_sensitive(query);
         let is_hit = |row: &Row| !find_match_ranges(&row.text(), query, cs).is_empty();
+        if self.rendered_active() {
+            // Rendered rows are the text as read: a row's own text, never a marker's or a
+            // collapsed summary's note, which live in the styled line alone.
+            let hits: Vec<FindHit> = (0..self.visible.len())
+                .filter(|&i| is_hit(&self.visible[i]))
+                .map(FindHit::Visible)
+                .collect();
+            let cursor_rank = hits
+                .iter()
+                .take_while(|h| matches!(h, FindHit::Visible(v) if *v < self.diff_cursor))
+                .count();
+            let on_match = self.visible.get(self.diff_cursor).is_some_and(is_hit);
+            return (hits, cursor_rank, on_match);
+        }
         let mut hits = Vec::new();
         let mut vis = 0usize;
         let mut cursor_rank = 0usize;
@@ -4895,10 +4921,15 @@ impl App {
         }
         self.focus = Focus::Diff;
         if let Some(line) = line {
-            // A code hit names a source line, so a markdown file lands on it in source.
-            self.show_source();
+            // A code hit names a source line: a markdown file that opens rendered lands on
+            // the block holding it, any other file on the line itself.
             let last = self.visible.len().saturating_sub(1);
-            self.diff_cursor = (line.saturating_sub(1) as usize).min(last);
+            self.diff_cursor = if self.rendered_active() {
+                rendered_row_at_line(&self.visible, u32::try_from(line).unwrap_or(u32::MAX))
+                    .unwrap_or(0)
+            } else {
+                (line.saturating_sub(1) as usize).min(last)
+            };
         }
         self.reveal_diff = true;
         Ok(())
@@ -5078,8 +5109,8 @@ impl App {
             // On a markdown file's source line, surface the way back to the rendered
             // view. A deleted
             // file, holding no current content, offers nothing.
-            if self.previewable() {
-                out.push((A::Preview, Do));
+            if self.renderable() {
+                out.push((A::Rendered, Do));
             }
         }
 
