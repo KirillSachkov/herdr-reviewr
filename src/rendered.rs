@@ -30,12 +30,15 @@ pub(crate) struct RenderedView {
     pub built: Option<Built>,
 }
 
-/// The open markdown file's content: its current text and, in the `Changes` tab, the old
-/// side its deleted lines belonged to.
+/// The open markdown file's content: its current text, in the `Changes` tab the old side its
+/// deleted lines belonged to, and whether the text renders nothing at all — a property of the
+/// content, known whatever the pane's choice, so `m` is never offered or taken where the
+/// rendered view has nothing to show.
 #[derive(Debug)]
 pub(crate) struct Content {
     pub text: String,
     pub old: Option<String>,
+    pub nothing: bool,
 }
 
 /// The old side's source map and the old text and open `<details>` it was read from.
@@ -52,10 +55,10 @@ impl RenderedView {
         self.content.as_ref().map(|c| c.text.as_str())
     }
 
-    /// Whether the current content was found to render no rows at all: its source shows,
-    /// though the choice stays armed.
+    /// Whether the current content renders no rows at all: its source shows whatever the
+    /// pane's choice, and `m` neither shows nor acts.
     pub(crate) fn renders_nothing(&self) -> bool {
-        self.built.as_ref().is_some_and(|b| b.empty && Some(b.input.text.as_str()) == self.text())
+        self.content.as_ref().is_some_and(|c| c.nothing)
     }
 
     /// Whether the rows on screen are rendered rows: the one answer to it, read off the index

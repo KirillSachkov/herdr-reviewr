@@ -1497,8 +1497,7 @@ impl App {
         // notice, or a deleted file (empty new side) holds nothing, so it shows its source and
         // its toggle stays inert.
         let renders = self.markdown_file() && self.diff.state == crate::diff::FileState::Normal;
-        self.rendered.content =
-            (renders && !new.is_empty()).then_some(Content { text: new, old: Some(old) });
+        self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
         self.rebuild_visible();
         self.settle_read();
     }
@@ -1517,8 +1516,7 @@ impl App {
         // Keep the render input current without a per-frame rebuild. A file the source view
         // degrades to a notice never renders, so its content is not held either.
         let renders = self.markdown_file() && diff.state == crate::diff::FileState::Normal;
-        self.rendered.content =
-            (renders && !content.is_empty()).then_some(Content { text: content, old: None });
+        self.rendered.content = if renders { self.content(content, None) } else { None };
         self.diff = diff;
         self.rebuild_visible();
         self.settle_read();
@@ -2088,6 +2086,22 @@ impl App {
         self.tab.is_file_tab() && self.rendered.on_screen()
     }
 
+    /// The open markdown file's content for its rendered view: `None` for an empty text. Whether
+    /// it renders nothing is read once per text — the last verdict when the text is the same,
+    /// else a render of it (any width and open set show the same emptiness).
+    fn content(&self, text: String, old: Option<String>) -> Option<Content> {
+        if text.is_empty() {
+            return None;
+        }
+        let nothing = match &self.rendered.content {
+            Some(c) if c.text == text => c.nothing,
+            _ => {
+                self.markdown_render(&text, DEFAULT_RENDER_WIDTH, &HashSet::new()).lines.is_empty()
+            }
+        };
+        Some(Content { text, old, nothing })
+    }
+
     /// Whether the open file asks for rendered rows: the pane's choice over markdown content.
     fn wants_rendered(&self) -> bool {
         self.markdown_rendered && self.rendered.content.is_some()
@@ -2130,10 +2144,6 @@ impl App {
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
         self.markdown_rendered = rendered;
         self.rebuild_visible();
-        if rendered && self.rendered.renders_nothing() {
-            self.status = "nothing here renders".to_string();
-            return;
-        }
         self.diff_scroll = self.diff_cursor.saturating_sub(above);
         // The old rows' marks go with them; a navigator highlight was never on them.
         self.drop_read_marks();
@@ -5768,7 +5778,7 @@ mod tests {
         old.mode = Mode::List;
         old.markdown_rendered = true; // flipped to rendered, away from the default
         old.rendered.content =
-            Some(crate::rendered::Content { text: "# doc".to_string(), old: None });
+            Some(crate::rendered::Content { text: "# doc".to_string(), old: None, nothing: false });
         old.rendered.details.insert("Details#0".to_string(), true);
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
@@ -5795,8 +5805,11 @@ mod tests {
         };
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.markdown_rendered = true;
-        old.rendered.content =
-            Some(crate::rendered::Content { text: "# Heading\n\nbody\n".into(), old: None });
+        old.rendered.content = Some(crate::rendered::Content {
+            text: "# Heading\n\nbody\n".into(),
+            old: None,
+            nothing: false,
+        });
         old.rebuild_visible();
         old.mode = Mode::List;
         let before = colors(&old);
@@ -6152,6 +6165,7 @@ mod tests {
                     a.rendered.content = Some(crate::rendered::Content {
                         text: "intro\n\n# heading\n".into(),
                         old: None,
+                        nothing: false,
                     });
                     a.markdown_rendered = true;
                     a.rebuild_visible();
@@ -6280,7 +6294,7 @@ mod tests {
             rev: crate::model::Rev::Worktree,
         });
         app.rendered.content =
-            Some(crate::rendered::Content { text: "# heading".into(), old: None });
+            Some(crate::rendered::Content { text: "# heading".into(), old: None, nothing: false });
         app.markdown_rendered = true;
         app.rebuild_visible();
         app.diff_cursor = 0;

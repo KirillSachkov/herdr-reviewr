@@ -9409,3 +9409,24 @@ fn markdown_view_rendered_opens_markdown_rendered_and_a_reread_never_flips_it() 
     app.reload().unwrap();
     assert!(app.rendered_active(), "a reread never flips a running pane");
 }
+
+#[test]
+fn a_file_that_renders_nothing_never_takes_the_panes_choice() {
+    let r = markdown_files_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    let offers_m = |app: &App| app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Rendered);
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("c.md"));
+    assert!(!app.rendered_active());
+    assert!(!offers_m(&app), "content that renders nothing offers no `m`, even under source");
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(!app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('F'));
+    press(&mut app, &keymap, KeyCode::Char('F'));
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(!app.rendered_active(), "the `m` on c.md never flipped the pane");
+    assert!(offers_m(&app));
+}
