@@ -9,9 +9,6 @@ use std::collections::HashMap;
 /// The open file's rendered view in one file tab.
 #[derive(Debug, Default)]
 pub(crate) struct RenderedView {
-    /// The reviewer's choice: rendered, or source. Every file open resets it to rendered, so
-    /// `m` flips one file and never the next.
-    pub on: bool,
     /// The open markdown file's content, the render's input. `None` whenever the content does
     /// not render: a non-markdown file, a notice, or an empty new side.
     pub content: Option<Content>,
@@ -50,19 +47,9 @@ pub(crate) struct OldMap {
 }
 
 impl RenderedView {
-    /// A fresh view: rendered, nothing built yet.
-    pub(crate) fn new() -> Self {
-        Self { on: true, ..Self::default() }
-    }
-
     /// The current text, when the open file is markdown that renders.
     pub(crate) fn text(&self) -> Option<&str> {
         self.content.as_ref().map(|c| c.text.as_str())
-    }
-
-    /// Whether the open file asks for rendered rows: the choice armed over markdown content.
-    pub(crate) fn wants(&self) -> bool {
-        self.on && self.content.is_some()
     }
 
     /// Whether the current content was found to render no rows at all: its source shows,

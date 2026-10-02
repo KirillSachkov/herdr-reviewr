@@ -66,9 +66,10 @@ impl Config {
     }
 }
 
-const PLUGIN_CONFIG_KEYS: [&str; 12] = [
+const PLUGIN_CONFIG_KEYS: [&str; 13] = [
     "theme",
     "default_scope",
+    "markdown_view",
     "navigator_position",
     "toggle_placement",
     "toggle_direction",
@@ -80,6 +81,23 @@ const PLUGIN_CONFIG_KEYS: [&str; 12] = [
     "url_opener",
     "keybindings",
 ];
+
+/// How a fresh pane shows a markdown file: as source, or rendered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownView {
+    #[default]
+    Source,
+    Rendered,
+}
+
+impl MarkdownView {
+    fn as_str(self) -> &'static str {
+        match self {
+            MarkdownView::Source => "source",
+            MarkdownView::Rendered => "rendered",
+        }
+    }
+}
 
 /// Where the navigator sits around the read pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -160,6 +178,7 @@ impl ToggleDirection {
 pub struct PluginConfig {
     theme: String,
     default_scope: crate::model::Scope,
+    markdown_view: MarkdownView,
     navigator_position: NavigatorPosition,
     toggle_placement: TogglePlacement,
     toggle_direction: ToggleDirection,
@@ -177,6 +196,7 @@ impl Default for PluginConfig {
         Self {
             theme: crate::theme::DEFAULT.to_owned(),
             default_scope: crate::model::Scope::Uncommitted,
+            markdown_view: MarkdownView::Source,
             navigator_position: NavigatorPosition::Right,
             toggle_placement: TogglePlacement::Split,
             toggle_direction: ToggleDirection::Right,
@@ -200,6 +220,12 @@ impl PluginConfig {
     /// switches a running pane's scope.
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
+    }
+
+    /// How a fresh pane shows markdown — startup and config recovery. A reread never flips a
+    /// running pane's view; `m` does.
+    pub fn markdown_view(&self) -> MarkdownView {
+        self.markdown_view
     }
 
     pub fn navigator_position(&self) -> NavigatorPosition {
@@ -267,6 +293,7 @@ impl PluginConfig {
         serde_json::json!({
             "theme": self.theme,
             "default_scope": self.default_scope.name(),
+            "markdown_view": self.markdown_view.as_str(),
             "navigator_position": self.navigator_position.as_str(),
             "toggle_placement": self.toggle_placement.as_str(),
             "toggle_direction": self.toggle_direction.as_str(),
@@ -382,6 +409,14 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                 ));
             }
         };
+    }
+    if let Some(value) = table.get("markdown_view") {
+        config.markdown_view =
+            match string_value(path, "markdown_view", value, "one of source, rendered")? {
+                "source" => MarkdownView::Source,
+                "rendered" => MarkdownView::Rendered,
+                _ => return Err(value_error(path, "markdown_view", "one of source, rendered")),
+            };
     }
     if let Some(value) = table.get("navigator_position") {
         config.navigator_position = match string_value(
@@ -683,7 +718,9 @@ pub fn print_plugin_config() -> Result<(), PluginConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement};
+    use super::{
+        Config, MarkdownView, NavigatorPosition, PluginConfig, ToggleDirection, TogglePlacement,
+    };
     use crate::keymap::KeyCode;
     use crate::model::Scope;
     use std::time::Duration;
@@ -757,6 +794,7 @@ mod tests {
         assert!(config.auto_open());
         assert_eq!(config.github_host(), None);
         assert_eq!(config.url_opener(), None);
+        assert_eq!(config.markdown_view(), MarkdownView::Source);
     }
 
     #[test]
@@ -772,10 +810,12 @@ mod tests {
                 "toggle_direction = \"down\"\n",
                 "auto_open = false\n",
                 "github_host = \"GitHub.Example.COM\"\n",
+                "markdown_view = \"rendered\"\n",
             ),
         )
         .unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.markdown_view(), MarkdownView::Rendered);
         assert_eq!(config.theme(), "tokyo-night");
         assert_eq!(config.default_scope(), Scope::LastTurn);
         assert_eq!(config.navigator_position(), NavigatorPosition::Bottom);
@@ -850,6 +890,8 @@ mod tests {
             ("default_scope = \"last turn\"\n", "`default_scope`"),
             // `commits` is never a start scope: the pane holds no pick yet.
             ("default_scope = \"commits\"\n", "`default_scope`"),
+            ("markdown_view = \"preview\"\n", "`markdown_view`"),
+            ("markdown_view = true\n", "`markdown_view`"),
             ("navigator_position = \"center\"\n", "`navigator_position`"),
             ("toggle_placement = \"left\"\n", "`toggle_placement`"),
             ("toggle_direction = \"left\"\n", "`toggle_direction`"),
@@ -1137,6 +1179,7 @@ mod tests {
         let object = value.as_object().unwrap();
         assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
         assert_eq!(object["default_scope"], "uncommitted");
+        assert_eq!(object["markdown_view"], "source");
         assert_eq!(object["navigator_position"], "right");
         assert_eq!(object["toggle_placement"], "split");
         assert_eq!(object["toggle_direction"], "right");

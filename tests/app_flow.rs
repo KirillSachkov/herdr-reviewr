@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use common::{Repo, app_on, enter_tab, typed};
+use common::{Repo, app_on, app_on_rendered, enter_tab, typed};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
@@ -508,27 +508,27 @@ fn hunk_steps_are_inert_where_no_change_rows_are_painted() {
 }
 
 #[test]
-fn the_next_markdown_file_opens_rendered_after_m_on_the_previous_one() {
+fn the_next_markdown_file_follows_m_on_the_previous_one() {
     let r = Repo::init();
     r.write("a.md", "# title\n");
     r.write("b.md", "# other\n");
     r.commit_all("init");
     r.write("a.md", "# title\n\nbody\n");
     r.write("b.md", "# other\n\nmore\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
     assert!(app.rendered_active(), "a markdown file opens rendered");
     app.toggle_rendered();
     assert!(!app.rendered_active(), "`m` flips it to source");
 
-    // The flag resets on every file open: the next file, and a return to the first.
+    // The choice is the pane's: the next file, and a return to the first, open as source.
     app.next_file();
     assert_eq!(app.diff_path.as_deref(), Some("b.md"));
-    assert!(app.rendered_active(), "the next markdown file opens rendered");
+    assert!(!app.rendered_active(), "the next markdown file opens as source");
     app.prev_file();
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
-    assert!(app.rendered_active(), "reopening the flipped file opens it rendered again");
+    assert!(!app.rendered_active(), "and so does the flipped one again");
 }
 
 #[test]
@@ -3912,7 +3912,7 @@ fn find_in_rendered_markdown_reads_the_rendered_text() {
     r.write("doc.md", "# Title\n\nfirst total here\n\ngone para\n\nkeep\n\n**total** second\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nfirst total here\n\nkeep\n\n**total** second\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let keymap = Keymap::default();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
@@ -4073,7 +4073,7 @@ fn markdown_app() -> (Repo, App) {
     r.write("README.md", "# Title\n\nalpha beta gamma\n");
     r.write("code.rs", "fn main() {}\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("README.md"), "first file opens");
     (r, app)
@@ -4087,7 +4087,7 @@ fn a_markdown_file_opens_rendered_with_a_cursor() {
     r.write("README.md", "# Title\n");
     r.commit_all("init");
     r.write("README.md", "# Title\n\nalpha **beta** gamma\n\n- one\n- two\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
 
     // `Changes` opens the diff's markdown file rendered: real rows, markers consumed, each
     // naming its block's source line.
@@ -4156,7 +4156,7 @@ fn the_rendered_view_takes_comments_and_clears_a_selection_on_entry() {
 }
 
 #[test]
-fn the_rendered_choice_survives_a_refresh_and_resets_with_a_file_change() {
+fn the_rendered_choice_survives_a_refresh_and_a_file_change() {
     let (_repo, mut app) = markdown_app();
     app.toggle_rendered();
     assert!(!app.rendered_active(), "flipped to source");
@@ -4167,11 +4167,11 @@ fn the_rendered_choice_survives_a_refresh_and_resets_with_a_file_change() {
     app.move_cursor(1).unwrap(); // open code.rs
     app.move_cursor(-1).unwrap(); // back to README.md
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
-    assert!(app.rendered_active(), "reopening a file starts rendered");
+    assert!(!app.rendered_active(), "reopening the file keeps the pane's source choice");
 }
 
 #[test]
-fn a_tab_switch_restores_the_rendered_choice() {
+fn the_pane_choice_holds_across_tabs_and_the_pr_tab() {
     use herdr_reviewr::app::Tab;
     let (repo, mut app) = markdown_app();
     // Give the Changes tab a markdown file of its own.
@@ -4181,13 +4181,14 @@ fn a_tab_switch_restores_the_rendered_choice() {
 
     enter_tab(&mut app, Tab::Changes);
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
-    assert!(app.rendered_active(), "the Changes tab holds its own choice, not All files'");
+    assert!(!app.rendered_active(), "the Changes tab follows the pane's choice");
+    app.toggle_rendered();
     enter_tab(&mut app, Tab::AllFiles);
-    assert!(!app.rendered_active(), "the tab restores its source choice");
+    assert!(app.rendered_active(), "and so does All files, both ways");
 
     app.set_tab(Tab::Pr).unwrap();
     enter_tab(&mut app, Tab::AllFiles);
-    assert!(!app.rendered_active(), "a PR round-trip also restores it");
+    assert!(app.rendered_active(), "a PR round-trip keeps it");
 }
 
 #[test]
@@ -4266,7 +4267,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     r.write("edit.md", "# Doc\n\nalpha\n\nbeta\n\ngamma\n");
     r.commit_all("edit base");
     r.write("edit.md", "# Doc\n\nalpha\n\ngamma\n"); // delete "beta" and its blank line
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
@@ -4334,7 +4335,7 @@ fn a_fold_under_the_source_cursor_flips_to_its_first_hidden_line() {
     r.write("doc.md", &body);
     r.commit_all("init");
     r.write("doc.md", &format!("{body}tail\n")); // append past the context margin
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
     app.toggle_rendered();
@@ -4378,7 +4379,7 @@ fn toggling_after_the_changeset_empties_is_inert() {
     r.write("doc.md", "# Doc\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# Doc\n\nbody edited\n"); // an uncommitted change puts doc.md in scope
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
     assert!(app.rendered_active());
@@ -4407,38 +4408,35 @@ fn a_scope_switch_holds_the_rendered_choice() {
     app.reload().unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
 
+    assert!(!app.rendered_active(), "the diff shows the markdown source by default");
     app.toggle_rendered();
-    assert!(!app.rendered_active(), "the diff shows the markdown source");
+    assert!(app.rendered_active());
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"), "the same file stays open");
-    assert!(!app.rendered_active(), "the source choice holds across a scope switch");
+    assert!(app.rendered_active(), "the rendered choice holds across a scope switch");
 }
 
 #[test]
-fn each_file_tab_holds_its_own_rendered_choice() {
+fn both_file_tabs_show_one_markdown_file_by_the_panes_choice() {
     use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("doc.md", "# Doc\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# Doc\n\nbody edited\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
 
-    // Source in Changes.
+    // Source in Changes, and so in All files.
     app.toggle_rendered();
     assert!(!app.rendered_active(), "the Changes diff flipped to source");
-
-    // All files opens the same file with its own choice, rendered.
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    assert!(app.rendered_active(), "All files holds its own choice, rendered");
+    assert!(!app.rendered_active(), "All files shows it as source too");
 
-    // Flipping All files and returning to Changes finds its source intact.
-    app.toggle_rendered();
-    assert!(!app.rendered_active(), "All files flipped to source");
+    // Rendered in All files, and so back in Changes.
     app.toggle_rendered();
     enter_tab(&mut app, Tab::Changes);
-    assert!(!app.rendered_active(), "Changes kept its own source choice");
+    assert!(app.rendered_active(), "Changes follows the flip made in All files");
 }
 
 #[test]
@@ -4459,7 +4457,7 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     let r = Repo::init();
     r.write("doc.md", &doc("intro line"));
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
@@ -4675,7 +4673,7 @@ fn the_worker_coalesces_queued_jobs_keeping_their_flags() {
 
 mod search_overlay {
     use super::{common, press};
-    use common::{Repo, app_on, enter_tab};
+    use common::{Repo, app_on, app_on_rendered, enter_tab};
     use herdr_reviewr::app::{App, Focus, Mode, SearchPhase, Tab};
     use herdr_reviewr::keymap::{Keymap, default_keymap};
     use herdr_reviewr::land_search_completion;
@@ -4857,7 +4855,7 @@ mod search_overlay {
         repo.write("doc.md", "# Title\n\nfirst para\n\nsecond para\nwith the needle\n\ntail\n");
         repo.commit_all("c");
         let keymap = default_keymap().clone();
-        let mut app = app_on(&repo);
+        let mut app = app_on_rendered(&repo);
         enter_tab(&mut app, Tab::AllFiles);
 
         // A content hit on the paragraph's second line lands on that paragraph, rendered.
@@ -6657,7 +6655,7 @@ fn a_settled_rendered_highlight_follows_its_text() {
     r.write("doc.md", "# Title\n\nplain body words\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nplain body words changed\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
     // Settle the body's first word by double-click on its rendered row (row 2: the heading,
     // the blank between, the paragraph).
@@ -7037,7 +7035,7 @@ fn a_rendered_drag_selects_and_copies_through_the_read_surface() {
     r.write("doc.md", "# Title\n\nplain body words\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nplain **body** words changed\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
 
     // The rendered heading is row 0; a drag from its first cell selects its text through
@@ -7833,7 +7831,7 @@ fn an_open_find_band_searches_a_markdown_file_that_opens_rendered() {
     r.commit_all("init");
     r.write("a.rs", "let total = 1;\n");
     r.write("b.md", &format!("{body}tail total\n")); // a change past the context: a fold
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let keymap = Keymap::default();
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
     app.focus = Focus::Diff;
@@ -7892,7 +7890,7 @@ fn a_poll_maps_the_rendered_cursor_through_the_edit() {
     let r = Repo::init();
     r.write("doc.md", "# A\n\npara one\n\npara two\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
@@ -7916,7 +7914,7 @@ fn a_width_rebuild_drops_a_highlight_whose_text_moved() {
     r.write("base.txt", "x\n");
     r.commit_all("init");
     r.write("doc.md", &format!("# T\n\n{long}\n"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
     // Row 3 is the paragraph's second wrapped line; settle its first word.
     let (col, row) = sel_cell(&app, 3, 0);
@@ -7942,7 +7940,7 @@ fn a_theme_change_rebuilds_rendered_rows_on_both_tabs() {
     r.write("doc.md", "# Heading\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# Heading\n\nbody edited\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
     let changes_before = colors(&app);
     enter_tab(&mut app, Tab::AllFiles);
@@ -7963,7 +7961,7 @@ fn a_source_comment_on_markdown_survives_the_view_flips() {
     r.write("doc.md", "# Doc\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# Doc\n\nbody edited\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.toggle_rendered(); // to source
     comment_on(&mut app, '+', "note");
     assert_eq!(app.store.len(), 1);
@@ -7986,7 +7984,7 @@ fn a_transient_render_nothing_poll_returns_to_rendered() {
     let r = Repo::init();
     r.write("doc.md", "# A\n\npara one\n\npara two\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
@@ -8010,7 +8008,7 @@ fn a_theme_change_and_an_edit_land_in_one_rebuild_keeping_the_cursor() {
     let r = Repo::init();
     r.write("doc.md", "# A\n\npara one\n\npara two\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
@@ -8030,7 +8028,7 @@ fn a_tab_switch_keeps_a_find_band_the_new_view_can_search() {
     r.write("README.md", "# Title\n\ntotal\n");
     r.commit_all("init");
     r.write("a.rs", "let total = 1;\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let keymap = Keymap::default();
     enter_tab(&mut app, Tab::AllFiles); // visit once: README.md opens rendered
     assert!(app.rendered_active());
@@ -8057,7 +8055,7 @@ fn a_rebuild_that_moves_the_clicked_text_breaks_the_click_chain() {
     r.write("base.txt", "x\n");
     r.commit_all("init");
     r.write("doc.md", &format!("# T\n\n{long}\n"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let (col, row) = sel_cell(&app, 3, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
@@ -8076,7 +8074,7 @@ fn a_line_prepended_inside_a_paragraph_keeps_the_cursor_row() {
     let r = Repo::init();
     r.write("doc.md", "# A\n\nline a\\\nline b\\\nline c\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     app.diff_cursor = app.visible.iter().position(|row| row.text() == "line c").unwrap();
@@ -8092,7 +8090,7 @@ fn editing_a_stale_comment_leaves_the_open_markdown_rendered() {
     r.write("README.md", "# Title\n");
     r.commit_all("init");
     r.write("README.md", "# Title\n\nmore\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
     // A comment on a file that left the changeset.
     app.store.add(herdr_reviewr::model::Comment {
@@ -8119,7 +8117,7 @@ fn rendered_review_app() -> (Repo, App) {
     r.write("doc.md", "# Title\n\nalpha one\nbeta two\n\n- item\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nalpha one\nBETA TWO\n\n- item\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active(), "the markdown file opens rendered");
     app.focus = Focus::Diff;
     (r, app)
@@ -8221,7 +8219,7 @@ fn old_side_card_row(old: &str, new: &str) -> (Repo, App, usize) {
     r.write("doc.md", old);
     r.commit_all("init");
     r.write("doc.md", new);
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.toggle_rendered();
     comment_on(&mut app, '-', "removed");
@@ -8449,7 +8447,7 @@ fn a_deletion_at_the_end_of_the_file_renders_under_the_last_block() {
     r.write("doc.md", "# Title\n\nbody\n\ngone\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nbody\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.toggle_rendered();
     comment_on(&mut app, '-', "why remove");
@@ -8466,7 +8464,7 @@ fn replaced_line_app(old: &str, new: &str) -> (Repo, App) {
     r.write("doc.md", old);
     r.commit_all("init");
     r.write("doc.md", new);
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
     app.focus = Focus::Diff;
     (r, app)
@@ -8543,7 +8541,7 @@ fn an_old_side_comment_follows_its_line_restored_as_context() {
     r.write("doc.md", "# A\n\n# B\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# A\n\nbody\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.toggle_rendered();
     comment_on(&mut app, '-', "why drop B");
@@ -8566,7 +8564,7 @@ fn a_rendered_range_anchor_survives_a_resize() {
         let r = Repo::init();
         let long = "word ".repeat(40);
         r.write("doc.md", &format!("# T\n\n{long}\n\n- item\n"));
-        let app = app_on(&r);
+        let app = app_on_rendered(&r);
         (r, app)
     };
     app.focus = Focus::Diff;
@@ -8588,7 +8586,7 @@ fn two_comments_on_one_block_are_each_reachable() {
     let r = Repo::init();
     r.write("doc.md", "# T\n\nl1\nl2\nl3\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
     app.focus = Focus::Diff;
     app.toggle_rendered();
@@ -8639,7 +8637,7 @@ fn a_card_click_picks_its_comment() {
     let r = Repo::init();
     r.write("doc.md", "# T\n\nl1\nl2\nl3\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
     app.focus = Focus::Diff;
     app.toggle_rendered();
@@ -8715,7 +8713,7 @@ fn wears(row: &Row) -> Wears {
 #[test]
 fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
     let r = marked_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
     assert!(app.rendered_active());
@@ -8765,7 +8763,7 @@ fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
 #[test]
 fn a_removed_marker_comment_anchors_the_deleted_lines_on_the_old_side() {
     let r = marked_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     let marker = rendered_row(&app, "removed");
     app.diff_cursor = marker;
@@ -8792,7 +8790,7 @@ fn a_removed_marker_comment_anchors_the_deleted_lines_on_the_old_side() {
 #[test]
 fn an_unrendered_marker_comment_anchors_its_changed_source() {
     let r = marked_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     let marker = rendered_row(&app, "doesn't render");
     app.diff_cursor = marker;
@@ -8826,7 +8824,7 @@ fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
     r.write("doc.md", &doc("body one"));
     r.commit_all("init");
     r.write("doc.md", &doc("body two"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     assert!(app.rendered_active());
 
@@ -8869,7 +8867,7 @@ fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
 fn the_files_tab_shows_no_change_marks() {
     use herdr_reviewr::app::Tab;
     let r = marked_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     assert!(app.visible.iter().any(|r| wears(r) != Wears::Nothing));
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
@@ -8888,7 +8886,7 @@ fn a_comment_opens_its_disclosure_on_the_reviewers_own_input_never_on_a_later_po
     r.write("doc.md", &doc("old tail"));
     r.commit_all("init");
     r.write("doc.md", &doc("new tail"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     let open = |app: &App| app.visible.iter().any(|r| r.text() == "same body");
     assert!(!open(&app), "an unchanged disclosure starts collapsed");
@@ -8921,7 +8919,7 @@ fn a_run_of_marked_lines_is_one_stop() {
     r.write("doc.md", "# Code\n\n```\none\ntwo\nthree\n```\n\ntail\n");
     r.commit_all("init");
     r.write("doc.md", "# Code\n\n```\nONE\nTWO\nTHREE\n```\n\nTAIL\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
     app.next_hunk();
@@ -8938,7 +8936,7 @@ fn a_block_appended_after_another_leaves_it_unmarked_and_out_of_its_anchor() {
     r.write("doc.md", "A\n");
     r.commit_all("init");
     r.write("doc.md", "A\n\nB\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     let a = rendered_row(&app, "A");
     assert_eq!(wears(&app.visible[a]), Wears::Nothing);
@@ -8952,7 +8950,7 @@ fn a_block_appended_after_another_leaves_it_unmarked_and_out_of_its_anchor() {
 #[test]
 fn edit_in_the_rendered_view_opens_at_the_cursor_blocks_first_source_line() {
     let r = marked_repo();
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let keymap = Keymap::default();
     app.focus = Focus::Diff;
     assert!(app.rendered_active());
@@ -8984,7 +8982,7 @@ fn edit_in_the_rendered_view_opens_at_the_cursor_blocks_first_source_line() {
     tail.write("doc.md", "A\n\nB\n");
     tail.commit_all("init");
     tail.write("doc.md", "A\n");
-    let mut app = app_on(&tail);
+    let mut app = app_on_rendered(&tail);
     app.focus = Focus::Diff;
     app.diff_cursor = rendered_row(&app, "removed");
     press(&mut app, &keymap, KeyCode::Char('e'));
@@ -8998,7 +8996,7 @@ fn edit_in_a_rendered_commit_diff_opens_the_file_at_its_start() {
     r.commit_all("one");
     r.write("doc.md", "intro\n\nmore\n");
     r.commit_all("two");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     let keymap = Keymap::default();
     press(&mut app, &keymap, KeyCode::Char('G'));
     press(&mut app, &keymap, KeyCode::Enter);
@@ -9042,7 +9040,7 @@ fn the_footer_offers_wrap_only_where_it_acts() {
     let r = Repo::init();
     r.write("doc.md", "# A\n\nbody\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     assert!(app.rendered_active());
@@ -9087,7 +9085,7 @@ fn a_picked_comment_stays_picked_across_a_poll_that_moves_its_row() {
         let r = Repo::init();
         r.write("doc.md", "# A\n\npara one\n");
         r.commit_all("init");
-        let mut app = app_on(&r);
+        let mut app = app_on_rendered(&r);
         enter_tab(&mut app, Tab::AllFiles);
         app.focus = Focus::Diff;
         // Wide enough that `para one` wraps to a row of its own after the rewrite.
@@ -9141,7 +9139,7 @@ fn two_comments_app(rendered: bool) -> (Repo, App) {
     r.write("a.rs", "one\ntwo\nthree\nfour\n");
     r.write("z.rs", "z\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     let path = if rendered { "doc.md" } else { "a.rs" };
@@ -9312,7 +9310,7 @@ fn the_rendered_cursor_keeps_its_source_line_and_wrap() {
         let r = Repo::init();
         r.write("doc.md", &before);
         r.commit_all("init");
-        let mut app = app_on(&r);
+        let mut app = app_on_rendered(&r);
         enter_tab(&mut app, Tab::AllFiles);
         app.focus = Focus::Diff;
         app.sync_rendered_width(width);
@@ -9337,4 +9335,77 @@ fn the_rendered_cursor_keeps_its_source_line_and_wrap() {
         app.sync_rendered_width(then);
         assert_eq!(app.diff_cursor, row(&app, resized), "{rewrite:?} at {then}");
     }
+}
+
+// --- the markdown view preference ------------------------------------------------
+
+/// Changed `a.md`, `b.md`, `c.md` (a comment alone: it renders nothing), and `d.md`.
+fn markdown_files_repo() -> Repo {
+    let r = Repo::init();
+    for f in ["a.md", "b.md", "c.md", "d.md"] {
+        r.write(f, "# base\n");
+    }
+    r.commit_all("init");
+    r.write("a.md", "# A\n\nbody a\n");
+    r.write("b.md", "# B\n\nbody b\n");
+    r.write("c.md", "<!-- only a comment -->\n");
+    r.write("d.md", "# D\n\nbody d\n");
+    r
+}
+
+#[test]
+fn markdown_opens_as_source_and_m_flips_every_markdown_file_after_it() {
+    use herdr_reviewr::app::Tab;
+    let r = markdown_files_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.focus = Focus::Diff;
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(!app.rendered_active(), "markdown opens as source by default");
+
+    // `m` flips the pane: the next markdown file opens rendered too.
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("b.md"));
+    assert!(app.rendered_active(), "the choice follows to the next file");
+
+    // A file that renders nothing shows its source and offers no `m`, but the choice holds.
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("c.md"));
+    assert!(!app.rendered_active());
+    assert!(!app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Rendered));
+    press(&mut app, &keymap, KeyCode::Char('f'));
+    assert_eq!(app.diff_path.as_deref(), Some("d.md"));
+    assert!(app.rendered_active(), "the next renderable file opens rendered");
+
+    // The other tab follows the same choice, both ways.
+    press(&mut app, &keymap, KeyCode::Char('2'));
+    assert_eq!(app.tab, Tab::AllFiles);
+    assert!(app.rendered_active(), "All files opens markdown rendered too");
+    app.focus = Focus::Diff;
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(!app.rendered_active());
+    press(&mut app, &keymap, KeyCode::Char('1'));
+    assert!(!app.rendered_active(), "back on Changes, the file shows as source");
+}
+
+#[test]
+fn markdown_view_rendered_opens_markdown_rendered_and_a_reread_never_flips_it() {
+    let r = markdown_files_repo();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "markdown_view = \"rendered\"\n").unwrap();
+    let rendered = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+
+    // A fresh pane seeded from the config opens the first markdown file rendered.
+    let mut app = App::new(r.path_buf(), Scope::Uncommitted, None);
+    app.seed_from_config(&rendered);
+    app.reload().unwrap();
+    assert!(app.rendered_active(), "markdown_view = rendered opens it rendered");
+
+    // A reread of a config saying otherwise never flips the running pane.
+    let source = herdr_reviewr::config::PluginConfig::default();
+    app.set_plugin_config(source);
+    app.reload().unwrap();
+    assert!(app.rendered_active(), "a reread never flips a running pane");
 }

@@ -25,7 +25,7 @@ One persistent pane, pointed at a git worktree:
 - **Search** — fuzzy file names and live code grep across the worktree, powered by [fff](https://github.com/dmtrKovalenko/fff).
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
-- **Markdown review** — a `.md` file opens rendered. Comment on it like the diff, with every change marked.
+- **Markdown review** — flip a `.md` file to rendered with `m`. Comment on it like the diff, with every change marked.
 - **Themes** — 18 palettes in dark and light.
 
 It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
@@ -218,6 +218,7 @@ The file accepts these keys:
 ```toml
 theme = "tokyo-night"
 default_scope = "branch"
+markdown_view = "rendered"
 navigator_position = "right"
 toggle_placement = "overlay"
 toggle_direction = "down"
@@ -249,6 +250,16 @@ theme = "tokyo-night"
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
 
 Names match herdr's where both ship a palette.
+
+### Markdown view
+
+Markdown opens as source. `m` flips to rendered, and every markdown file you open in the pane
+follows until you press `m` again. `markdown_view = "rendered"` opens it rendered from the
+start:
+
+```toml
+markdown_view = "rendered"
+```
 
 ### Navigator position
 

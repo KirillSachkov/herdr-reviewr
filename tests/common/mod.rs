@@ -219,3 +219,14 @@ pub fn land_world(app: &mut App) {
     app.reconcile_world(snapshot);
     app.world_request = None;
 }
+
+/// A pane over `repo` whose config sets `markdown_view = "rendered"`: markdown opens rendered.
+pub fn app_on_rendered(repo: &Repo) -> App {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "markdown_view = \"rendered\"\n").unwrap();
+    let config = herdr_reviewr::config::plugin_config_in(dir.path()).unwrap();
+    let mut app = App::new(repo.path_buf(), Scope::Uncommitted, None);
+    app.seed_from_config(&config);
+    app.reload().unwrap();
+    app
+}

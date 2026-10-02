@@ -369,6 +369,7 @@ fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
         scope.name()
     );
     let mut app = App::new(repo, scope, cfg.base.clone());
+    app.seed_from_config(&plugin_config);
     app.set_plugin_config(plugin_config);
     app.set_cli_theme(cfg.theme.clone());
     if let Some(wrap) = cfg.wrap {

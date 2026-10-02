@@ -721,10 +721,15 @@ pub struct App {
     pub h_scroll: usize,
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
-    /// The open file's rendered markdown view: the reviewer's rendered/source choice, the
-    /// content, the render, its marks, and the index over its rows. Per file tab, stashed
-    /// whole. `rendered_active()` is the honest on-screen predicate.
+    /// The open file's rendered markdown view: the content, the render, its marks, and the
+    /// index over its rows. Per file tab, stashed whole. `rendered_active()` is the honest
+    /// on-screen predicate.
     rendered: RenderedView,
+    /// The pane's markdown choice: rendered, or source. One for the pane, like `wrap`: `m`
+    /// flips it, and every markdown file opened afterwards — either tab, any file — follows
+    /// it. Seeded from `markdown_view` for a fresh pane; a reread never flips it, and content
+    /// that renders nothing shows its source without touching it.
+    markdown_rendered: bool,
     /// The rendered rows' wrap width — the read pane's code column, noted each frame by
     /// [`Self::sync_rendered_width`]. `0` until the first frame, which builds at a default.
     rendered_width: usize,
@@ -948,7 +953,8 @@ impl App {
             diff_scroll: 0,
             h_scroll: 0,
             wrap: true,
-            rendered: RenderedView::new(),
+            rendered: RenderedView::default(),
+            markdown_rendered: false,
             rendered_width: 0,
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
@@ -1165,6 +1171,7 @@ impl App {
                 self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
                 self.stash = std::mem::take(&mut old.stash);
                 self.wrap = old.wrap;
+                self.markdown_rendered = old.markdown_rendered;
                 self.rendered = std::mem::take(&mut old.rendered);
                 self.rendered_width = old.rendered_width;
                 self.pr_expanded_details = std::mem::take(&mut old.pr_expanded_details);
@@ -1554,11 +1561,10 @@ impl App {
         self.select_anchor = self.select_anchor.map(|a| a.min(last));
     }
 
-    /// Reset the per-file view choices for a newly opened file: it opens rendered when it is
-    /// markdown, with every `<details>` collapsed. The rows of the file being left are dropped
-    /// first, so no place or mark is carried from one file to another.
+    /// Reset the per-file view state for a newly opened file: every `<details>` collapsed. The
+    /// rows of the file being left are dropped first, so no place or mark is carried from one
+    /// file to another.
     fn open_fresh(&mut self) {
-        self.rendered.on = true;
         self.rendered.details.clear();
         self.rendered.built = None;
         self.rendered.drop_rows();
@@ -1600,9 +1606,9 @@ impl App {
             let anchor = self.select_anchor.map(line_at);
             (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll), anchor)
         });
-        let rendered = self.rendered.wants() && self.rebuild_rendered(edit.as_ref());
+        let rendered = self.wants_rendered() && self.rebuild_rendered(edit.as_ref());
         if !rendered {
-            if !self.rendered.wants() {
+            if !self.wants_rendered() {
                 self.rendered.built = None;
             }
             // Source rows on screen: no render, marks, or index stand behind them.
@@ -2082,6 +2088,18 @@ impl App {
         self.tab.is_file_tab() && self.rendered.on_screen()
     }
 
+    /// Whether the open file asks for rendered rows: the pane's choice over markdown content.
+    fn wants_rendered(&self) -> bool {
+        self.markdown_rendered && self.rendered.content.is_some()
+    }
+
+    /// Seed a fresh pane from its configuration — startup and config recovery: the markdown
+    /// view it opens with. A running pane's reread goes through
+    /// [`Self::set_plugin_config`] alone and never flips it.
+    pub fn seed_from_config(&mut self, config: &crate::config::PluginConfig) {
+        self.markdown_rendered = config.markdown_view() == crate::config::MarkdownView::Rendered;
+    }
+
     /// Whether the `m` toggle acts here: a file tab holding current markdown content, filled
     /// only for a markdown file whose source rows render — a notice, a deleted file, an
     /// emptied changeset, or a rename away from markdown leaves it empty and the toggle
@@ -2100,7 +2118,7 @@ impl App {
         if self.rendered.renders_nothing() {
             self.status = "nothing here renders".to_string();
         } else {
-            self.flip(!self.rendered.on);
+            self.flip(!self.markdown_rendered);
         }
     }
 
@@ -2110,7 +2128,7 @@ impl App {
     /// from the pane's top where the new rows allow; the old highlight goes with the old rows.
     fn flip(&mut self, rendered: bool) {
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
-        self.rendered.on = rendered;
+        self.markdown_rendered = rendered;
         self.rebuild_visible();
         if rendered && self.rendered.renders_nothing() {
             self.status = "nothing here renders".to_string();
@@ -2703,6 +2721,14 @@ impl App {
         if self.active_file_tab != tab {
             self.swap_active_with_stash();
             self.active_file_tab = tab;
+            // The pane's markdown choice may have flipped while this tab was away: its rows
+            // follow it, crossing by source line like any flip.
+            if self.rendered.on_screen() != self.wants_rendered()
+                && !self.rendered.renders_nothing()
+            {
+                self.rebuild_visible();
+                self.settle_read();
+            }
         }
         // A first visit has no stash to paint: refreshing behind would show an empty tree
         // under a live changed-count, a header/body disagreement
@@ -5740,7 +5766,7 @@ mod tests {
     fn config_recovery_carries_the_rendered_choice_and_open_details() {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.mode = Mode::List;
-        old.rendered.on = false; // flipped to source, away from the default
+        old.markdown_rendered = true; // flipped to rendered, away from the default
         old.rendered.content =
             Some(crate::rendered::Content { text: "# doc".to_string(), old: None });
         old.rendered.details.insert("Details#0".to_string(), true);
@@ -5748,7 +5774,7 @@ mod tests {
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
 
-        assert!(!recovered.rendered.on, "the source choice survives config recovery");
+        assert!(recovered.markdown_rendered, "the pane's choice survives a modal's recovery");
         assert_eq!(recovered.rendered.text(), Some("# doc"));
         assert_eq!(
             recovered.rendered.details.get("Details#0"),
@@ -5768,6 +5794,7 @@ mod tests {
                 .collect()
         };
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.markdown_rendered = true;
         old.rendered.content =
             Some(crate::rendered::Content { text: "# Heading\n\nbody\n".into(), old: None });
         old.rebuild_visible();
@@ -6126,7 +6153,7 @@ mod tests {
                         text: "intro\n\n# heading\n".into(),
                         old: None,
                     });
-                    a.rendered.on = true;
+                    a.markdown_rendered = true;
                     a.rebuild_visible();
                     a.diff_cursor = a.visible.len() - 1;
                 }),
@@ -6254,7 +6281,7 @@ mod tests {
         });
         app.rendered.content =
             Some(crate::rendered::Content { text: "# heading".into(), old: None });
-        app.rendered.on = true;
+        app.markdown_rendered = true;
         app.rebuild_visible();
         app.diff_cursor = 0;
 

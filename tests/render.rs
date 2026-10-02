@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Repo, app_on, enter_tab};
+use common::{Repo, app_on, app_on_rendered, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::diff::{Bar, MarkerKind};
@@ -1554,7 +1554,7 @@ fn a_markdown_file_paints_rendered_rows_numbered_by_block() {
     let r = Repo::init();
     r.write("README.md", "# Install\n\nRun `cargo test` for **all** checks.\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
 
     // Rendered by default: markers consumed, each block's lead line numbered by its source
@@ -1582,7 +1582,7 @@ fn a_block_is_numbered_on_its_content_never_on_the_gap_above_it() {
     let r = Repo::init();
     r.write("README.md", "> a\n>\n> b\n\n```rust\nlet x = 1;\n```\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     let out = render(&app);
@@ -2118,7 +2118,7 @@ the target body
     let r = Repo::init();
     r.write("doc.md", &md);
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
 
     // In source view an anchor click is inert: no heading anchors are rendered there.
@@ -2173,7 +2173,7 @@ fn rendered_rows_paint_link_and_details_regions() {
          <details>\n<summary>More</summary>\n\nhidden body\n\n</details>\n",
     );
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     let cell_of = |buf: &Buffer, needle: &str| -> (u16, u16) {
         let out = dump(buf);
@@ -2221,7 +2221,7 @@ fn the_changes_tab_paints_rendered_markdown() {
     r.write("README.md", "# Install\n");
     r.commit_all("init");
     r.write("README.md", "# Install\n\nRun `cargo test` for **all** checks.\n");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
 
     // The Changes tab opens the markdown file rendered and names the mode in the title.
@@ -2254,7 +2254,7 @@ fn an_uppercase_unicode_anchor_still_finds_its_heading() {
     let r = Repo::init();
     r.write("doc.md", &md);
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     let _ = render(&app);
 
@@ -4443,7 +4443,7 @@ fn rendered_cards_sit_under_the_last_row_of_their_block() {
     r.write("doc.md", &format!("# Head\n\nalpha\nbeta\n{long}\n\n- item\n"));
     r.commit_all("init");
     r.write("doc.md", &format!("# Head\n\nalpha\n{long}\n\n- item\n"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
 
     // From source: a new-side comment on the paragraph's first line, an old-side one on
@@ -4533,7 +4533,7 @@ fn rendered_change_marks_paint_bars_and_marker_rows() {
         "doc.md",
         "# Head\n\nsame para\n\nnew words\n\nkeep one\n\nkeep\n\n<!-- y -->\n\n- item\n- added\n",
     );
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.diff_cursor = 0;
     assert!(app.rendered_active());
@@ -4583,7 +4583,7 @@ fn find_lights_its_matches_on_rendered_rows() {
     let r = Repo::init();
     r.write("doc.md", "# Head\n\nsome **needle** here\n");
     r.commit_all("init");
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     enter_tab(&mut app, Tab::AllFiles);
     app.focus = Focus::Diff;
     assert!(app.rendered_active());
@@ -4613,7 +4613,7 @@ fn a_collapsed_summary_paints_the_changes_its_body_hides() {
     r.write("doc.md", &doc("body one"));
     r.commit_all("init");
     r.write("doc.md", &doc("body two"));
-    let mut app = app_on(&r);
+    let mut app = app_on_rendered(&r);
     app.focus = Focus::Diff;
     app.toggle_details("More#0");
     let out = render(&app);
