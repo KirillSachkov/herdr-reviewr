@@ -48,6 +48,9 @@ pub enum Action {
     OpenPr,
     Refresh,
     Quit,
+    /// The quit question's answer: quit and drop the unsent comments. A key of its own, so a
+    /// held quit key's auto-repeat can never answer the question it just raised.
+    QuitDiscard,
 }
 
 /// A key's base: a printable character, or one of the named keys from the `[keybindings]`
@@ -156,7 +159,7 @@ impl Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 42] = [
+const ACTIONS: [(Action, &str, &[Key]); 43] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -199,6 +202,7 @@ const ACTIONS: [(Action, &str, &[Key]); 42] = [
     (Action::OpenPr, "open-pr", &[Key::plain('o')]),
     (Action::Refresh, "refresh", &[Key::plain('r')]),
     (Action::Quit, "quit", &[Key::plain('q')]),
+    (Action::QuitDiscard, "quit-discard", &[Key::plain('Q')]),
 ];
 
 impl Action {

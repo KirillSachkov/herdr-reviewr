@@ -401,10 +401,31 @@ fn candidates<'a>(
         .collect()
 }
 
-/// Whether an agent pane can take a send right now, read from herdr just before the send.
+/// Why [`ensure_ready`] refused a send. Every comment stays, and the reviewer's line names
+/// the cause.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Readiness {
-    /// The agent waits for input, or herdr cannot tell what it is doing.
+pub enum Refusal {
+    /// The agent is mid-turn or at a prompt, by herdr's label for the state.
+    Busy(String),
+    /// herdr could not say what the agent is doing.
+    Unanswered,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Busy(state) => write!(f, "agent is {state}"),
+            Refusal::Unanswered => write!(f, "herdr did not answer"),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// Whether an agent pane can take a send right now.
+#[derive(Debug, PartialEq, Eq)]
+enum Readiness {
+    /// The agent waits for input.
     Ready,
     /// The agent is mid-turn or at a prompt. Holds herdr's label for the state, so the
     /// refusal names it the way the picker row does.
@@ -413,24 +434,27 @@ pub enum Readiness {
     Gone,
 }
 
-/// The pane's [`Readiness`], from a fresh `agent list`.
-pub fn readiness(pane: &str) -> Result<Readiness> {
-    Ok(readiness_in(&agent_list()?, pane))
-}
-
-fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
-    match agents.iter().find(|agent| agent.pane_id == pane) {
-        None => Readiness::Gone,
-        Some(agent) if accepts_input(&agent.agent_status) => Readiness::Ready,
-        Some(agent) => Readiness::Busy(agent.row_state()),
+/// Refuse a send unless the pane's agent waits for input, read from a fresh `agent list` at
+/// the moment of sending: a paste into an agent mid-turn or at a prompt lands on whatever is on
+/// screen and never becomes its next message. The read and the send are two herdr calls, so an
+/// agent can still start a turn in between. herdr offers no atomic send-if-idle.
+pub fn ensure_ready(pane: &str) -> Result<()> {
+    let Ok(agents) = agent_list() else { return Err(Refusal::Unanswered.into()) };
+    match readiness_in(&agents, pane) {
+        Readiness::Ready => Ok(()),
+        Readiness::Busy(state) => Err(Refusal::Busy(state).into()),
+        Readiness::Gone => bail!("agent pane {pane} is gone"),
     }
 }
 
-/// `idle` and `done` wait for input. `unknown` is an agent herdr does not classify, which
-/// would otherwise never be sendable, so it sends as it always did. Every other state, known
-/// or added later, is mid-turn or at a prompt, where a paste lands on whatever is on screen.
-fn accepts_input(wire: &str) -> bool {
-    matches!(wire, "idle" | "done" | "unknown")
+/// Only an agent that rests waits for input: `idle` and `done`. Every other state is mid-turn,
+/// at a prompt, or one herdr cannot read, and turn tracking already treats it as not resting.
+fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
+    match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
+        None => Readiness::Gone,
+        Some(agent) if matches!(agent.status(), Status::Idle | Status::Done) => Readiness::Ready,
+        Some(agent) => Readiness::Busy(agent.row_state()),
+    }
 }
 
 /// Write literal text into the agent pane's input, without submitting.
@@ -520,9 +544,8 @@ mod tests {
         for (status, want) in [
             ("idle", Ready),
             ("done", Ready),
-            // An agent herdr does not classify reads `unknown` every time, so refusing it would
-            // make it unsendable.
-            ("unknown", Ready),
+            // `unknown` is mid-turn to turn tracking, so it takes no send either.
+            ("unknown", Busy("unknown".into())),
             ("working", Busy("working".into())),
             ("blocked", Busy("blocked".into())),
             // A state herdr adds later is busy, named by herdr's own label.
@@ -531,6 +554,9 @@ mod tests {
             assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");
         }
         assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), Gone);
+        // A pane whose agent exited is listed without one: the send goes nowhere near it.
+        let shell = AgentPane { agent: None, ..at("idle") };
+        assert_eq!(super::readiness_in(&[shell], "w8:p1"), Gone);
     }
 
     #[test]

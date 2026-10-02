@@ -1409,23 +1409,34 @@ fn event_loop(
     result
 }
 
+/// A click or a wheel turn: the mouse events that answer the quit question.
+fn answers_question(kind: MouseEventKind) -> bool {
+    matches!(kind, MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+}
+
 /// A blocked frame accepts no normal input. Quit remains available, and terminal/pointer cleanup
 /// may release state that was captured before the config became invalid.
 fn handle_blocked_event(app: &mut App, event: &Event) {
     match event {
         Event::Key(k) if k.kind == KeyEventKind::Press => {
             // The blocked screen's escape hatch stays modifier-agnostic: a stuck user's `q` quits
-            // whatever the modifiers, exactly as before the keymap gained chords.
-            // Unsent comments survive the recovery, so the quit asks first here too, and any
-            // other key answers it.
-            if let KeyCode::Char(c) = k.code
-                && keymap::default_keymap().action_for(keymap::Key::plain(c))
-                    == Some(keymap::Action::Quit)
-            {
-                app.request_quit();
-            } else {
-                app.confirming_quit = false;
+            // whatever the modifiers, exactly as before the keymap gained chords. Unsent comments
+            // survive the recovery, so with any queued it asks first, as on the review screen,
+            // minus send and copy, which the blocked screen does not offer.
+            let action = match k.code {
+                KeyCode::Char(c) => keymap::default_keymap().action_for(keymap::Key::plain(c)),
+                _ => None,
+            };
+            match (app.confirming_quit, action) {
+                (true, Some(keymap::Action::QuitDiscard)) => app.should_quit = true,
+                (true, Some(keymap::Action::Quit)) => {}
+                (true, _) => app.confirming_quit = false,
+                (false, Some(keymap::Action::Quit)) => app.request_quit(),
+                (false, _) => {}
             }
+        }
+        Event::Mouse(m) if app.confirming_quit && answers_question(m.kind) => {
+            app.confirming_quit = false;
         }
         Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), .. })
             if app.divider_drag_captured() =>
@@ -1746,19 +1757,25 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     };
     let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
 
-    // The quit question takes the next key as its answer. The quit key quits, and `send` and
-    // `copy` answer by doing exactly what they always do. Every other key, `esc` included, only
-    // answers, so a reflexive keystroke can neither drop the comments nor act behind the prompt.
+    // The quit question owns the keyboard until it is answered: `quit-discard` quits, `send` and
+    // `copy` deliver as they always do, and every other key, `esc` included, only answers. The
+    // quit key leaves it open, so a held `q`'s auto-repeat (a plain press without the kitty
+    // event-type flag) can never answer the question it raised.
     if app.confirming_quit {
-        app.confirming_quit = false;
         match action {
-            Some(K::Quit) => {
-                app.should_quit = true;
-                return Ok(());
+            Some(K::QuitDiscard) => app.should_quit = true,
+            Some(K::Quit) => {}
+            Some(K::Send) => {
+                app.confirming_quit = false;
+                app.send_to_agent();
             }
-            Some(K::Send | K::Copy) => {}
-            _ => return Ok(()),
+            Some(K::Copy) => {
+                app.confirming_quit = false;
+                app.export(&Clipboard);
+            }
+            _ => app.confirming_quit = false,
         }
+        return Ok(());
     }
 
     // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
@@ -1952,8 +1969,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Find => app.open_find(),
             K::Keys => app.toggle_keys(),
             // `delete` off the diff and `open-pr` off the `PR` tab are inert. `edit` is not:
-            // it reaches the navigator's file rows too.
-            K::Delete | K::OpenPr => {}
+            // it reaches the navigator's file rows too. `quit-discard` only answers the quit
+            // question, above.
+            K::Delete | K::OpenPr | K::QuitDiscard => {}
         }
         return Ok(());
     }
@@ -2410,9 +2428,10 @@ fn dispatch_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     app.hover = Some((m.column, m.row));
-    // A click or a wheel answers the quit question and does nothing else, like any key that is
-    // not the quit key. Pointer motion is no answer.
-    if app.confirming_quit && !matches!(m.kind, MouseEventKind::Moved) {
+    // A click or a wheel answers the quit question and does nothing else, like a key that is
+    // not one of its answers. Motion, a drag, and a release are no answer, so a gesture that
+    // was under way finishes as it would have.
+    if app.confirming_quit && answers_question(m.kind) {
         app.confirming_quit = false;
         return Ok(());
     }
@@ -3017,11 +3036,22 @@ mod refresh_tests {
         let q = Event::Key(KeyEvent::from(KeyCode::Char('q')));
         handle_blocked_event(&mut app, &q);
         assert!(app.confirming_quit && !app.should_quit, "the first `q` asks");
+        handle_blocked_event(&mut app, &q);
+        assert!(app.confirming_quit && !app.should_quit, "a repeated `q` never answers");
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Esc)));
         assert!(!app.confirming_quit && !app.should_quit, "any other key answers and stays");
         handle_blocked_event(&mut app, &q);
+        let click = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        handle_blocked_event(&mut app, &click);
+        assert!(!app.confirming_quit && !app.should_quit, "a click answers and stays");
         handle_blocked_event(&mut app, &q);
-        assert!(app.should_quit, "asked, `q` quits");
+        handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('Q'))));
+        assert!(app.should_quit, "asked, `Q` quits");
     }
 
     #[test]

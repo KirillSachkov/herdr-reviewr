@@ -810,8 +810,9 @@ pub struct App {
     pub keys_expanded: bool,
     pub should_quit: bool,
     /// The quit key was pressed with unsent comments, and the footer asks before they are
-    /// dropped. The reviewer's next key or click answers it, so it is never left open behind
-    /// another action (#119).
+    /// dropped. The reviewer's next key, click, or wheel turn answers it, so it is never left open
+    /// behind another action (#119). A field beside [`Mode`] rather than a mode, because the
+    /// config-error screen asks it over whatever mode it froze, a draft included.
     pub confirming_quit: bool,
     /// The read-only `PR` tab's view of the pull request.
     pub pr: forge::PrView,
@@ -5386,9 +5387,10 @@ impl App {
     }
 
     /// The quit key: quits at once when no comment is unsent, else asks first, since quitting
-    /// drops every unsent comment for good. Asked already, it is the answer that quits.
+    /// drops every unsent comment for good. The question's own `quit-discard` key is the answer
+    /// that quits.
     pub fn request_quit(&mut self) {
-        if self.store.is_empty() || self.confirming_quit {
+        if self.store.is_empty() {
             self.should_quit = true;
         } else {
             self.confirming_quit = true;
@@ -5397,7 +5399,7 @@ impl App {
 
     /// Whether the footer is the open-ended `Normal` bar, with its `?` and bands. A modal, or the
     /// quit question, owns the whole bar instead.
-    pub fn open_footer(&self) -> bool {
+    pub fn footer_open_ended(&self) -> bool {
         self.mode == Mode::Normal && !self.confirming_quit
     }
 

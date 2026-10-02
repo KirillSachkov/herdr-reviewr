@@ -4630,7 +4630,7 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
     app.request_quit();
     let row = footer_line(&render_at(&app, 100));
     assert!(
-        row.contains("q quit, drop 1 comment") && row.contains("esc stay"),
+        row.contains("Q quit, drop 1 comment") && row.contains("esc stay"),
         "the footer is the question:\n{row}"
     );
     assert!(row.contains("s send 1") && row.contains("y copy"), "{row}");
@@ -4638,8 +4638,5 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
 
     app.set_config_error("config: invalid value for `theme`".to_string());
     let out = render(&app);
-    assert!(
-        out.contains("Press q again to quit and drop 1 unsent comment. Fixing the file keeps it."),
-        "{out}"
-    );
+    assert!(out.contains("Press Q to quit and drop 1 comment. Fixing the file keeps it."), "{out}");
 }

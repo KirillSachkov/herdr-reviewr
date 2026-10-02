@@ -167,8 +167,8 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
     write_comment(&mut app, "two");
     for (status, line) in [
-        ("working", "codex is working · comments kept"),
-        ("blocked", "codex is blocked · comments kept"),
+        ("working", "codex is working — comments kept"),
+        ("blocked", "codex is blocked — comments kept"),
     ] {
         press(&mut app, KeyCode::Char('s'), area, &keymap);
         press(&mut app, KeyCode::Char('2'), area, &keymap);
@@ -261,13 +261,49 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     // to the log, so the sentence still fits a 40-column footer.
     assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
 
-    // The quit question hands `s` to the send itself: the comments go out, the pane stays open.
+    // The sole agent is refused the same way while it works: `send_target` and the send each
+    // read the list, and the send's read decides.
     fail_on_nothing(&fake_dir);
-    fs::write(fake_dir.join("agents.json"), ONE_AGENT).unwrap();
-    press(&mut app, KeyCode::Char('q'), area, &keymap);
-    assert!(app.confirming_quit && !app.should_quit, "unsent comments make `q` ask");
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT.replace("\"idle\"", "\"working\"")).unwrap();
     press(&mut app, KeyCode::Char('s'), area, &keymap);
-    assert!(!app.confirming_quit && !app.should_quit);
-    assert!(app.store.is_empty(), "the answer sent them");
-    assert_eq!(app.status, "added 1 comment to claude");
+    assert_eq!(app.store.len(), 1, "a busy sole agent keeps every comment");
+    assert_eq!(app.status, "claude is working — comments kept");
+
+    // A chosen agent gone from the list by the time `enter` lands takes nothing.
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT).unwrap();
+    press(&mut app, KeyCode::Char('2'), area, &keymap);
+    let sends = log(&fake_dir).matches("pane send-text").count();
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.store.len(), 1, "a gone agent keeps every comment");
+    assert_eq!(app.status, "agent not found");
+    assert_eq!(log(&fake_dir).matches("pane send-text").count(), sends, "nothing was pasted");
+
+    // A herdr that stops answering by then says so, rather than claiming the agent is gone.
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    fail_on(&fake_dir, "agent list");
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.store.len(), 1);
+    assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
+    fail_on_nothing(&fake_dir);
+
+    // The quit question hands `s` to the send itself, on any tab: the comments go out and the
+    // pane stays open.
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT).unwrap();
+    for tab in ['1', '3'] {
+        press(&mut app, KeyCode::Char(tab), area, &keymap);
+        if app.store.is_empty() {
+            press(&mut app, KeyCode::Char('1'), area, &keymap);
+            write_comment(&mut app, "five");
+            press(&mut app, KeyCode::Char(tab), area, &keymap);
+        }
+        press(&mut app, KeyCode::Char('q'), area, &keymap);
+        assert!(app.confirming_quit && !app.should_quit, "unsent comments make `q` ask: {tab}");
+        press(&mut app, KeyCode::Char('s'), area, &keymap);
+        assert!(!app.confirming_quit && !app.should_quit, "{tab}");
+        assert!(app.store.is_empty(), "the answer sent them: {tab}");
+        assert_eq!(app.status, "added 1 comment to claude", "{tab}");
+    }
 }

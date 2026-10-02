@@ -366,6 +366,7 @@ The action names and their defaults:
 | `open-pr` | `o` |
 | `refresh` | `r` |
 | `quit` | `q` |
+| `quit-discard` | `Q` |
 
 A key is one printable character, or a `ctrl+`/`alt+` chord like `ctrl+f`. `Tab`, `Esc`, and
 `Enter` are fixed. Keys still type normally in the comment box.

@@ -7,9 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
-- **`q` asks before dropping unsent comments**: quit, stay, send or copy them first.
+- **`q` asks before dropping unsent comments**: `Q` quits and drops them, or send, copy, or stay.
   Thanks [@ruinshe](https://github.com/ruinshe) ([#119](https://github.com/persiyanov/herdr-reviewr/issues/119)).
-- **Send waits for an agent that is mid-turn or at a prompt**, and keeps every comment until it is free.
+- **Send refuses an agent that is mid-turn or at a prompt**, and keeps every comment for the next try.
   Thanks [@stephenchristensen-caredotcom](https://github.com/stephenchristensen-caredotcom) ([#86](https://github.com/persiyanov/herdr-reviewr/issues/86)).
 
 ## [0.41.0] — 2026-10-02

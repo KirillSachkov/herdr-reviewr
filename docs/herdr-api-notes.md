@@ -192,6 +192,12 @@ ordinal. The picker joins `label` on `tab_id`, best effort.
 `herdr tab rename <tab_id> <label>` sets a tab's `label` (0.7.5). A `tab`-placement open uses it to
 name the fresh tab `reviewr`.
 
+Right before writing, the send reads `agent list` again and goes ahead only when the chosen
+pane's agent is `idle` or `done`. Any other `agent_status` (`working`, `blocked`, `unknown`, or a
+state herdr adds) means a paste lands on whatever is on screen, so the send refuses and keeps every
+comment. On 0.8.2, `agent list` answers in under 10 ms. The read and the write are two calls, and
+herdr has no atomic send-if-idle.
+
 ```
 herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter
 herdr agent focus    <agent_pane>                    # focus so the reviewer submits

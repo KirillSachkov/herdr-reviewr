@@ -9474,9 +9474,18 @@ fn quitting_with_unsent_comments_asks_first() {
         ]
     );
 
-    // The quit key again: quit, dropping them.
+    // The quit key again leaves the question open: a held `q` repeats as plain presses, and
+    // the repeat must never answer. Its own key, `Q`, quits and drops them.
     press(&mut app, &keymap, KeyCode::Char('q'));
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert!(app.confirming_quit && !app.should_quit, "`q` never answers its own question");
+    press(&mut app, &keymap, KeyCode::Char('Q'));
     assert!(app.should_quit);
+
+    // `Q` outside the question does nothing.
+    let (_r, mut app) = commented();
+    press(&mut app, &keymap, KeyCode::Char('Q'));
+    assert!(!app.should_quit && !app.confirming_quit);
 
     // `esc` stays, and so does any other key, which does nothing else.
     for code in [KeyCode::Esc, KeyCode::Char('j'), KeyCode::Char('c')] {
@@ -9493,18 +9502,27 @@ fn quitting_with_unsent_comments_asks_first() {
         assert!(!app.should_quit && app.confirming_quit, "{code:?}");
     }
 
-    // `send` and `copy` answer by doing what they always do; this test process may sit inside
-    // a real herdr, so neither runs here. `the_quit_question_hands_send_to_the_send_path` in
-    // the send flow drives `s` against a fake herdr.
+    // `send` and `copy` answer by doing what they always do. Neither runs here: the send flow
+    // drives `s` against a fake herdr, and `y` would write the real clipboard.
 
-    // A click answers too, and does nothing else. Pointer motion is not an answer.
+    // A click or a wheel turn answers too, and does nothing else. Motion, a drag, and a
+    // release are no answer, so a gesture under way finishes as it would have.
     let (_r, mut app) = asking();
-    mouse(&mut app, &keymap, MouseEventKind::Moved);
-    assert!(app.confirming_quit, "motion leaves the question open");
-    let cursor = app.diff_cursor;
-    mouse(&mut app, &keymap, MouseEventKind::Down(MouseButton::Left));
-    assert!(!app.confirming_quit && !app.should_quit);
-    assert_eq!(app.diff_cursor, cursor, "the click only answers");
+    for kind in [
+        MouseEventKind::Moved,
+        MouseEventKind::Drag(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        mouse(&mut app, &keymap, kind);
+        assert!(app.confirming_quit, "{kind:?} leaves the question open");
+    }
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::ScrollDown] {
+        let (_r, mut app) = asking();
+        let (cursor, scroll) = (app.diff_cursor, app.diff_scroll);
+        mouse(&mut app, &keymap, kind);
+        assert!(!app.confirming_quit && !app.should_quit, "{kind:?}");
+        assert_eq!((app.diff_cursor, app.diff_scroll), (cursor, scroll), "{kind:?} only answers");
+    }
 
     // A poll is no answer: the question stays open across it.
     let (r, mut app) = asking();
@@ -9512,11 +9530,13 @@ fn quitting_with_unsent_comments_asks_first() {
     app.reload().unwrap();
     assert!(app.confirming_quit && !app.should_quit);
 
-    // The PR tab asks the same way.
+    // The PR tab asks the same way, and takes the same answers.
     let (_r, mut app) = commented();
     press(&mut app, &keymap, KeyCode::Char('3'));
     press(&mut app, &keymap, KeyCode::Char('q'));
     assert!(app.confirming_quit && !app.should_quit);
+    press(&mut app, &keymap, KeyCode::Char('Q'));
+    assert!(app.should_quit);
 
     // Inside the comment list `q` stays inert, and in the composer it is text.
     let (_r, mut app) = commented();

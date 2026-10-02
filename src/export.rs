@@ -47,7 +47,7 @@ pub trait ExportTarget {
     fn failure_message(&self, error: &anyhow::Error) -> String;
 }
 
-fn counted_comments(count: usize) -> String {
+pub(crate) fn counted_comments(count: usize) -> String {
     let noun = if count == 1 { "comment" } else { "comments" };
     format!("{count} {noun}")
 }
@@ -110,19 +110,6 @@ fn select_tool(
     tools.iter().copied().find(|(cmd, _)| present(cmd))
 }
 
-/// The refusal [`Agent::export`] returns when the agent is not waiting for input, holding
-/// herdr's label for its state.
-#[derive(Debug)]
-pub struct Busy(pub String);
-
-impl std::fmt::Display for Busy {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "agent is {}", self.0)
-    }
-}
-
-impl std::error::Error for Busy {}
-
 /// One chosen agent pane: fill its input via `herdr pane send-text`, then focus it.
 ///
 /// The pane is decided before the export runs, by the sole-agent path or by the picker, and
@@ -145,27 +132,26 @@ impl ExportTarget for Agent {
         format!("added {} to {}", counted_comments(count), self.name)
     }
 
-    /// A busy agent is named with its state, and the comments it did not take are said to
-    /// stay. Anything else means the pane closed after it was resolved, the only way that
-    /// happens in practice. herdr's own wording is a JSON envelope around a pane id, so the
-    /// reviewer gets a sentence instead and the payload goes to the log.
+    /// A refused send names its cause: the agent's state, or a herdr that did not answer. Any
+    /// other failure means the pane closed after it was resolved. herdr's own wording is a JSON
+    /// envelope around a pane id, so the reviewer gets a sentence instead and the payload goes
+    /// to the log.
     fn failure_message(&self, error: &anyhow::Error) -> String {
-        match error.downcast_ref::<Busy>() {
-            Some(Busy(state)) => format!("{} is {state} · comments kept", self.name),
+        match error.downcast_ref::<herdr::Refusal>() {
+            Some(herdr::Refusal::Busy(state)) => {
+                format!("{} is {state} — comments kept", self.name)
+            }
+            Some(herdr::Refusal::Unanswered) => {
+                "herdr did not answer — copy to the clipboard instead".to_string()
+            }
             None => "agent not found".to_string(),
         }
     }
 
-    /// Reads the agent's state first: a paste into an agent mid-turn or at a prompt lands on
-    /// whatever is on screen and never becomes its next message, so only an agent waiting for
-    /// input takes the send. The state is read here, at the moment of sending, because the
-    /// picker's rows can be minutes old.
+    /// Only an agent waiting for input takes the send ([`herdr::ensure_ready`]). The state is
+    /// read here, at the moment of sending, because the picker's rows can be minutes old.
     fn export(&self, text: &str) -> Result<()> {
-        match herdr::readiness(&self.pane)? {
-            herdr::Readiness::Ready => {}
-            herdr::Readiness::Busy(state) => return Err(Busy(state).into()),
-            herdr::Readiness::Gone => bail!("agent pane {} is gone", self.pane),
-        }
+        herdr::ensure_ready(&self.pane)?;
         herdr::send_text(&self.pane, text)?;
         // Focus is a convenience once the text is delivered; a focus failure must NOT fail the
         // export, or the comments stay unconsumed and the next Send duplicates the whole review.
@@ -211,8 +197,13 @@ mod tests {
     #[test]
     fn a_busy_agent_is_named_with_its_state_and_the_comments_kept() {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        let busy = anyhow::Error::from(super::Busy("working".into()));
-        assert_eq!(agent.failure_message(&busy), "release-bot is working · comments kept");
+        let busy = anyhow::Error::from(crate::herdr::Refusal::Busy("working".into()));
+        assert_eq!(agent.failure_message(&busy), "release-bot is working — comments kept");
+        let silent = anyhow::Error::from(crate::herdr::Refusal::Unanswered);
+        assert_eq!(
+            agent.failure_message(&silent),
+            "herdr did not answer — copy to the clipboard instead"
+        );
         let gone = anyhow::anyhow!("herdr refused");
         assert_eq!(agent.failure_message(&gone), "agent not found");
     }
