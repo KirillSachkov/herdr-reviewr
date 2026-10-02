@@ -384,7 +384,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         if !crate::theme::is_known(theme) {
             return Err(PluginConfigError::new(
                 path,
-                format!("invalid value for `theme`: {theme:?}; expected a built-in theme name"),
+                format!("invalid value for `theme`: expected a built-in theme name, not `{theme}`"),
             ));
         }
         theme.clone_into(&mut config.theme);
@@ -530,7 +530,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             return Err(PluginConfigError::new(
                 path,
                 format!(
-                    "invalid value for `{key}`; expected a hostname no other forge recognizes, but {value:?} is already `{owner}`"
+                    "invalid value for `{key}`: expected a hostname no other forge uses, not `{value}`, which is already `{owner}`"
                 ),
             ));
         }
@@ -641,12 +641,12 @@ fn string_value<'a>(
 }
 
 fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
-    PluginConfigError::new(path, format!("invalid value for `{key}`; expected {expected}"))
+    PluginConfigError::new(path, format!("invalid value for `{key}`: expected {expected}"))
 }
 
 /// The one `CFG-WHOLE-FILE` unknown-key grammar, shared by the top-level table and `[keybindings]`.
 fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError {
-    PluginConfigError::new(path, format!("unknown key {key:?}; expected one of {options}"))
+    PluginConfigError::new(path, format!("unknown key `{key}`: expected one of {options}"))
 }
 
 /// The first `{` in `command` that opens neither `{file}` nor `{line}`.
@@ -868,13 +868,13 @@ mod tests {
         std::fs::write(&path, "theme = \"gruvbox\"\npoll = 500\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains(path.to_str().unwrap()));
-        assert!(error.contains("unknown key \"poll\""));
+        assert!(error.contains("unknown key `poll`"));
 
         // The retired `base_branches` key fails like any unknown key: the base is a picked,
         // per-repo choice now, never configuration.
         std::fs::write(&path, "base_branches = [\"dev\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
-        assert!(error.contains("unknown key \"base_branches\""));
+        assert!(error.contains("unknown key `base_branches`"));
 
         std::fs::write(&path, "theme = [\n").unwrap();
         assert!(
@@ -1113,7 +1113,7 @@ mod tests {
             .unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("`rendered`") && error.contains("`navigator-position`"), "{error}");
-        assert!(error.contains("p is bound"), "{error}");
+        assert!(error.contains("`p` is bound"), "{error}");
     }
 
     #[test]
@@ -1159,7 +1159,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), "[keybindings]\nfoo = [\"x\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
-        assert!(error.contains("unknown key \"keybindings.foo\""), "{error}");
+        assert!(error.contains("unknown key `keybindings.foo`"), "{error}");
         assert!(error.contains("comment"), "the error lists the action names: {error}");
     }
 

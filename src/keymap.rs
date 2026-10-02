@@ -279,14 +279,14 @@ impl Keymap {
                 match seen.iter().find(|(k, _)| *k == key) {
                     Some((_, first)) if first == action => {
                         return Err(format!(
-                            "{} is bound twice to `{}`",
+                            "`{}` is bound twice to `{}`",
                             key.config_str(),
                             action.name()
                         ));
                     }
                     Some((_, first)) => {
                         return Err(format!(
-                            "{} is bound to both `{}` and `{}`",
+                            "`{}` is bound to both `{}` and `{}`",
                             key.config_str(),
                             first.name(),
                             action.name()

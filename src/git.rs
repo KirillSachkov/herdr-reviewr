@@ -18,11 +18,28 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
-        .with_context(|| format!("running git {args:?}"))?;
+        .with_context(|| format!("git {} could not run", subcommand(args)))?;
     if !out.status.success() {
-        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!("git {} failed: {}", subcommand(args), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The git subcommand an argv runs, for an error the reviewer reads: `rev-parse`, not the
+/// whole argv in Rust's debug quoting. The full argv goes to the log with the call.
+fn subcommand<'a>(args: &[&'a str]) -> &'a str {
+    let mut rest = args.iter().copied();
+    while let Some(arg) = rest.next() {
+        match arg {
+            // A global option that takes the next word as its value.
+            "-c" | "-C" => {
+                rest.next();
+            }
+            arg if arg.starts_with('-') => {}
+            arg => return arg,
+        }
+    }
+    ""
 }
 
 /// Like [`git`], but returns stdout even on non-zero exit (e.g. `diff --no-index`).
@@ -462,7 +479,7 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> 
         .env("LC_ALL", "C")
         .args(args)
         .output()
-        .map_err(|e| GitFail(format!("git {args:?}: {e}")))
+        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))
 }
 
 /// Run git where exit 0 is a value, exit 1 is a designated clean absence (`--verify
@@ -475,7 +492,11 @@ fn git_tristate(repo: &Path, args: &[&str]) -> Result<Option<String>, GitFail> {
     if out.status.code() == Some(1) {
         return Ok(None);
     }
-    Err(GitFail(format!("git {args:?}: {}", String::from_utf8_lossy(&out.stderr).trim())))
+    Err(GitFail(format!(
+        "git {} failed: {}",
+        subcommand(args),
+        String::from_utf8_lossy(&out.stderr).trim()
+    )))
 }
 
 /// Run git where any non-zero exit is a failure. Exit 0 with empty output is a clean
@@ -484,7 +505,8 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
     let out = run_git(repo, args)?;
     if !out.status.success() {
         return Err(GitFail(format!(
-            "git {args:?}: {}",
+            "git {} failed: {}",
+            subcommand(args),
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
@@ -1031,7 +1053,7 @@ fn remote_identity(
     if stderr.to_lowercase().contains("no such remote") {
         return Ok(RepositoryIdentity::Missing);
     }
-    Err(GitFail(format!("git {args:?}: {}", stderr.trim())))
+    Err(GitFail(format!("git {} failed: {}", subcommand(&args), stderr.trim())))
 }
 
 /// Peel `rev` to a commit object id. A leading `-` is not a
@@ -1381,17 +1403,20 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))?;
     let mut stdin = child.stdin.take().expect("stdin piped");
     let owned = input.to_string();
     // A git that answers and exits before reading it all closes the pipe. That is its answer,
     // not a failure of ours, so the write's result is dropped and the exit status decides.
     let writer = std::thread::spawn(move || drop(stdin.write_all(owned.as_bytes())));
-    let out = child.wait_with_output().map_err(|e| GitFail(format!("git {args:?}: {e}")))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))?;
     let _ = writer.join();
     if !out.status.success() {
         return Err(GitFail(format!(
-            "git {args:?}: {}",
+            "git {} failed: {}",
+            subcommand(args),
             String::from_utf8_lossy(&out.stderr).trim()
         )));
     }
@@ -1460,9 +1485,9 @@ fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .env("GIT_INDEX_FILE", index)
         .output()
-        .with_context(|| format!("running git {args:?}"))?;
+        .with_context(|| format!("git {} could not run", subcommand(args)))?;
     if !out.status.success() {
-        bail!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!("git {} failed: {}", subcommand(args), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -1995,6 +2020,12 @@ mod tests {
     };
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+
+    #[test]
+    fn a_git_error_names_the_subcommand_not_the_argv() {
+        assert_eq!(super::subcommand(&["-c", "x=y", "rev-parse", "--verify", "HEAD"]), "rev-parse");
+        assert_eq!(super::subcommand(&["for-each-ref"]), "for-each-ref");
+    }
 
     #[test]
     fn repo_identity_ignores_case_but_not_forge_host_or_depth() {

@@ -4986,7 +4986,7 @@ impl App {
         match herdr::send_target() {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
-            Err(e) => self.status = self.failure_line(&e, |e| e.to_string()),
+            Err(e) => self.status = self.failure_line(&e, ToString::to_string),
         }
     }
 
