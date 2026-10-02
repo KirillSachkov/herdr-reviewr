@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-10-02
+
 ### Added
 - **Review markdown rendered**: comments, change marks and find. `m` flips every markdown file in the pane, and `markdown_view` opens it rendered.
   Thanks [@kamadakohei](https://github.com/kamadakohei) ([#48](https://github.com/persiyanov/herdr-reviewr/issues/48)) and [@zereight](https://github.com/zereight) ([#103](https://github.com/persiyanov/herdr-reviewr/issues/103)) for asking.
