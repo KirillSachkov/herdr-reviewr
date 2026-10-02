@@ -404,6 +404,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             _ => {
                 return Err(value_error(
                     path,
+                    value,
                     "default_scope",
                     "one of uncommitted, branch, last-turn",
                 ));
@@ -415,7 +416,14 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             match string_value(path, "markdown_view", value, "one of source, rendered")? {
                 "source" => MarkdownView::Source,
                 "rendered" => MarkdownView::Rendered,
-                _ => return Err(value_error(path, "markdown_view", "one of source, rendered")),
+                _ => {
+                    return Err(value_error(
+                        path,
+                        value,
+                        "markdown_view",
+                        "one of source, rendered",
+                    ));
+                }
             };
     }
     if let Some(value) = table.get("navigator_position") {
@@ -432,6 +440,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             _ => {
                 return Err(value_error(
                     path,
+                    value,
                     "navigator_position",
                     "one of right, bottom, left, top",
                 ));
@@ -452,6 +461,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             _ => {
                 return Err(value_error(
                     path,
+                    value,
                     "toggle_placement",
                     "one of split, overlay, zoomed, tab",
                 ));
@@ -463,12 +473,14 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             match string_value(path, "toggle_direction", value, "one of right, down")? {
                 "right" => ToggleDirection::Right,
                 "down" => ToggleDirection::Down,
-                _ => return Err(value_error(path, "toggle_direction", "one of right, down")),
+                _ => {
+                    return Err(value_error(path, value, "toggle_direction", "one of right, down"));
+                }
             };
     }
     if let Some(value) = table.get("auto_open") {
         config.auto_open =
-            value.as_bool().ok_or_else(|| value_error(path, "auto_open", "a boolean"))?;
+            value.as_bool().ok_or_else(|| value_error(path, value, "auto_open", "a boolean"))?;
     }
     if let Some(value) = table.get("github_host") {
         config.github_host = Some(parse_forge_host(path, "github_host", value)?);
@@ -483,15 +495,11 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         let command = value
             .as_str()
             .filter(|c| !c.trim().is_empty())
-            .ok_or_else(|| value_error(path, "editor", "a non-empty command"))?;
+            .ok_or_else(|| value_error(path, value, "editor", "a non-empty command"))?;
         // `{file}` and `{line}` are the whole grammar, so a typo for one of them would
         // otherwise reach the editor as a literal word and open a file named after the typo
         if let Some(unknown) = unknown_placeholder(command, &["file", "line"]) {
-            return Err(value_error(
-                path,
-                "editor",
-                &format!("`{{file}}` and `{{line}}` as the only placeholders, not `{unknown}`"),
-            ));
+            return Err(placeholder_error(path, "editor", &unknown, "`{file}` and `{line}`"));
         }
         config.editor = Some(command.to_owned());
     }
@@ -499,18 +507,19 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         let command = value
             .as_str()
             .filter(|command| !command.trim().is_empty())
-            .ok_or_else(|| value_error(path, "url_opener", "a non-empty command"))?;
+            .ok_or_else(|| value_error(path, value, "url_opener", "a non-empty command"))?;
         if let Some(unknown) = unknown_placeholder(command, &["url"]) {
-            return Err(value_error(
-                path,
-                "url_opener",
-                &format!("`{{url}}` as the only placeholder, not `{unknown}`"),
-            ));
+            return Err(placeholder_error(path, "url_opener", &unknown, "`{url}`"));
         }
         // The program is the first word; it must name one, and never be the link itself.
         let program = crate::editor::split_command(command).into_iter().next();
         if program.as_deref().is_none_or(|p| p.is_empty() || p.contains("{url}")) {
-            return Err(value_error(path, "url_opener", "a command that names a program first"));
+            return Err(value_error(
+                path,
+                value,
+                "url_opener",
+                "a command that names a program first",
+            ));
         }
         config.url_opener = Some(command.to_owned());
     }
@@ -578,7 +587,7 @@ fn parse_keybindings(
 ) -> Result<crate::keymap::Keymap, PluginConfigError> {
     use crate::keymap::{Action, Keymap};
     let Some(entries) = value.as_table() else {
-        return Err(value_error(path, "keybindings", "a table of action bindings"));
+        return Err(value_error(path, value, "keybindings", "a table of action bindings"));
     };
     let mut overrides = Vec::with_capacity(entries.len());
     let mut names_by_action = Vec::with_capacity(entries.len());
@@ -609,19 +618,19 @@ fn parse_keybindings(
         let entry_key = format!("keybindings.{name}");
         let expected = expected.as_str();
         let Some(values) = keys.as_array() else {
-            return Err(value_error(path, &entry_key, expected));
+            return Err(value_error(path, keys, &entry_key, expected));
         };
         if values.is_empty() {
-            return Err(value_error(path, &entry_key, expected));
+            return Err(value_error(path, keys, &entry_key, expected));
         }
         let mut keys = Vec::with_capacity(values.len());
         for value in values {
             let Some(text) = value.as_str() else {
-                return Err(value_error(path, &entry_key, expected));
+                return Err(value_error(path, value, &entry_key, expected));
             };
             match parse_key(text) {
                 Some(key) => keys.push(key),
-                None => return Err(value_error(path, &entry_key, expected)),
+                None => return Err(value_error(path, value, &entry_key, expected)),
             }
         }
         overrides.push((action, keys));
@@ -637,11 +646,31 @@ fn string_value<'a>(
     value: &'a toml::Value,
     expected: &str,
 ) -> Result<&'a str, PluginConfigError> {
-    value.as_str().ok_or_else(|| value_error(path, key, expected))
+    value.as_str().ok_or_else(|| value_error(path, value, key, expected))
 }
 
-fn value_error(path: &Path, key: &str, expected: &str) -> PluginConfigError {
-    PluginConfigError::new(path, format!("invalid value for `{key}`: expected {expected}"))
+/// The one invalid-value grammar: the key, what it takes, and what it was given, so the line
+/// says what to fix without opening the file.
+fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> PluginConfigError {
+    let given = match value {
+        toml::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+    PluginConfigError::new(
+        path,
+        format!("invalid value for `{key}`: expected {expected}, not `{given}`"),
+    )
+}
+
+/// A command template naming a placeholder the key does not know: the typo, then the ones it
+/// does.
+fn placeholder_error(path: &Path, key: &str, unknown: &str, known: &str) -> PluginConfigError {
+    PluginConfigError::new(
+        path,
+        format!(
+            "invalid value for `{key}`: unknown placeholder `{unknown}`, expected only {known}"
+        ),
+    )
 }
 
 /// The one `CFG-WHOLE-FILE` unknown-key grammar, shared by the top-level table and `[keybindings]`.
@@ -682,7 +711,7 @@ fn parse_forge_host(
     let lower = host.to_ascii_lowercase();
     let built_in = crate::git::forge_for_host(&lower, &crate::git::ForgeHosts::default());
     if !valid_host_syntax(host) || built_in.is_some() {
-        return Err(value_error(path, key, expected));
+        return Err(value_error(path, value, key, expected));
     }
     Ok(lower)
 }
@@ -926,7 +955,9 @@ mod tests {
             std::fs::write(&path, text).unwrap();
             let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
             assert!(error.contains(key), "{text}: {error}");
-            assert!(error.contains("expected"), "{text}: {error}");
+            // Every invalid value says what the key takes and what it was given.
+            let given = error.contains(", not `") || error.contains("unknown placeholder `");
+            assert!(error.contains("expected") && given, "{text}: {error}");
         }
     }
 

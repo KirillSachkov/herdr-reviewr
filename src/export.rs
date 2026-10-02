@@ -146,9 +146,10 @@ impl ExportTarget for Agent {
         format!("sent {} to {}", counted_comments(count), self.name)
     }
 
-    /// A send that failed past the readiness check means the pane closed after it was resolved.
-    /// herdr's own wording is a JSON envelope around a pane id, so the reviewer gets a sentence
-    /// and the payload goes to the log. A [`herdr::Refusal`] never reaches here: the app words it.
+    /// herdr ran and refused the paste: the pane closed after it was resolved. herdr's own
+    /// wording is a JSON envelope around a pane id, so the reviewer gets a sentence and the
+    /// payload goes to the log. A [`herdr::Refusal`], a herdr that never answered included,
+    /// never reaches here: the app words it.
     fn failure_message(&self, _error: &anyhow::Error) -> String {
         format!("{} closed", self.name)
     }

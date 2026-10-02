@@ -199,8 +199,8 @@ Verified on Claude Code 2.1.287 with the same bracketed paste reviewr sends:
 - **Mid-turn (`working`)**, the paste lands in the input as `[Pasted text #N]` and stays there
   after the turn ends, for the reviewer to submit.
 
-So every other `agent_status` sends, `working` included. On 0.8.2, `agent list` answers in under 10 ms. The read and the write are two calls, and
-herdr has no atomic send-if-idle.
+So every other `agent_status` sends, `working` included. On 0.8.2, `agent list` answers in under
+10 ms. The read and the write are two calls, and herdr has no atomic send-if-ready.
 
 ```
 herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter

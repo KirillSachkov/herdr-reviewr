@@ -86,7 +86,8 @@ fn herdr(args: &[&str]) -> Result<String> {
         Ok(out) => out,
         Err(e) => {
             logln!("herdr {args:?} could not run: {e}");
-            bail!("herdr could not run");
+            // No herdr to ask is herdr not answering, whichever call it was.
+            return Err(Refusal::Unanswered.into());
         }
     };
     if !out.status.success() {
@@ -438,8 +439,9 @@ enum Readiness {
 }
 
 /// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of
-/// sending: the prompt owns the screen, so the paste would land in it and never reach the input. The read and the send are two herdr calls, so an
-/// agent can still start a turn in between. herdr offers no atomic send-if-idle.
+/// sending: a prompt drops a paste, so the comments would never reach the input
+/// (`docs/herdr-api-notes.md`). The read and the send are two herdr calls, so an agent can
+/// still raise a prompt in between. herdr offers no atomic send-if-ready.
 pub fn ensure_ready(pane: &str) -> Result<()> {
     let agents = match agent_list() {
         Ok(agents) => agents,
@@ -455,10 +457,9 @@ pub fn ensure_ready(pane: &str) -> Result<()> {
     }
 }
 
-/// Only an agent at a prompt refuses: a permission or confirm prompt owns the screen, so the
-/// paste lands in it rather than in the input. A working agent takes typing mid-turn, and the
-/// paste waits in its input for the reviewer to submit, which is how a review reaches a running
-/// agent.
+/// Only an agent at a prompt refuses: a permission or confirm prompt drops a paste. A working
+/// agent takes typing mid-turn, and the paste waits in its input for the reviewer to submit,
+/// which is how a review reaches a running agent.
 fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
     match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
         None => Readiness::Gone,
@@ -558,7 +559,7 @@ mod tests {
             ("working", Ready),
             ("unknown", Ready),
             ("compacting", Ready),
-            // A prompt owns the screen, so the paste would land in it.
+            // A prompt drops a paste.
             ("blocked", Busy("claude".into())),
         ] {
             assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");

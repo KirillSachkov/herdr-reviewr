@@ -985,7 +985,7 @@ fn pr_empty_states_are_calm() {
     app.pr = PrView::Detached;
     let out = render(&app);
     assert!(
-        out.contains("No pull request found — HEAD is detached."),
+        out.contains("No pull request for a detached HEAD."),
         "detached wording stays factual:\n{out}"
     );
     app.pr = PrView::GitError("git remote get-url upstream failed".to_string());

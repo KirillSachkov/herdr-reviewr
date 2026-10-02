@@ -4867,7 +4867,7 @@ fn pr_empty_msg(
     match view {
         forge::PrView::Loading => "loading…".into(),
         forge::PrView::Pending | forge::PrView::Pr(_) | forge::PrView::Held => String::new(),
-        forge::PrView::Detached => format!("No {noun} found — HEAD is detached."),
+        forge::PrView::Detached => format!("No {noun} for a detached HEAD."),
         forge::PrView::NoPr => format!("No {noun} yet. Ready to ship?"),
         forge::PrView::NoCli(_)
         | forge::PrView::NoExtension(_)

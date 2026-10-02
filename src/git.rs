@@ -18,15 +18,22 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
-        .with_context(|| format!("git {} could not run", subcommand(args)))?;
+        .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
     if !out.status.success() {
-        bail!("git {} failed: {}", subcommand(args), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// A failed git call's message: the subcommand and git's own words for the reviewer, and the
+/// whole argv for the log.
+fn git_error(args: &[&str], what: &str, detail: impl std::fmt::Display) -> String {
+    crate::logln!("git {args:?} {what}: {detail}");
+    format!("git {} {what}: {detail}", subcommand(args))
+}
+
 /// The git subcommand an argv runs, for an error the reviewer reads: `rev-parse`, not the
-/// whole argv in Rust's debug quoting. The full argv goes to the log with the call.
+/// whole argv in Rust's debug quoting.
 fn subcommand<'a>(args: &[&'a str]) -> &'a str {
     let mut rest = args.iter().copied();
     while let Some(arg) = rest.next() {
@@ -479,7 +486,7 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> 
         .env("LC_ALL", "C")
         .args(args)
         .output()
-        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))
+        .map_err(|e| GitFail(git_error(args, "could not run", e)))
 }
 
 /// Run git where exit 0 is a value, exit 1 is a designated clean absence (`--verify
@@ -492,11 +499,7 @@ fn git_tristate(repo: &Path, args: &[&str]) -> Result<Option<String>, GitFail> {
     if out.status.code() == Some(1) {
         return Ok(None);
     }
-    Err(GitFail(format!(
-        "git {} failed: {}",
-        subcommand(args),
-        String::from_utf8_lossy(&out.stderr).trim()
-    )))
+    Err(GitFail(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim())))
 }
 
 /// Run git where any non-zero exit is a failure. Exit 0 with empty output is a clean
@@ -504,10 +507,10 @@ fn git_tristate(repo: &Path, args: &[&str]) -> Result<Option<String>, GitFail> {
 fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
     let out = run_git(repo, args)?;
     if !out.status.success() {
-        return Err(GitFail(format!(
-            "git {} failed: {}",
-            subcommand(args),
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(GitFail(git_error(
+            args,
+            "failed",
+            String::from_utf8_lossy(&out.stderr).trim(),
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1053,7 +1056,7 @@ fn remote_identity(
     if stderr.to_lowercase().contains("no such remote") {
         return Ok(RepositoryIdentity::Missing);
     }
-    Err(GitFail(format!("git {} failed: {}", subcommand(&args), stderr.trim())))
+    Err(GitFail(git_error(&args, "failed", stderr.trim())))
 }
 
 /// Peel `rev` to a commit object id. A leading `-` is not a
@@ -1303,8 +1306,9 @@ pub fn ahead_behind_oids(
         git_strict(repo, &["rev-list", "--left-right", "--count", &format!("{local}...{other}")])?;
     let mut it = out.split_whitespace();
     let parse = |s: Option<&str>| {
-        s.and_then(|v| v.parse().ok())
-            .ok_or_else(|| GitFail(format!("rev-list --left-right returned {out:?}")))
+        s.and_then(|v| v.parse().ok()).ok_or_else(|| {
+            GitFail(git_error(&["rev-list"], "returned unexpected output", out.trim()))
+        })
     };
     let ahead = parse(it.next())?;
     let behind = parse(it.next())?;
@@ -1403,21 +1407,19 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))?;
+        .map_err(|e| GitFail(git_error(args, "could not run", e)))?;
     let mut stdin = child.stdin.take().expect("stdin piped");
     let owned = input.to_string();
     // A git that answers and exits before reading it all closes the pipe. That is its answer,
     // not a failure of ours, so the write's result is dropped and the exit status decides.
     let writer = std::thread::spawn(move || drop(stdin.write_all(owned.as_bytes())));
-    let out = child
-        .wait_with_output()
-        .map_err(|e| GitFail(format!("git {} could not run: {e}", subcommand(args))))?;
+    let out = child.wait_with_output().map_err(|e| GitFail(git_error(args, "could not run", e)))?;
     let _ = writer.join();
     if !out.status.success() {
-        return Err(GitFail(format!(
-            "git {} failed: {}",
-            subcommand(args),
-            String::from_utf8_lossy(&out.stderr).trim()
+        return Err(GitFail(git_error(
+            args,
+            "failed",
+            String::from_utf8_lossy(&out.stderr).trim(),
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1485,9 +1487,9 @@ fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .env("GIT_INDEX_FILE", index)
         .output()
-        .with_context(|| format!("git {} could not run", subcommand(args)))?;
+        .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
     if !out.status.success() {
-        bail!("git {} failed: {}", subcommand(args), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

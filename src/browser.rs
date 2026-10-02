@@ -23,14 +23,14 @@ pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
         let (program, args) =
             opener_argv(template, url).context("`url_opener` names no program")?;
         let command = crate::proc::user_command(&program)
-            .with_context(|| format!("not found: {program} (`url_opener`)"))?;
+            .with_context(|| format!("`url_opener` not found: {program}"))?;
         (program, args, command)
     } else {
         let tool = OPENERS
             .iter()
             .copied()
             .find(|candidate| crate::proc::on_path(candidate))
-            .context("no URL opener found: install `open`/`xdg-open`, or set `url_opener`")?;
+            .context("no link opener: install open or xdg-open, or set `url_opener`")?;
         (tool.to_string(), vec![url.to_string()], crate::proc::command(tool))
     };
     let mut child = command
@@ -39,7 +39,7 @@ pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| anyhow::anyhow!("URL opener {tool:?} could not start: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("{tool} could not start: {error}"))?;
     // Reaped off the frame thread, so a finished opener never lingers as a zombie.
     std::thread::spawn(move || drop(child.wait()));
     Ok(())
