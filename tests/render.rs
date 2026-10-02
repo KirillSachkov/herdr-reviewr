@@ -4630,7 +4630,7 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
     app.request_quit();
     let row = footer_line(&render_at(&app, 100));
     assert!(
-        row.contains("Q quit, drop 1 comment") && row.contains("esc stay"),
+        row.contains("Q quit (1 comment pending)") && row.contains("esc cancel"),
         "the footer is the question:\n{row}"
     );
     assert!(row.contains("s send 1") && row.contains("y copy"), "{row}");

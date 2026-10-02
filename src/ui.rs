@@ -2746,10 +2746,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
         A::QuitDiscard => {
-            let dropped = crate::export::counted_comments(app.store.len());
-            return (hint(K::QuitDiscard), format!("quit, drop {dropped}"));
+            let pending = crate::export::counted_comments(app.store.len());
+            return (hint(K::QuitDiscard), format!("quit ({pending} pending)"));
         }
-        A::Stay => ("esc".into(), "stay"),
         A::Save => ("enter".into(), "save"),
         A::Newline => ("shift+enter".into(), "newline"),
         A::Cancel | A::ClosePicker => ("esc".into(), "cancel"),

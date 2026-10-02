@@ -578,9 +578,8 @@ pub enum FooterAction {
     Send,
     List,
     Copy,
-    /// The quit question's own bar: quit and drop the unsent comments, or stay.
+    /// The quit question's answer that quits, naming the comments still pending.
     QuitDiscard,
-    Stay,
     Save,
     Newline,
     Cancel,
@@ -4719,7 +4718,7 @@ impl App {
         // and no bands. The escape action comes right after the primary so the exit hint survives a
         // narrow-width trim (trailing `Do` actions drop first).
         if self.confirming_quit {
-            return vec![(A::QuitDiscard, Primary), (A::Stay, Do), (A::Send, Do), (A::Copy, Do)];
+            return vec![(A::QuitDiscard, Primary), (A::Cancel, Do), (A::Send, Do), (A::Copy, Do)];
         }
         match self.mode {
             Mode::Composing { .. } => {

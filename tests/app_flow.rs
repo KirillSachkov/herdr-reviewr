@@ -9468,7 +9468,7 @@ fn quitting_with_unsent_comments_asks_first() {
         app.footer_bands(),
         [
             (FooterAction::QuitDiscard, Band::Primary),
-            (FooterAction::Stay, Band::Do),
+            (FooterAction::Cancel, Band::Do),
             (FooterAction::Send, Band::Do),
             (FooterAction::Copy, Band::Do),
         ]
