@@ -72,6 +72,10 @@ pub struct LineMeta {
     pub details: Option<DetailsHit>,
     /// Whether the line is the blank gap set above its block, not its content.
     pub gap: bool,
+    /// The source lines this line's own text comes from, first and last — within its
+    /// block's range, so a wrapped paragraph's lines tell apart which source line each
+    /// shows. A gap's is its block's first line.
+    pub lines: (usize, usize),
 }
 
 /// Click target for a `<details>` summary: display columns, and the key the expand state
@@ -124,6 +128,7 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         block_src: 1,
         block_end: 1,
         covered: Vec::new(),
+        row_lines: None,
         open_blocks: Vec::new(),
         comment_lines: Vec::new(),
         in_comment: false,
@@ -225,6 +230,8 @@ struct Chunk {
     text: String,
     style: Style,
     link: Option<usize>,
+    /// The source line the text came from.
+    line: usize,
 }
 
 /// An in-progress code block: the fence's language tag, its content, and whether a
@@ -257,6 +264,9 @@ struct Renderer<'a> {
     /// The source ranges of blocks that rendered at least one line: their structural lines —
     /// fences, delimiter rows, wrapper tags, item markers — show as part of them.
     covered: Vec<(usize, usize)>,
+    /// The source lines the lines being pushed take their own text from, while narrower than
+    /// their block's ([`LineMeta::lines`]).
+    row_lines: Option<(usize, usize)>,
     /// The blocks open now: each one's closing tag, source lines, and the rendered line count
     /// at its start.
     open_blocks: Vec<(TagEnd, usize, usize, usize)>,
@@ -588,7 +598,8 @@ impl Renderer<'_> {
                 None => (start, end),
             });
         }
-        self.chunks_mut().push(Chunk { text, style, link });
+        let source = self.event_lines.0;
+        self.chunks_mut().push(Chunk { text, style, link, line: source });
     }
 
     /// The innermost open link's url index, stamped onto every chunk inside it.
@@ -941,12 +952,14 @@ impl Renderer<'_> {
         if let Some(slug) = self.pending_anchor.take() {
             self.out.anchors.push((slug, self.out.lines.len()));
         }
+        let own = self.row_lines.unwrap_or((self.block_src, self.block_end.max(self.block_src)));
         self.out.meta.push(LineMeta {
             source_line: self.block_src,
             source_end: self.block_end.max(self.block_src),
             links,
             details: self.pending_details.take(),
             gap: false,
+            lines: own,
         });
         self.out.lines.push(line);
     }
@@ -967,6 +980,7 @@ impl Renderer<'_> {
                 links: Vec::new(),
                 details: None,
                 gap: true,
+                lines: (self.block_src, self.block_src),
             });
             self.out.lines.push(if bars.is_empty() {
                 Line::default()
@@ -1005,10 +1019,30 @@ impl Renderer<'_> {
         let marker = self.marker.take();
         let (first, cont) = self.prefix(marker.as_deref());
         let chunks = std::mem::take(&mut self.inline);
+        // Each source line's share of the run, by its count of placed characters: the wrapper
+        // drops or adds spaces and line breaks alone, so counting the rest maps every wrapped
+        // line back to the source lines its text came from.
+        let placed = |c: char| c != ' ' && c != '\n';
+        let mut shares: Vec<(usize, usize)> = Vec::new();
+        let mut total = 0;
+        for c in &chunks {
+            total += c.text.chars().filter(|&ch| placed(ch)).count();
+            shares.push((total, c.line));
+        }
+        let line_of = |k: usize| shares.iter().find(|&&(end, _)| k < end).map(|&(_, l)| l);
         let fragments: Vec<Fragment> =
             chunks.into_iter().map(|c| (c.text, c.style, c.link)).collect();
         let wrapped = wrap_fragments(&fragments, self.budget(first.width()), true);
+        let mut seen = 0;
         for (i, (spans, links)) in wrapped.into_iter().enumerate() {
+            let n: usize =
+                spans.iter().map(|s| s.content.chars().filter(|&ch| placed(ch)).count()).sum();
+            self.row_lines = match (line_of(seen), n.checked_sub(1).and_then(|l| line_of(seen + l)))
+            {
+                (Some(a), Some(b)) => Some((a, b)),
+                _ => Some((self.block_src, self.block_src)),
+            };
+            seen += n;
             let prefix = if i == 0 { first.clone() } else { cont.clone() };
             // Link columns come back content-relative; the prefix shifts them on screen.
             let off = prefix.width();
@@ -1024,6 +1058,7 @@ impl Renderer<'_> {
             line.extend(spans);
             self.push_line(Line::from(line), link_spans);
         }
+        self.row_lines = None;
         (self.block_src, self.block_end) = stamp;
         if set_blank {
             self.needs_blank = true;
@@ -1090,12 +1125,14 @@ impl Renderer<'_> {
         for (i, line) in highlighted.into_iter().enumerate() {
             self.block_src = if i == 0 { fence } else { block_start + i };
             self.block_end = if fenced && i == last { close } else { block_start + i };
+            self.row_lines = Some((block_start + i, block_start + i));
             let fragments: Vec<(String, Style)> = line
                 .into_iter()
                 .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
                 .collect();
             self.emit_fragments(fragments, CODE_INDENT);
         }
+        self.row_lines = None;
         self.needs_blank = true;
     }
 

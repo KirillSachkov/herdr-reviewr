@@ -1644,8 +1644,17 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
 
 /// Map one key press onto `App` through `keymap` — the keymap of the frame on screen, so a
 /// stale hint never dispatches a different action than it advertised.
-/// Public for the dispatch tests; the event loop is the runtime caller.
+/// Public for the dispatch tests; the event loop is the runtime caller. The reviewer's own
+/// move off a picked comment drops the pick ([`App::drop_pick_on_move`]).
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
+    let before = app.pick_place();
+    let done = dispatch_key(app, key, area, keymap);
+    app.drop_pick_on_move(before);
+    done
+}
+
+/// [`handle_key`]'s dispatch, without the pick bookkeeping around it.
+fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     use crate::keymap::Action as K;
     use KeyCode::{Char, Down, Enter, Esc, Left, PageDown, PageUp, Right, Tab, Up};
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -2359,6 +2368,21 @@ fn perform_click(
 /// on screen — so a config swap at the click boundary cannot shift the spans under the pointer.
 /// Public for the dispatch tests, like [`handle_key`]; the event loop is the runtime caller.
 pub fn handle_mouse(
+    app: &mut App,
+    m: MouseEvent,
+    area: Rect,
+    heights: &[usize],
+    keymap: &Keymap,
+    target: &dyn crate::export::ExportTarget,
+) -> Result<()> {
+    let before = app.pick_place();
+    let done = dispatch_mouse(app, m, area, heights, keymap, target);
+    app.drop_pick_on_move(before);
+    done
+}
+
+/// [`handle_mouse`]'s dispatch, without the pick bookkeeping around it.
+fn dispatch_mouse(
     app: &mut App,
     m: MouseEvent,
     area: Rect,

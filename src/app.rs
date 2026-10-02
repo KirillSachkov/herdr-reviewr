@@ -116,29 +116,14 @@ struct TabStash {
     visited: bool,
 }
 
-/// A picked comment ([`App::comment_target`]): its store index, the anchor it had when picked
-/// — a store change can shift indices, so the anchor must still match — and the place of the
-/// cursor row the pick put it on, by identity: a poll that moves the row keeps the pick, the
-/// reviewer's own move off that row drops it (Continuity).
+/// A picked comment ([`App::comment_target`]): its store index and the anchor it had when
+/// picked — a store change can shift indices, so the anchor must still match. Keyed on the
+/// comment alone, never on a row: a poll that moves the rows keeps the pick, and the
+/// reviewer's own cursor moves drop it ([`App::drop_pick_on_move`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CommentTarget {
     index: usize,
-    at: Option<RowKey>,
     anchor: (String, Side, u32, u32),
-}
-
-/// A read-pane row's identity across rebuilds: a rendered row's, or a source row's line
-/// numbers on both sides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowKey {
-    Rendered(RowId),
-    Source(Option<u32>, Option<u32>),
-}
-
-impl RowKey {
-    fn of(row: &Row) -> Self {
-        RowId::of(row).map_or(RowKey::Source(row.old_no(), row.new_no()), RowKey::Rendered)
-    }
 }
 
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
@@ -784,6 +769,9 @@ pub struct App {
     /// The comment a card step or a card click picked, so `e`/`d` reach it where several
     /// comments cover the cursor's row. It holds only while the cursor rests where it put it.
     comment_target: Option<CommentTarget>,
+    /// How many picks the session has made: a reviewer's input that moved the cursor without
+    /// raising it moved off the pick.
+    pick_seq: u64,
     /// The one live mouse gesture — born at mouse-down, ended on release or an interrupting event.
     pub gesture: crate::selection::Gesture,
     /// The settled selection: the last copy's span and its copied text, kept highlighted as
@@ -990,6 +978,7 @@ impl App {
             view_reload_held: false,
             select_anchor: None,
             comment_target: None,
+            pick_seq: 0,
             store: CommentStore::new(),
             list_cursor: 0,
             picker_rows: Vec::new(),
@@ -1827,23 +1816,25 @@ impl App {
         let place = showing.then(|| {
             let id = |i: usize| {
                 let id = self.visible.get(i).and_then(RowId::of)?;
-                Some(edit.map_or(id, |m| id.at(m.line(id.src()))))
+                Some(edit.map_or(id, |m| id.map(|line| m.line(line))))
             };
             (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
         });
         let mut rows = Vec::with_capacity(doc.lines.len());
-        let mut prev: Option<(usize, u32)> = None;
+        // A line's wrap: its index among its block's lines starting on the same source line.
+        let mut prev: Option<(usize, usize, u32)> = None;
         for (i, (line, meta)) in doc.lines.iter().zip(&doc.meta).enumerate() {
-            let offset = match prev {
-                Some((src, n)) if src == meta.source_line => n + 1,
+            let wrap = match prev {
+                Some((src, first, n)) if (src, first) == (meta.source_line, meta.lines.0) => n + 1,
                 _ => 0,
             };
-            prev = Some((meta.source_line, offset));
+            prev = Some((meta.source_line, meta.lines.0, wrap));
+            let source = (meta.lines.0 as u32, meta.lines.1 as u32);
             rows.push(Row::Rendered {
                 src: meta.source_line as u32,
                 src_end: meta.source_end as u32,
                 text: line.spans.iter().map(|s| s.content.as_ref()).collect(),
-                kind: RenderedKind::Block { offset, line: i as u32, bar: None, hides: None },
+                kind: RenderedKind::Block { source, wrap, line: i as u32, bar: None, hides: None },
             });
         }
         let marks = if self.diff.view == View::Diff {
@@ -4252,33 +4243,46 @@ impl App {
     /// The store index of a comment whose range covers the current diff row, if any.
     /// The picked comment comes first when it still covers that row.
     fn comment_under_cursor(&self) -> Option<usize> {
-        let covering: Vec<usize> = self
-            .comment_rows()
-            .into_iter()
-            .filter(|(_, rows)| rows.contains(&self.diff_cursor))
-            .map(|(ci, _)| ci)
-            .collect();
-        self.live_target().filter(|t| covering.contains(t)).or(covering.first().copied())
+        let rows = self.comment_rows();
+        let covering =
+            rows.iter().filter(|(_, r)| r.contains(&self.diff_cursor)).map(|(ci, _)| *ci);
+        self.live_target(&rows).or_else(|| covering.into_iter().next())
     }
 
     /// Pick comment `index` at the cursor's row: the card a step landed on, or a clicked card.
     pub fn target_comment_card(&mut self, index: usize) {
-        let at = self.visible.get(self.diff_cursor).map(RowKey::of);
-        self.comment_target = self.store.get(index).map(|c| CommentTarget {
-            index,
-            at,
-            anchor: (c.file.clone(), c.side, c.start, c.end),
-        });
+        self.pick_seq += 1;
+        self.comment_target = self
+            .store
+            .get(index)
+            .map(|c| CommentTarget { index, anchor: (c.file.clone(), c.side, c.start, c.end) });
     }
 
-    /// The picked comment's store index, while the cursor rests on the row the pick put it on
-    /// and the store still holds that comment there.
-    fn live_target(&self) -> Option<usize> {
+    /// The picked comment's store index, while the store still holds that comment and its
+    /// covered rows (`rows`, [`Self::comment_rows`]) include the cursor's row.
+    fn live_target(&self, rows: &[(usize, Vec<usize>)]) -> Option<usize> {
         let t = self.comment_target.as_ref()?;
         let c = self.store.get(t.index)?;
-        let same = t.anchor == (c.file.clone(), c.side, c.start, c.end);
-        let here = self.visible.get(self.diff_cursor).map(RowKey::of);
-        (same && t.at == here).then_some(t.index)
+        if t.anchor != (c.file.clone(), c.side, c.start, c.end) {
+            return None;
+        }
+        let covers = rows.iter().any(|(ci, r)| *ci == t.index && r.contains(&self.diff_cursor));
+        covers.then_some(t.index)
+    }
+
+    /// The pick's generation and the cursor, before a reviewer's input, for
+    /// [`Self::drop_pick_on_move`].
+    #[must_use]
+    pub fn pick_place(&self) -> (u64, usize) {
+        (self.pick_seq, self.diff_cursor)
+    }
+
+    /// Drop the pick when the reviewer's own input moved the cursor without picking anew: the
+    /// event loop calls this after each key and mouse event with the place it had before.
+    pub fn drop_pick_on_move(&mut self, (seq, cursor): (u64, usize)) {
+        if self.diff_cursor != cursor && self.pick_seq == seq {
+            self.comment_target = None;
+        }
     }
 
     pub fn delete_comment(&mut self) {
@@ -4302,9 +4306,9 @@ impl App {
     /// it steps from the cursor's row.
     pub fn jump_comment(&mut self, dir: isize) {
         let rendered = self.rendered_active();
-        let mut stops: Vec<(usize, usize)> = self
-            .comment_rows()
-            .into_iter()
+        let rows = self.comment_rows();
+        let mut stops: Vec<(usize, usize)> = rows
+            .iter()
             .filter_map(|(ci, rows)| {
                 let first = *rows.first()?;
                 let lead = rendered
@@ -4312,7 +4316,7 @@ impl App {
                     .flatten()
                     .filter(|lead| rows.contains(lead))
                     .unwrap_or(first);
-                Some((lead, ci))
+                Some((lead, *ci))
             })
             .collect();
         if stops.is_empty() {
@@ -4322,7 +4326,7 @@ impl App {
         stops.sort_by_key(|&(row, _)| row);
         let n = stops.len();
         let cur = self.diff_cursor;
-        let at = self.live_target().and_then(|t| stops.iter().position(|&(_, ci)| ci == t));
+        let at = self.live_target(&rows).and_then(|t| stops.iter().position(|&(_, ci)| ci == t));
         let k = match at {
             Some(k) if dir >= 0 => (k + 1) % n,
             Some(k) => (k + n - 1) % n,

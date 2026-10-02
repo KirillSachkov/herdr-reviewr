@@ -114,35 +114,36 @@ pub(crate) struct RenderedInput {
     pub changes: Option<u64>,
 }
 
-/// A rendered row's identity across rebuilds: its unit, and its index among the unit's rows.
+/// A rendered row's identity across rebuilds, by source: its unit, the source line its own
+/// text starts on, and its wrap — its index among its block's rows starting on that line. A
+/// marker row's line is its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
     pub unit: Unit,
-    pub offset: u32,
+    pub line: u32,
+    pub wrap: u32,
 }
 
 impl RowId {
     /// The identity of rendered row `row`; `None` for any other row.
     pub(crate) fn of(row: &Row) -> Option<Self> {
-        let offset = match row {
-            Row::Rendered { kind: RenderedKind::Block { offset, .. }, .. } => *offset,
-            _ => 0,
+        let unit = unit_of(row)?;
+        let (line, wrap) = match row {
+            Row::Rendered { kind: RenderedKind::Block { source, wrap, .. }, .. } => {
+                (source.0, *wrap)
+            }
+            _ => (unit.src(), 0),
         };
-        Some(RowId { unit: unit_of(row)?, offset })
+        Some(RowId { unit, line, wrap })
     }
 
-    /// The source line its unit starts at.
-    pub(crate) fn src(self) -> u32 {
-        self.unit.src()
-    }
-
-    /// The same identity at another source line.
-    pub(crate) fn at(self, src: u32) -> Self {
+    /// The same identity with every source line carried through `map` — an edit's line map.
+    pub(crate) fn map(self, map: impl Fn(u32) -> u32) -> Self {
         let unit = match self.unit {
-            Unit::Block(_) => Unit::Block(src),
-            Unit::Marker(_, kind) => Unit::Marker(src, kind),
+            Unit::Block(src) => Unit::Block(map(src)),
+            Unit::Marker(src, kind) => Unit::Marker(map(src), kind),
         };
-        RowId { unit, ..self }
+        RowId { unit, line: map(self.line), wrap: self.wrap }
     }
 }
 
@@ -179,6 +180,9 @@ pub(crate) struct RenderedIndex {
     /// The blocks' positions in `units`, and their source ranges: where a source line lands.
     blocks: Vec<usize>,
     block_ranges: Vec<(u32, u32)>,
+    /// Per row: the source lines its own text comes from ([`RenderedKind::Block`]'s `source`;
+    /// a marker's own line).
+    row_source: Vec<(u32, u32)>,
     /// The units a new-side line can sit in — blocks, and markers over new lines — and their
     /// ranges: where a new-side comment shows.
     new_side: Vec<usize>,
@@ -195,7 +199,15 @@ impl RenderedIndex {
             }
             _ => false,
         };
-        let mut index = Self::default();
+        let row_source = rows
+            .iter()
+            .map(|r| match r {
+                Row::Rendered { kind: RenderedKind::Block { source, .. }, .. } => *source,
+                Row::Rendered { src, .. } => (*src, *src),
+                _ => (0, 0),
+            })
+            .collect();
+        let mut index = Self { row_source, ..Self::default() };
         let mut start = 0;
         while start < rows.len() {
             let (Some(unit), Row::Rendered { src, src_end, kind, .. }) =
@@ -281,22 +293,25 @@ impl RenderedIndex {
         landing(&self.new_ranges, line).map(|k| self.new_side[k])
     }
 
-    /// The row `id` reconciles onto (Continuity): the same unit at the same line of it,
-    /// clamped to the unit. A block's line inside another block (a line prepended to its
-    /// paragraph) keeps its place there: the offset grows by the line's distance from that
-    /// block's start. Else the lead row of the block it lands on. `None` only over no rows.
+    /// The row `id` reconciles onto (Continuity), by source: a marker its own row while it
+    /// stands; a block's line the row starting on the same source line in the block that
+    /// holds it, at the same wrap clamped to that line's rows, else the first row showing that
+    /// line — however the rows around it rewrap. Else the lead row of the block the line
+    /// lands on. `None` only over no rows.
     pub(crate) fn row_of(&self, id: RowId) -> Option<usize> {
-        if let Some(u) = self.get(id.unit) {
-            return Some(u.start + (id.offset as usize).min(u.end - u.start - 1));
+        if let Unit::Marker(..) = id.unit
+            && let Some(u) = self.get(id.unit)
+        {
+            return Some(u.start);
         }
-        let src = id.unit.src();
-        let u = self.land(Some(src))?;
-        match id.unit {
-            Unit::Block(_) if (u.src..=u.src_end).contains(&src) => {
-                let want = id.offset.saturating_add(src - u.src) as usize;
-                Some(u.start + want.min(u.end - u.start - 1))
-            }
-            _ => Some(u.lead),
+        let u = self.land(Some(id.line))?;
+        let rows = u.start..u.end;
+        let starts: Vec<usize> =
+            rows.clone().filter(|&k| self.row_source[k].0 == id.line).collect();
+        if let Some(&last) = starts.last() {
+            return Some(starts.get(id.wrap as usize).copied().unwrap_or(last));
         }
+        let shows = |k: &usize| (self.row_source[*k].0..=self.row_source[*k].1).contains(&id.line);
+        Some(rows.clone().find(shows).unwrap_or(u.lead))
     }
 }

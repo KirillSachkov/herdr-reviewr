@@ -4251,8 +4251,8 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
     let block_of = |app: &App| match app.visible[app.diff_cursor] {
-        Row::Rendered { src, src_end, kind: RenderedKind::Block { offset, .. }, .. } => {
-            (src, src_end, offset)
+        Row::Rendered { src, src_end, kind: RenderedKind::Block { wrap, .. }, .. } => {
+            (src, src_end, wrap)
         }
         _ => panic!("the cursor is on a rendered row"),
     };
@@ -4446,7 +4446,7 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
     let id = |app: &App| match app.visible[app.diff_cursor] {
-        Row::Rendered { src, kind: RenderedKind::Block { offset, .. }, .. } => (src, offset),
+        Row::Rendered { src, kind: RenderedKind::Block { wrap, .. }, .. } => (src, wrap),
         _ => panic!("the cursor is on a rendered row"),
     };
     let long = "word ".repeat(40);
@@ -4470,10 +4470,7 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
         .visible
         .iter()
         .position(|row| {
-            matches!(
-                row,
-                Row::Rendered { src: 12, kind: RenderedKind::Block { offset: 1, .. }, .. }
-            )
+            matches!(row, Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: 1, .. }, .. })
         })
         .expect("the paragraph wraps at 60 columns");
     app.diff_scroll = app.diff_cursor - 1;
@@ -4484,7 +4481,7 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     assert_eq!(id(&app), (12, 1), "a poll edit above keeps the cursor's line");
     assert!(matches!(
         app.visible[app.diff_scroll],
-        Row::Rendered { src: 12, kind: RenderedKind::Block { offset: 0, .. }, .. }
+        Row::Rendered { src: 12, kind: RenderedKind::Block { wrap: 0, .. }, .. }
     ));
 
     // A narrower pane rewraps; the line holds. A wide one folds the paragraph to one line,
@@ -9074,30 +9071,54 @@ fn a_comment_step_lands_on_the_comments_first_row() {
 #[test]
 fn a_picked_comment_stays_picked_across_a_poll_that_moves_its_row() {
     use herdr_reviewr::app::Tab;
-    let r = Repo::init();
-    r.write("doc.md", "# A\n\npara one\n");
-    r.commit_all("init");
-    let mut app = app_on(&r);
-    enter_tab(&mut app, Tab::AllFiles);
-    app.focus = Focus::Diff;
-    // Two comments on one paragraph; the step picks the second.
-    for text in ["first", "second"] {
-        app.diff_cursor = rendered_row(&app, "para one");
-        app.start_comment();
-        write_comment(&mut app, text);
-    }
-    app.diff_cursor = 0;
-    app.jump_comment(1);
-    app.jump_comment(1);
-    app.start_edit();
-    assert_eq!(app.input, "second");
-    app.cancel_comment();
+    let words = "word ".repeat(40);
+    // (the poll's rewrite, the row the cursor sits on after it)
+    let cases = [
+        // The line above rewraps into more rows: the rows move, the lines do not.
+        (format!("{}\n\npara one\n", "word ".repeat(60)), "para one"),
+        // A long line joins the paragraph above `para one`: its rows grow inside the block,
+        // and the cursor keeps its own source line.
+        (format!("# A\n\n{words}\npara one\n"), "para one"),
+    ];
+    for (rewrite, cursor_text) in cases {
+        let r = Repo::init();
+        r.write("doc.md", "# A\n\npara one\n");
+        r.commit_all("init");
+        let mut app = app_on(&r);
+        enter_tab(&mut app, Tab::AllFiles);
+        app.focus = Focus::Diff;
+        // Wide enough that `para one` wraps to a row of its own after the rewrite.
+        app.sync_rendered_width(100);
+        // Two comments on one paragraph; the step picks the second.
+        for text in ["first", "second"] {
+            app.diff_cursor = rendered_row(&app, "para one");
+            app.start_comment();
+            write_comment(&mut app, text);
+        }
+        app.diff_cursor = 0;
+        app.jump_comment(1);
+        app.jump_comment(1);
+        app.start_edit();
+        assert_eq!(app.input, "second");
+        app.cancel_comment();
+        // The reviewer's own move off the row and back drops the pick.
+        let keymap = Keymap::default();
+        press(&mut app, &keymap, KeyCode::Up);
+        press(&mut app, &keymap, KeyCode::Down);
+        app.start_edit();
+        assert_eq!(app.input, "first", "a move of the reviewer's own drops the pick");
+        app.cancel_comment();
+        app.diff_cursor = 0;
+        app.jump_comment(1);
+        app.jump_comment(1);
 
-    // A poll rewraps the line above into more rows: the rows move, the lines and the pick
-    // do not.
-    let long = "word ".repeat(60);
-    r.write("doc.md", &format!("{long}\n\npara one\n"));
-    app.reload().unwrap();
-    app.start_edit();
-    assert_eq!(app.input, "second", "a poll never re-points the reviewer's pick");
+        r.write("doc.md", &rewrite);
+        app.reload().unwrap();
+        assert_eq!(app.visible[app.diff_cursor].text(), cursor_text, "{rewrite:?}");
+        app.start_edit();
+        assert_eq!(app.input, "second", "a poll never re-points the pick: {rewrite:?}");
+        app.cancel_comment();
+        app.delete_comment();
+        assert_eq!(app.store.get(0).map(|c| c.text.as_str()), Some("first"), "{rewrite:?}");
+    }
 }
