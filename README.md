@@ -25,7 +25,7 @@ One persistent pane, pointed at a git worktree:
 - **Search** — fuzzy file names and live code grep across the worktree, powered by [fff](https://github.com/dmtrKovalenko/fff).
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
-- **Markdown review** — flip a `.md` file to rendered with `m`. Comment on it like the diff, with every change marked.
+- **Markdown review** — flip a `.md` file to rendered with `m`.
 - **Themes** — 18 palettes in dark and light.
 
 It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
