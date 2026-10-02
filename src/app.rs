@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::diff::{DiffCache, FileDiff, Row, View};
+use crate::diff::{DiffCache, FileDiff, Mark, Row, View};
 use crate::export::{Agent, ExportTarget, format_all};
 use crate::file_list::{self, Annotation, Entry, RowKind};
 use crate::forge;
@@ -19,6 +19,7 @@ use crate::git;
 use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
 use crate::logln;
+use crate::marks::{MarkMap, Unit, diff_lines, landing};
 use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::theme::{self, Palette};
 use crate::world::{PickStatus, PickVerdict};
@@ -110,8 +111,10 @@ struct TabStash {
     select_anchor: Option<usize>,
     rendered: bool,
     rendered_text: String,
-    rendered_details: HashSet<String>,
+    rendered_old: String,
+    rendered_details: HashMap<String, bool>,
     rendered_doc: crate::markdown::Rendered,
+    rendered_marks: MarkMap,
     rendered_built: Option<RenderedInput>,
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
@@ -119,14 +122,19 @@ struct TabStash {
 }
 
 /// The input a file tab's rendered rows were built from — the content, the open
-/// `<details>` keys (sorted), the wrap width, and the theme — and whether that content
-/// rendered no rows at all.
+/// `<details>` keys (sorted), the wrap width, the theme, and the changes the marks read — and
+/// whether that content rendered no rows at all.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RenderedInput {
     text: String,
     details: Vec<String>,
     width: usize,
     theme: &'static str,
+    /// A digest of the diff's changed lines in the `Changes` tab, `0` elsewhere: a scope
+    /// switch moves the marks without touching the text.
+    changes: u64,
+    /// The `m` key's label the don't-render markers name, so a rebind rebuilds them.
+    see: String,
     empty: bool,
 }
 
@@ -136,6 +144,8 @@ impl RenderedInput {
         self.width == other.width
             && self.theme == other.theme
             && self.details == other.details
+            && self.changes == other.changes
+            && self.see == other.see
             && self.text == other.text
     }
 }
@@ -751,6 +761,15 @@ pub struct App {
     /// content does not render: a non-markdown file, a notice, or an empty new side (a
     /// deleted or empty file), so such a file always shows its source.
     rendered_text: String,
+    /// The open file's old side in the `Changes` tab — the document its deleted lines belonged
+    /// to — empty elsewhere. Held beside `rendered_text`, so a rebuild reads no git.
+    rendered_old: String,
+    /// The old side's source map, with the old text and open `<details>` it came from: the
+    /// width never moves it, so a resize renders the new side alone.
+    rendered_old_map: Option<(String, Vec<String>, crate::marks::DocMap)>,
+    /// The change marks of the rendered rows on screen, from the build that made them: the
+    /// bars, the markers, and each diff line's owner the anchors and cards read.
+    rendered_marks: MarkMap,
     /// The render behind the rendered rows: the styled lines a `Row::Rendered` indexes, and
     /// each line's links, `<details>`, and the heading anchors. Lives here, not in the rows,
     /// so the row model stays terminal-free.
@@ -779,8 +798,10 @@ pub struct App {
     painted_details: std::cell::RefCell<Vec<PaintedDetails>>,
     /// Open `<details>` on the selected PR description or thread.
     pr_expanded_details: HashSet<String>,
-    /// Open `<details>` in the file tab's rendered markdown. Stashed per file tab.
-    rendered_details: HashSet<String>,
+    /// The reviewer's own `<details>` choices in the file tab's rendered markdown, by key:
+    /// open or closed. A disclosure without one opens while it holds a change or a comment
+    /// ([`crate::marks::open_details`]). Stashed per file tab.
+    rendered_details: HashMap<String, bool>,
     /// The PR read pane's maximum useful scroll, noted the same way for
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
@@ -987,6 +1008,9 @@ impl App {
             wrap: true,
             rendered: true,
             rendered_text: String::new(),
+            rendered_old: String::new(),
+            rendered_old_map: None,
+            rendered_marks: MarkMap::default(),
             rendered_doc: crate::markdown::Rendered::default(),
             rendered_built: None,
             rendered_width: 0,
@@ -996,7 +1020,7 @@ impl App {
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
-            rendered_details: HashSet::new(),
+            rendered_details: HashMap::new(),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
             navigator_position: crate::config::NavigatorPosition::Right,
             navigator_side_pct: DEFAULT_SIDE_PCT,
@@ -1208,6 +1232,8 @@ impl App {
                 self.wrap = old.wrap;
                 self.rendered = old.rendered;
                 self.rendered_text = std::mem::take(&mut old.rendered_text);
+                self.rendered_old = std::mem::take(&mut old.rendered_old);
+                self.rendered_marks = std::mem::take(&mut old.rendered_marks);
                 self.rendered_details = std::mem::take(&mut old.rendered_details);
                 self.rendered_doc = std::mem::take(&mut old.rendered_doc);
                 self.rendered_built = old.rendered_built.take();
@@ -1521,21 +1547,24 @@ impl App {
         // `diff` attribute `.gitattributes` unsets. Take that verdict rather than re-deciding
         // from content, which would paint a `-diff` lockfile as a full text diff, and skip
         // both blob reads while we are at it.
-        let new = if self.changed.get(&path).is_some_and(|a| a.binary) {
+        let (old, new) = if self.changed.get(&path).is_some_and(|a| a.binary) {
             self.diff = FileDiff::binary_notice(path, previous_path);
-            String::new()
+            (String::new(), String::new())
         } else {
             let (old, new) = self.content_sides(&path, previous_path.as_deref());
             self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
-            new
+            (old, new)
         };
         // Hold the new side as the render input, the same current content the File view
-        // renders. A non-markdown file, a notice, or a deleted file (empty new side) holds
-        // nothing, so it shows its source and its toggle stays inert.
+        // renders, and the old side the marks read deletions against. A non-markdown file, a
+        // notice, or a deleted file (empty new side) holds nothing, so it shows its source and
+        // its toggle stays inert.
         if self.markdown_file() && self.diff.state == crate::diff::FileState::Normal {
             self.rendered_text = new;
+            self.rendered_old = old;
         } else {
             self.rendered_text.clear();
+            self.rendered_old.clear();
         }
         self.rebuild_visible();
         self.settle_read();
@@ -1554,6 +1583,7 @@ impl App {
         let (diff, content) = self.file_view(path);
         // Keep the render input current without a per-frame rebuild. A file the source view
         // degrades to a notice never renders, so its content is not held either.
+        self.rendered_old.clear();
         if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
             self.rendered_text = content;
         } else {
@@ -1725,10 +1755,51 @@ impl App {
         }
     }
 
-    /// The input the rendered rows build from right now.
-    fn rendered_input(&self) -> RenderedInput {
-        let mut details: Vec<String> = self.rendered_details.iter().cloned().collect();
-        details.sort();
+    /// The `<details>` keys open in the rendered view: derived from `disclosures` — the
+    /// content's, open or not — the reviewer's own choices, and the changes and comments each
+    /// holds ([`crate::marks::open_details`]).
+    ///
+    /// A choice keys by summary plus occurrence (`Details#1`), never by position, so an edit
+    /// elsewhere keeps it. The accepted hole: a disclosure with the same summary inserted above
+    /// takes over the choice's key, and renaming a summary drops its choice.
+    fn derived_details(&self, disclosures: &[crate::markdown::Disclosure]) -> Vec<String> {
+        if disclosures.is_empty() {
+            return Vec::new();
+        }
+        let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
+        let mut spots = if self.diff.view == View::Diff {
+            crate::marks::change_spots(&lines)
+        } else {
+            Vec::new()
+        };
+        if let Some(file) = self.diff_path.as_deref() {
+            for c in self.store.iter().filter(|c| c.file == file && self.comment_in_view(c)) {
+                match c.side {
+                    Side::New => spots.push((c.start, c.end)),
+                    Side::Old => {
+                        spots.extend(crate::marks::old_range_spots(&lines, c.start, c.end));
+                    }
+                }
+            }
+        }
+        crate::marks::open_details(disclosures, &self.rendered_details, &spots)
+    }
+
+    /// The input the rendered rows build from right now, with `details` open.
+    fn rendered_input(&self, details: Vec<String>) -> RenderedInput {
+        let changes = if self.diff.view == View::Diff {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::hash::DefaultHasher::new();
+            for row in diff_lines(&self.diff.rows).filter(|r| is_change(r)) {
+                (row.marker(), row.old_no(), row.new_no()).hash(&mut h);
+                for s in row.spans() {
+                    s.text.hash(&mut h);
+                }
+            }
+            h.finish() | 1
+        } else {
+            0
+        };
         RenderedInput {
             text: self.rendered_text.clone(),
             details,
@@ -1738,8 +1809,32 @@ impl App {
                 self.rendered_width
             },
             theme: self.theme_name,
+            changes,
+            see: self.keymap().hint(crate::keymap::Action::Preview).label(),
             empty: false,
         }
+    }
+
+    /// The old side's source map with `open` disclosures opened: the cached one when the old
+    /// text and the open set are the ones it came from, else a fresh render's.
+    fn old_map(&mut self, open: &[String]) -> crate::marks::DocMap {
+        if let Some((text, keys, map)) = &self.rendered_old_map
+            && *text == self.rendered_old
+            && keys == open
+        {
+            return map.clone();
+        }
+        let set: HashSet<String> = open.iter().cloned().collect();
+        let doc = crate::markdown::render_expanded(
+            &self.rendered_old,
+            DEFAULT_RENDER_WIDTH,
+            &self.highlighter,
+            &self.palette,
+            &set,
+        );
+        let map = crate::marks::doc_map(&doc, &set);
+        self.rendered_old_map = Some((self.rendered_old.clone(), open.to_vec(), map.clone()));
+        map
     }
 
     /// Build the rendered rows from `rendered_text` at the noted width, theme, and open
@@ -1749,7 +1844,19 @@ impl App {
     /// changed (Continuity). Returns `false`, with the rows untouched, when the content renders
     /// nothing; that verdict is kept, so a poll of the same content never renders it again.
     fn rebuild_rendered(&mut self) -> bool {
-        let mut input = self.rendered_input();
+        // The open set derives from the content's disclosures: the last render's while the
+        // text is the same. A changed text renders with the last open set, and again only when
+        // its own disclosures derive another.
+        let known = self
+            .rendered_built
+            .as_ref()
+            .is_some_and(|b| b.text == self.rendered_text && !b.empty)
+            .then(|| self.derived_details(&self.rendered_doc.disclosures));
+        let guessed = known.is_none();
+        let details = known.unwrap_or_else(|| {
+            self.rendered_built.as_ref().map(|b| b.details.clone()).unwrap_or_default()
+        });
+        let mut input = self.rendered_input(details);
         let showing = matches!(self.visible.first(), Some(Row::Rendered { .. }));
         if let Some(b) = self.rendered_built.as_ref()
             && b.same_input(&input)
@@ -1757,7 +1864,16 @@ impl App {
         {
             return !b.empty;
         }
-        let doc = self.markdown_render(&self.rendered_text, input.width);
+        let mut open: HashSet<String> = input.details.iter().cloned().collect();
+        let mut doc = self.markdown_render(&self.rendered_text, input.width, &open);
+        if guessed {
+            let derived = self.derived_details(&doc.disclosures);
+            if derived != input.details {
+                open = derived.iter().cloned().collect();
+                input.details = derived;
+                doc = self.markdown_render(&self.rendered_text, input.width, &open);
+            }
+        }
         if doc.lines.is_empty() {
             input.empty = true;
             self.rendered_built = Some(input);
@@ -1799,8 +1915,19 @@ impl App {
                 offset,
                 spans,
                 line: i as u32,
+                mark: Mark::None,
             });
         }
+        let new_map = crate::marks::doc_map(&doc, &open);
+        let marks = if self.diff.view == View::Diff {
+            let old_map = self.old_map(&input.details);
+            let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
+            crate::marks::derive(&lines, &self.diff.pairs, &new_map, &old_map)
+        } else {
+            MarkMap::default()
+        };
+        self.mark_rendered(&mut rows, &mut doc, &new_map, &marks, &input);
+        self.rendered_marks = marks;
         self.rendered_doc = doc;
         self.rendered_built = Some(input);
         self.visible = rows;
@@ -1817,6 +1944,138 @@ impl App {
             }
         }
         true
+    }
+
+    /// Settle freshly built rendered rows on their source map and change marks: each block's
+    /// rows take its range from `map` — a collapsed `<details>` summary spanning its element —
+    /// a marked block's rows from its lead line on wear its bar, a collapsed summary hiding
+    /// changes names how many, and each marker gets a row of its own: after the block it
+    /// hides in, else where its lines sit. The synthetic text lives in the styled line alone,
+    /// so copy and find never read it, and it fits the pane, cut with `…`.
+    fn mark_rendered(
+        &self,
+        rows: &mut Vec<Row>,
+        doc: &mut crate::markdown::Rendered,
+        map: &crate::marks::DocMap,
+        marks: &MarkMap,
+        input: &RenderedInput,
+    ) {
+        use ratatui::style::Style;
+        use ratatui::text::Span;
+        let pal = &self.palette;
+        let width = input.width;
+        let bars: HashMap<u32, &crate::marks::BlockMark> =
+            marks.blocks.iter().map(|b| (b.src, b)).collect();
+        // Per block, its row run: ranges, bars, and the summary note in one pass.
+        let mut ends: HashMap<u32, usize> = HashMap::new();
+        let mut start = 0;
+        let mut k = 0;
+        while start < rows.len() {
+            let src = rows[start].new_no().unwrap_or_default();
+            let mut end = start + 1;
+            while end < rows.len() && rows[end].new_no() == Some(src) {
+                end += 1;
+            }
+            let src_end = map.units.get(k).filter(|u| u.0 == src).map(|u| u.1);
+            k += 1;
+            ends.insert(src, end);
+            for row in &mut rows[start..end] {
+                if let (Row::Rendered { src_end: e, .. }, Some(to)) = (row, src_end) {
+                    *e = to;
+                }
+            }
+            if let Some(b) = bars.get(&src) {
+                let lead = block_lead(rows, start);
+                for row in &mut rows[lead..end] {
+                    if let Row::Rendered { mark, .. } = row {
+                        *mark = b.mark;
+                    }
+                }
+                // A collapsed summary names the changes it hides.
+                let line = match &rows[lead] {
+                    Row::Rendered { line, .. } => *line as usize,
+                    _ => usize::MAX,
+                };
+                let collapsed = doc
+                    .meta
+                    .get(line)
+                    .and_then(|m| m.details.as_ref())
+                    .is_some_and(|d| !input.details.iter().any(|k| *k == *d.key));
+                if collapsed && let Some(l) = doc.lines.get_mut(line) {
+                    let room = width.saturating_sub(l.width());
+                    let note = format!("  · {} changed {}", b.lines, plural(b.lines, "line"));
+                    let note = fit(&note, room);
+                    if !note.is_empty() {
+                        l.spans
+                            .push(Span::styled(note, Style::default().fg(pal.mark_color(b.mark))));
+                    }
+                }
+            }
+            start = end;
+        }
+        if marks.markers.is_empty() {
+            return;
+        }
+        // Each marker's slot: after its block, else ahead of the first row at or past it.
+        let mut slots: Vec<(usize, &crate::marks::Marker)> = marks
+            .markers
+            .iter()
+            .map(|m| {
+                let at = m.after.and_then(|b| ends.get(&b).copied()).unwrap_or_else(|| {
+                    rows.partition_point(|r| r.new_no().is_some_and(|s| s < m.unit.src))
+                });
+                (at, m)
+            })
+            .collect();
+        slots.sort_by_key(|&(at, m)| (at, m.unit));
+        let mut out = Vec::with_capacity(rows.len() + slots.len());
+        let mut next = slots.into_iter().peekable();
+        for (i, row) in std::mem::take(rows).into_iter().enumerate() {
+            while let Some((_, m)) = next.next_if(|&(at, _)| at <= i) {
+                out.push(self.marker_row(doc, m, input));
+            }
+            out.push(row);
+        }
+        for (_, m) in next {
+            out.push(self.marker_row(doc, m, input));
+        }
+        *rows = out;
+    }
+
+    /// The row for marker `m`, its styled line appended to `doc`: `− N lines removed`, or
+    /// `⚠ N changed lines don't render · m to see`, fit to the pane.
+    fn marker_row(
+        &self,
+        doc: &mut crate::markdown::Rendered,
+        m: &crate::marks::Marker,
+        input: &RenderedInput,
+    ) -> Row {
+        let n = m.lines;
+        let see = &input.see;
+        let text = match m.unit.marker {
+            Mark::Removed => format!("− {n} {} removed", plural(n, "line")),
+            _ if n == 1 => format!("⚠ 1 changed line doesn't render · {see} to see"),
+            _ => format!("⚠ {n} changed lines don't render · {see} to see"),
+        };
+        let line = doc.lines.len() as u32;
+        doc.lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+            fit(&text, input.width),
+            ratatui::style::Style::default().fg(self.palette.mark_color(m.unit.marker)),
+        )));
+        doc.meta.push(crate::markdown::LineMeta {
+            source_line: m.unit.src as usize,
+            source_end: m.src_end as usize,
+            links: Vec::new(),
+            details: None,
+        });
+        Row::Rendered {
+            src: m.unit.src,
+            src_end: m.src_end,
+            offset: marker_offset(m.unit.marker),
+            spans: Vec::new(),
+            line,
+            mark: m.unit.marker,
+        }
     }
 
     /// Rebuild the rendered rows when the frame's geometry or theme moved — the frame hook
@@ -2119,6 +2378,16 @@ impl App {
         &self.rendered_doc.lines
     }
 
+    /// The text rendered row `i` paints, from its styled line: a marker's or a collapsed
+    /// summary's note included, which the row's own text — what copy and find read — leaves
+    /// out. `None` on any other row.
+    #[must_use]
+    pub fn painted_text(&self, i: usize) -> Option<String> {
+        let Some(Row::Rendered { line, .. }) = self.visible.get(i) else { return None };
+        let l = self.rendered_doc.lines.get(*line as usize)?;
+        Some(l.spans.iter().map(|s| s.content.as_ref()).collect())
+    }
+
     /// The links and `<details>` of rendered line `line`, for the paint's hit regions.
     #[must_use]
     pub(crate) fn rendered_meta(&self, line: u32) -> Option<&crate::markdown::LineMeta> {
@@ -2248,16 +2517,21 @@ impl App {
         }
     }
 
-    /// Render `text` as markdown wrapped to `width`, through the memo, with the
-    /// current body's open `<details>` keys.
+    /// Render `text` as markdown wrapped to `width`, through the memo, with the `<details>`
+    /// keyed in `open` opened.
     #[must_use]
-    pub(crate) fn markdown_render(&self, text: &str, width: usize) -> crate::markdown::Rendered {
+    pub(crate) fn markdown_render(
+        &self,
+        text: &str,
+        width: usize,
+        open: &HashSet<String>,
+    ) -> crate::markdown::Rendered {
         self.markdown_cache.borrow_mut().get_expanded(
             text,
             width,
             &self.highlighter,
             &self.palette,
-            &self.rendered_details,
+            open,
         )
     }
 
@@ -2289,10 +2563,6 @@ impl App {
         rendered
     }
 
-    fn active_expanded_details_mut(&mut self) -> &mut HashSet<String> {
-        if self.tab == Tab::Pr { &mut self.pr_expanded_details } else { &mut self.rendered_details }
-    }
-
     pub(crate) fn note_painted_details(
         &self,
         x_start: u16,
@@ -2313,11 +2583,17 @@ impl App {
     }
 
     /// Open or close the `<details>` with this [`crate::markdown::DetailsHit::key`]. In a
-    /// file tab the rendered rows rebuild around it, keeping the place.
+    /// file tab that is the reviewer's own choice, held over the derived state from then on,
+    /// and the rendered rows rebuild around it, keeping the place.
     pub fn toggle_details(&mut self, key: &str) {
-        let set = self.active_expanded_details_mut();
-        if !set.remove(key) {
-            set.insert(key.to_string());
+        if self.tab == Tab::Pr {
+            if !self.pr_expanded_details.remove(key) {
+                self.pr_expanded_details.insert(key.to_string());
+            }
+        } else {
+            let open =
+                self.rendered_built.as_ref().is_some_and(|b| b.details.iter().any(|k| k == key));
+            self.rendered_details.insert(key.to_string(), !open);
         }
         if self.rendered_active() {
             self.rebuild_visible();
@@ -2936,6 +3212,8 @@ impl App {
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
         std::mem::swap(&mut self.rendered, &mut self.stash.rendered);
         std::mem::swap(&mut self.rendered_text, &mut self.stash.rendered_text);
+        std::mem::swap(&mut self.rendered_old, &mut self.stash.rendered_old);
+        std::mem::swap(&mut self.rendered_marks, &mut self.stash.rendered_marks);
         std::mem::swap(&mut self.rendered_details, &mut self.stash.rendered_details);
         std::mem::swap(&mut self.rendered_doc, &mut self.stash.rendered_doc);
         std::mem::swap(&mut self.rendered_built, &mut self.stash.rendered_built);
@@ -3943,6 +4221,18 @@ impl App {
         }
         self.select_anchor = None;
         self.leave_compose();
+        self.refresh_rendered();
+    }
+
+    /// Re-derive the rendered rows after the reviewer's own comment change: a disclosure a
+    /// comment sits in opens or closes now, on this input, never on a later unrelated poll
+    /// (Continuity). The place reconciles by identity, as on any rebuild.
+    fn refresh_rendered(&mut self) {
+        // A draft freezes its anchor's rows; nothing else here holds them still.
+        if self.renders_markdown() && !matches!(self.mode, Mode::Composing { .. }) {
+            self.rebuild_visible();
+            self.settle_read();
+        }
     }
 
     /// Whether the selection has at least one content row a comment can attach to —
@@ -3969,48 +4259,49 @@ impl App {
     /// The source diff rows a rendered selection stands for, in diff order: every new-side
     /// line from its first block's start to its last block's end — the blank and unrendered
     /// lines between blocks included, so the agent sees what the comment spans — the
-    /// deletions inside that span, and the deletions its blocks own ([`deletion_owner`]). A
-    /// comment anchored on them equals the source comment on the same rows, export included.
+    /// deletions inside that span, and every change its blocks and markers own
+    /// ([`MarkMap::anchors`]). A marker row stands for its changed lines alone, so a removed
+    /// marker anchors the deleted lines on the old side. A comment anchored on these rows
+    /// equals the source comment on the same rows, export included.
     fn rendered_anchor_rows(&self) -> Vec<Row> {
         let (lo, hi) = self.selection_range();
         let Some(selected) = self.visible.get(lo..=hi) else { return Vec::new() };
-        let picked = rendered_blocks(selected);
-        let (Some(first), Some(last)) =
-            (picked.iter().map(|&(s, _)| s).min(), picked.iter().map(|&(_, e)| e).max())
-        else {
-            return Vec::new();
-        };
-        let blocks = rendered_blocks(&self.visible);
-        let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
-        let bounds = new_line_bounds(&lines);
-        lines
-            .iter()
-            .zip(bounds)
-            .filter(|(row, at)| {
+        let units = rendered_units(selected);
+        let picked: Vec<Unit> = units.iter().map(|&(u, _)| u).collect();
+        let blocks: Vec<(u32, u32)> =
+            units.iter().filter(|(u, _)| u.marker == Mark::None).map(|&(_, r)| r).collect();
+        let span = blocks.iter().map(|&(s, _)| s).min().zip(blocks.iter().map(|&(_, e)| e).max());
+        let marks = &self.rendered_marks;
+        let inside = |n: u32| span.is_some_and(|(first, last)| (first..=last).contains(&n));
+        diff_lines(&self.diff.rows)
+            .enumerate()
+            .filter(|&(i, row)| {
+                let owned = || picked.iter().any(|&u| marks.anchors(i, u));
                 if let Some(n) = row.new_no() {
-                    return (first..=last).contains(&n);
+                    return inside(n) || (is_change(row) && owned());
                 }
-                // A deletion: inside the span, or owned by a selected block.
-                let inside =
-                    at.before.is_some_and(|a| a >= first) && at.after.is_some_and(|b| b <= last);
-                let owner = deletion_owner(&blocks, *at);
-                inside || owner.is_some_and(|o| picked.iter().any(|&(s, _)| s == o))
+                // A deletion: inside the span, or owned by a selected unit.
+                let at = marks.bounds(i);
+                let within = span.is_some_and(|(first, last)| {
+                    at.before.is_some_and(|a| a >= first) && at.after.is_some_and(|b| b <= last)
+                });
+                within || owned()
             })
-            .map(|(row, _)| (*row).clone())
+            .map(|(_, row)| row.clone())
             .collect()
     }
 
     /// The row the composer splices under: the selection's last row, and in the rendered
-    /// view that row's block's last row — where the comment's card will sit.
+    /// view that row's unit's last row — where the comment's card will sit.
     #[must_use]
     pub fn compose_row(&self) -> usize {
         let (_, hi) = self.selection_range();
-        match self.visible.get(hi) {
-            Some(Row::Rendered { src, .. }) => {
-                let same = |r: &&Row| matches!(r, Row::Rendered { src: s, .. } if s == src);
+        match self.visible.get(hi).and_then(unit_of) {
+            Some(u) => {
+                let same = |r: &&Row| unit_of(r) == Some(u);
                 hi + self.visible[hi + 1..].iter().take_while(same).count()
             }
-            _ => hi,
+            None => hi,
         }
     }
 
@@ -4084,81 +4375,73 @@ impl App {
     }
 
     /// Each comment shown on the open file, by store index, with the visible rows it covers:
-    /// a source row by its line number on the comment's side, a rendered row by its block
+    /// a source row by its line number on the comment's side, a rendered row by its unit
     /// ([`Self::rendered_cover`]). The one comment→row map the marks, the cards, and the
     /// cursor's comment all read, so the views cannot disagree about where a comment sits.
     fn comment_rows(&self) -> Vec<(usize, Vec<usize>)> {
         let Some(file) = self.diff_path.as_deref() else { return Vec::new() };
-        let blocks = rendered_blocks(&self.visible);
-        // The diff's lines and their bounds, built once, and only for an old-side comment
-        // shown rendered.
-        let mut lines = None;
-        let mut out = Vec::new();
-        for (ci, c) in self.store.iter().enumerate() {
-            if c.file != file || !self.comment_in_view(c) {
-                continue;
-            }
-            let mut cover = self.rendered_cover(c, &blocks, &mut lines);
-            cover.sort_unstable();
-            let rows = self
-                .visible
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| match row {
-                    Row::Rendered { src, .. } => cover.binary_search(src).is_ok(),
-                    _ => line_in(c, row),
-                })
-                .map(|(i, _)| i)
-                .collect();
-            out.push((ci, rows));
-        }
-        out
-    }
-
-    /// The rendered blocks (by `src`) comment `c` covers: those its new-side range overlaps,
-    /// else the block holding its first line; an old-side comment the block owning its last
-    /// deleted row ([`deletion_owner`]), the same owner its anchor reads — or, once that line
-    /// is back as context, the block holding it. Never empty over rendered rows, so the
-    /// rendered view never hides a comment (G3). `lines` memoizes the diff walk across calls.
-    fn rendered_cover<'a>(
-        &'a self,
-        c: &Comment,
-        blocks: &[(u32, u32)],
-        lines: &mut Option<(Vec<&'a Row>, Vec<Bounds>)>,
-    ) -> Vec<u32> {
-        if blocks.is_empty() {
+        let shown: Vec<(usize, &Comment)> = self
+            .store
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.file == file && self.comment_in_view(c))
+            .collect();
+        if shown.is_empty() {
             return Vec::new();
         }
+        let index = CoverIndex::new(self, shown.iter().any(|(_, c)| c.side == Side::Old));
+        shown
+            .into_iter()
+            .map(|(ci, c)| {
+                if index.units.is_empty() {
+                    let rows =
+                        (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect();
+                    return (ci, rows);
+                }
+                let mut cover = self.rendered_cover(c, &index);
+                cover.sort_unstable();
+                cover.dedup();
+                // Each covered unit's rows, in row order.
+                let rows = cover.into_iter().flat_map(|k| index.rows[k].0..index.rows[k].1);
+                (ci, rows.collect())
+            })
+            .collect()
+    }
+
+    /// The rendered units comment `c` covers. A new-side comment: the blocks and the
+    /// don't-render markers its range overlaps, else the block holding its first line. An
+    /// old-side comment: the unit owning its last deleted row ([`MarkMap::owner`]) — a block,
+    /// or the marker standing for it — the same owner its anchor reads, or, once that line is
+    /// back as context, the block holding it. Never empty over rendered rows, so the rendered
+    /// view never hides a comment (G3).
+    fn rendered_cover(&self, c: &Comment, index: &CoverIndex<'_>) -> Vec<usize> {
+        let land = |line: Option<u32>| landing(&index.ranges, line).map(|k| index.new_side[k]);
         match c.side {
             Side::New => {
-                let overlap: Vec<u32> = blocks
+                let overlap: Vec<usize> = index
+                    .ranges
                     .iter()
-                    .filter(|&&(s, e)| s <= c.end && c.start <= e)
-                    .map(|&(s, _)| s)
+                    .zip(&index.new_side)
+                    .filter(|&(&(s, e), _)| s <= c.end && c.start <= e)
+                    .map(|(_, &k)| k)
                     .collect();
-                if overlap.is_empty() {
-                    holding_block(blocks, Some(c.start)).into_iter().collect()
-                } else {
-                    overlap
-                }
+                if overlap.is_empty() { land(Some(c.start)).into_iter().collect() } else { overlap }
             }
             Side::Old => {
-                let (lines, bounds) = lines.get_or_insert_with(|| {
-                    let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
-                    let bounds = new_line_bounds(&lines);
-                    (lines, bounds)
-                });
+                let lines = &index.lines;
                 let last = lines
                     .iter()
                     .rposition(|r| r.old_no().is_some_and(|n| c.start <= n && n <= c.end));
                 // A line restored as context sits in its block; a comment whose line left the
-                // diff still shows, under the last block.
+                // diff still shows, under the last unit.
                 let owner = match last {
-                    Some(i) if lines[i].new_no().is_some() => {
-                        holding_block(blocks, lines[i].new_no())
-                    }
-                    Some(i) => deletion_owner(blocks, bounds[i]),
-                    None => holding_block(blocks, None),
+                    Some(i) if lines[i].new_no().is_some() => land(lines[i].new_no()),
+                    Some(i) => self
+                        .rendered_marks
+                        .owner(i)
+                        .and_then(|u| index.by_unit.get(&u).copied())
+                        .or_else(|| land(None)),
+                    None => land(None),
                 };
                 owner.into_iter().collect()
             }
@@ -4241,6 +4524,7 @@ impl App {
             if self.store.is_empty() {
                 self.close_list();
             }
+            self.refresh_rendered();
         }
     }
 
@@ -5303,6 +5587,7 @@ impl App {
         if self.store.is_empty() {
             self.close_list();
         }
+        self.refresh_rendered();
         delivered
     }
 
@@ -5339,6 +5624,54 @@ impl App {
 }
 
 /// Step `cur` by `delta` within `0..n`, clamping at both ends.
+/// What [`App::comment_rows`] reads for every comment, built once per call: the rendered
+/// units in row order with each one's rows, the units a new-side line can sit in (blocks,
+/// and markers over new lines) with their ranges, and — when an old-side comment needs them
+/// — each unit's index and the diff's lines. A cover names units by index.
+struct CoverIndex<'a> {
+    units: Vec<Unit>,
+    rows: Vec<(usize, usize)>,
+    new_side: Vec<usize>,
+    ranges: Vec<(u32, u32)>,
+    by_unit: HashMap<Unit, usize>,
+    lines: Vec<&'a Row>,
+}
+
+impl<'a> CoverIndex<'a> {
+    fn new(app: &'a App, old_side: bool) -> Self {
+        let (mut units, mut rows, mut new_side, mut ranges) =
+            (Vec::new(), Vec::<(usize, usize)>::new(), Vec::new(), Vec::new());
+        for (i, row) in app.visible.iter().enumerate() {
+            let (Some(u), Row::Rendered { src, src_end, .. }) = (unit_of(row), row) else {
+                continue;
+            };
+            if units.last() == Some(&u) {
+                if let Some(r) = rows.last_mut() {
+                    r.1 = i + 1;
+                }
+                continue;
+            }
+            if u.marker == Mark::None || app.rendered_marks.marker(u).is_some_and(|m| !m.gone) {
+                new_side.push(units.len());
+                ranges.push((*src, *src_end));
+            }
+            units.push(u);
+            rows.push((i, i + 1));
+        }
+        let by_unit = if old_side {
+            units.iter().enumerate().map(|(k, &u)| (u, k)).collect()
+        } else {
+            HashMap::new()
+        };
+        let lines = if old_side && !units.is_empty() {
+            diff_lines(&app.diff.rows).collect()
+        } else {
+            Vec::new()
+        };
+        Self { units, rows, new_side, ranges, by_unit, lines }
+    }
+}
+
 fn step(cur: usize, delta: isize, n: usize) -> usize {
     if n == 0 {
         return 0;
@@ -5428,17 +5761,31 @@ fn clamp_scroll(base: usize, delta: isize, max: usize) -> usize {
     base.min(max).saturating_add_signed(delta).min(max)
 }
 
-/// Whether `row` is one of a hunk's changed lines.
+/// Whether `row` is one of a hunk's changed lines: a source change row, or a rendered line
+/// wearing a change mark — a marked block's line or a marker row.
 fn is_change(row: &Row) -> bool {
-    matches!(row, Row::Deletion { .. } | Row::Insertion { .. })
+    match row {
+        Row::Deletion { .. } | Row::Insertion { .. } => true,
+        Row::Rendered { mark, .. } => *mark != Mark::None,
+        Row::Context { .. } | Row::Fold { .. } => false,
+    }
 }
 
 /// The nearest hunk's first changed row in `forward`'s direction: strictly past `from` inside
 /// the open file, or from the far end (`None`) in a file being crossed into. A hunk starts at a
-/// change row whose predecessor is not one, since context lines or a fold always separate two
-/// hunks.
+/// change row whose predecessor is not one: source hunks are separated by context lines or a
+/// fold, rendered ones by an unmarked row, as a run of marked lines reads as one edit. A
+/// marker row is a stop of its own.
 fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
-    let starts_hunk = |&i: &usize| is_change(&rows[i]) && (i == 0 || !is_change(&rows[i - 1]));
+    let marker = |r: &Row| matches!(r, Row::Rendered { mark, .. } if mark.is_marker());
+    let joins = |a: &Row, b: &Row| {
+        is_change(a)
+            && !marker(a)
+            && !marker(b)
+            && matches!(a, Row::Rendered { .. }) == matches!(b, Row::Rendered { .. })
+    };
+    let starts_hunk =
+        |&i: &usize| is_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
     if forward {
         (from.map_or(0, |i| i + 1)..rows.len()).find(starts_hunk)
     } else {
@@ -5463,11 +5810,36 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The `offset` a marker row carries in place of a line index: past any block's, and one per
+/// kind, so `(src, offset)` names it apart from a block starting on the same line.
+fn marker_offset(kind: Mark) -> u32 {
+    match kind {
+        Mark::Unrendered => u32::MAX - 1,
+        _ => u32::MAX,
+    }
+}
+
+/// Whether `offset` names a marker row ([`marker_offset`]).
+fn is_marker_offset(offset: u32) -> bool {
+    offset >= u32::MAX - 1
+}
+
 /// A rendered row's identity across rebuilds: its block's first source line and its index
-/// within that block. `None` for every other row.
+/// within that block — a marker row's kind in place of the index. `None` for every other row.
 fn rendered_id(row: &Row) -> Option<(u32, u32)> {
     match row {
         Row::Rendered { src, offset, .. } => Some((*src, *offset)),
+        _ => None,
+    }
+}
+
+/// The unit a rendered row belongs to: its block, or the marker it is. `None` for every
+/// other row.
+fn unit_of(row: &Row) -> Option<Unit> {
+    match row {
+        Row::Rendered { src, mark, .. } => {
+            Some(Unit { src: *src, marker: if mark.is_marker() { *mark } else { Mark::None } })
+        }
         _ => None,
     }
 }
@@ -5478,11 +5850,16 @@ fn rendered_id(row: &Row) -> Option<(u32, u32)> {
 /// clamped to the block. Else the lead row ([`block_lead`]) of the block starting nearest
 /// it. `None` only over no rows, which the caller's clamp settles.
 fn rendered_row_of(rows: &[Row], (src, offset): (u32, u32)) -> Option<usize> {
+    let marker = is_marker_offset(offset);
     let block: Vec<(usize, u32)> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, r)| match r {
-            Row::Rendered { src: s, offset: o, .. } if *s == src => Some((i, *o)),
+            Row::Rendered { src: s, offset: o, .. }
+                if *s == src && is_marker_offset(*o) == marker =>
+            {
+                Some((i, *o))
+            }
             _ => None,
         })
         .collect();
@@ -5495,11 +5872,11 @@ fn rendered_row_of(rows: &[Row], (src, offset): (u32, u32)) -> Option<usize> {
     });
     let mut nearest: Option<(usize, u32)> = None;
     for (i, s, end) in starts {
-        if (s..=end).contains(&src) {
+        if !marker && (s..=end).contains(&src) {
             let want = offset.saturating_add(src - s) as usize;
             let len = rows[i..]
                 .iter()
-                .take_while(|r| rendered_id(r).is_some_and(|(b, _)| b == s))
+                .take_while(|r| rendered_id(r).is_some_and(|(b, o)| b == s && !is_marker_offset(o)))
                 .count();
             return Some(i + want.min(len - 1));
         }
@@ -5524,10 +5901,11 @@ fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
 
 /// The rendered row source line `line` lands on: the lead row of the block whose source range
 /// holds it, else of the first block below it — a blank source line between blocks paints as
-/// the gap above the next one — else the last row.
+/// the gap above the next — else the last row. Marker rows stand between lines, so a line
+/// never lands on one.
 fn rendered_row_at_line(rows: &[Row], line: u32) -> Option<usize> {
     let range = |r: &Row| match r {
-        Row::Rendered { src, src_end, .. } => Some((*src, *src_end)),
+        Row::Rendered { src, src_end, mark, .. } if !mark.is_marker() => Some((*src, *src_end)),
         _ => None,
     };
     let start = rows
@@ -5538,102 +5916,60 @@ fn rendered_row_at_line(rows: &[Row], line: u32) -> Option<usize> {
     Some(block_lead(rows, start))
 }
 
-/// The rendered blocks' source ranges in row order, one per run of rows sharing a `src`.
-fn rendered_blocks(rows: &[Row]) -> Vec<(u32, u32)> {
-    let mut out: Vec<(u32, u32)> = Vec::new();
+/// The rendered units in row order, one per run of rows of one unit, with each one's source
+/// range.
+fn rendered_units(rows: &[Row]) -> Vec<(Unit, (u32, u32))> {
+    let mut out: Vec<(Unit, (u32, u32))> = Vec::new();
     for row in rows {
-        if let Row::Rendered { src, src_end, .. } = row
-            && out.last().is_none_or(|&(s, _)| s != *src)
+        if let (Some(u), Row::Rendered { src, src_end, .. }) = (unit_of(row), row)
+            && out.last().is_none_or(|&(l, _)| l != u)
         {
-            out.push((*src, *src_end));
+            out.push((u, (*src, *src_end)));
         }
     }
     out
 }
 
-/// The block (by its `src`) that source line `line` belongs to rendered, the rule
-/// [`rendered_row_at_line`] lands by: the block whose range holds it, else the first block
-/// below it — a blank line between blocks paints as the gap above the next — else the last
-/// block. `None`, a line past the file's end, lands on the last block too.
-fn holding_block(blocks: &[(u32, u32)], line: Option<u32>) -> Option<u32> {
-    let last = blocks.last().map(|&(s, _)| s);
-    let Some(line) = line else { return last };
-    blocks
-        .iter()
-        .find(|&&(s, e)| (s..=e).contains(&line))
-        .or_else(|| blocks.iter().find(|&&(s, _)| s > line))
-        .map(|&(s, _)| s)
-        .or(last)
+/// `n` `word`s, plural past one.
+fn plural(n: u32, word: &str) -> String {
+    if n == 1 { word.to_string() } else { format!("{word}s") }
 }
 
-/// Each row's nearest new-side line numbers before and after it, in diff order — for a
-/// deletion, the lines its run sits between.
-fn new_line_bounds(lines: &[&Row]) -> Vec<Bounds> {
-    let mut bounds = vec![Bounds::default(); lines.len()];
-    let mut before = None;
-    for (i, row) in lines.iter().enumerate() {
-        bounds[i].before = before;
-        before = row.new_no().or(before);
+/// `text` cut to `width` display columns, its last one an `…` when cut.
+fn fit(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= width {
+        return text.to_string();
     }
-    let mut after = None;
-    // Whether the first row past the deletion run a row sits in is an insertion.
-    let mut replaced = false;
-    for (i, row) in lines.iter().enumerate().rev() {
-        bounds[i].after = after;
-        bounds[i].replaced = replaced;
-        after = row.new_no().or(after);
-        replaced = match row {
-            Row::Insertion { .. } => true,
-            Row::Deletion { .. } => replaced,
-            _ => false,
-        };
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
     }
-    bounds
-}
-
-/// Where a diff row sits among the new side's lines: the nearest new-side line before and
-/// after it, and — for a deletion — whether its run is replaced, an insertion right after it.
-#[derive(Clone, Copy, Debug, Default)]
-struct Bounds {
-    before: Option<u32>,
-    after: Option<u32>,
-    replaced: bool,
-}
-
-/// The block (by its `src`) that owns a deletion run. A replaced run — an insertion right
-/// after it — belongs with its replacement: the block holding the first inserted line. A pure
-/// deletion goes by adjacency: the block holding the line before it (an edit at its tail,
-/// even with a blank line after), else the block holding the line after it (an edit at its
-/// head). A run touching neither lies between blocks, and lands on the next block below it,
-/// or the last block at the end of the file. The one owner rule anchors and cards both read.
-fn deletion_owner(blocks: &[(u32, u32)], at: Bounds) -> Option<u32> {
-    let holding = |line: Option<u32>| {
-        let line = line?;
-        blocks.iter().find(|&&(s, e)| (s..=e).contains(&line)).map(|&(s, _)| s)
-    };
-    if at.replaced {
-        return holding_block(blocks, at.after);
+    if width > 0 {
+        out.push('…');
     }
-    holding(at.before).or_else(|| holding(at.after)).or_else(|| holding_block(blocks, at.after))
-}
-
-/// A diff's rows with every fold opened: each source line once, in diff order.
-fn diff_lines(rows: &[Row]) -> impl Iterator<Item = &Row> {
-    rows.iter().flat_map(|row| match row {
-        Row::Fold { lines } => lines.as_slice(),
-        _ => std::slice::from_ref(row),
-    })
+    out
 }
 
 /// The lead row of the rendered block holding row `i`: its first line with text, else its
 /// first line. A block's leading rows are the blank gap the renderer sets above it, so the
 /// lead is where the block reads as starting — where a flip lands and the gutter numbers it.
+/// A marker row leads itself.
 fn block_lead(rows: &[Row], i: usize) -> usize {
     let Some((src, offset)) = rows.get(i).and_then(rendered_id) else { return i };
+    if is_marker_offset(offset) {
+        return i;
+    }
     let start = i.saturating_sub(offset as usize);
     let texted = rows[start..]
         .iter()
-        .take_while(|r| rendered_id(r).is_some_and(|(s, _)| s == src))
+        .take_while(|r| rendered_id(r).is_some_and(|(s, o)| s == src && !is_marker_offset(o)))
         .position(|r| !r.text().trim().is_empty());
     start + texted.unwrap_or(0)
 }
@@ -5781,14 +6117,18 @@ mod tests {
         old.mode = Mode::List;
         old.rendered = false; // flipped to source, away from the default
         old.rendered_text = "# doc".to_string();
-        old.rendered_details.insert("Details#0".to_string());
+        old.rendered_details.insert("Details#0".to_string(), true);
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
 
         assert!(!recovered.rendered, "the source choice survives config recovery");
         assert_eq!(recovered.rendered_text, "# doc");
-        assert!(recovered.rendered_details.contains("Details#0"), "open details survive");
+        assert_eq!(
+            recovered.rendered_details.get("Details#0"),
+            Some(&true),
+            "open details survive"
+        );
     }
 
     #[test]

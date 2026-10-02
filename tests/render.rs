@@ -6,6 +6,7 @@ mod common;
 use common::{Repo, app_on, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::diff::{Mark, Row};
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
@@ -16,6 +17,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 fn dump(buffer: &Buffer) -> String {
     let area = buffer.area;
@@ -4501,4 +4503,58 @@ fn a_hovered_rendered_row_shows_the_plus_button_and_a_commented_block_its_accent
     let num = buf.cell((inner.x + 3, inner.y)).unwrap();
     assert_eq!(num.symbol(), "1");
     assert_eq!(num.fg, PEACH, "the commented block's number takes the accent");
+}
+
+#[test]
+fn rendered_change_marks_paint_bars_and_marker_rows() {
+    let r = Repo::init();
+    r.write(
+        "doc.md",
+        "# Head\n\nsame para\n\nold words\n\nkeep one\n\ngone para\n\nkeep\n\n<!-- x -->\n\n- item\n",
+    );
+    r.commit_all("init");
+    r.write(
+        "doc.md",
+        "# Head\n\nsame para\n\nnew words\n\nkeep one\n\nkeep\n\n<!-- y -->\n\n- item\n- added\n",
+    );
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    assert!(app.rendered_active());
+    let area = Rect::new(0, 0, 140, 40);
+    let inner = ui::read_inner_rect(area, &app);
+    let buf = render_buffer(&app);
+    let pal = *app.palette();
+    // The bar cell and text of the painted read-pane row showing `needle`.
+    let row_of = |needle: &str| {
+        (inner.y..inner.y + inner.height)
+            .find(|&y| {
+                let line: String = (inner.x..inner.x + inner.width)
+                    .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                    .collect();
+                line.contains(needle)
+            })
+            .unwrap_or_else(|| panic!("{needle} painted:\n{}", dump(&buf)))
+    };
+    let bar = |needle: &str| {
+        let cell = buf.cell((inner.x, row_of(needle))).unwrap();
+        (cell.symbol().to_string(), cell.fg)
+    };
+    let color = |m: Mark| ("▌".to_string(), pal.mark_color(m));
+    assert_eq!(bar("new words"), color(Mark::Modified), "a modified block is amber");
+    assert_eq!(bar("added"), color(Mark::Added), "a block that only gained is green");
+    assert_eq!(bar("same para").0, " ", "an unchanged block wears no bar");
+    assert_eq!(bar("− 1 line removed"), color(Mark::Removed));
+    assert_eq!(bar("⚠ 1 changed line doesn't render · m to see"), color(Mark::Unrendered));
+    assert_eq!(pal.mark_color(Mark::Added), pal.green, "a dark theme's hues already read");
+    // The removed marker sits where the block was, between its neighbours.
+    let (words, removed, keep) = (row_of("keep one"), row_of("line removed"), row_of("9 keep"));
+    assert!(words < removed && removed < keep, "{}", dump(&buf));
+
+    // A narrow pane cuts a marker to its width with `…`, never past the pane's edge.
+    app.sync_rendered_width(20);
+    let i =
+        app.visible.iter().position(|r| matches!(r, Row::Rendered { mark: Mark::Unrendered, .. }));
+    let text = app.painted_text(i.expect("the marker row")).unwrap();
+    assert!(text.ends_with('…') && text.width() <= 20, "{text:?}");
 }

@@ -41,6 +41,23 @@ pub struct Rendered {
     /// collapsed `<details>` body. A change there is invisible rendered, so review
     /// surfaces it by these.
     pub silent: Vec<usize>,
+    /// Every `<details>` that has a summary, open or not, in close order: its key and source
+    /// lines. The same for any open set, so the open state can be derived from it.
+    pub disclosures: Vec<Disclosure>,
+    /// Every code block's whole source range, fences included: its lines map one rendered
+    /// line each, yet review treats the block as one.
+    pub code_blocks: Vec<(usize, usize)>,
+}
+
+/// One `<details>` element's source lines, 1-based: `start` holds the opening tag, `body`
+/// is the first line past the summary, `end` holds the closing tag (or the file's last
+/// line when it never closes). `key` is its [`DetailsHit::key`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Disclosure {
+    pub key: String,
+    pub start: usize,
+    pub body: usize,
+    pub end: usize,
 }
 
 /// One rendered line's metadata: the 1-based source lines it maps to — its block's
@@ -106,6 +123,7 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         block_src: 1,
         block_end: 1,
         covered: Vec::new(),
+        open_blocks: Vec::new(),
         comment_lines: Vec::new(),
         in_comment: false,
         summary_counts: std::collections::HashMap::new(),
@@ -235,9 +253,11 @@ struct Renderer<'a> {
     /// The 1-based source lines the block being emitted spans.
     block_src: usize,
     block_end: usize,
-    /// Every emitted block's full source range, fences and delimiter rows included — the
-    /// lines a render shows even where no rendered line maps to them one by one.
+    /// The source ranges of blocks that rendered at least one line: their structural lines —
+    /// fences, delimiter rows, wrapper tags, item markers — show as part of them.
     covered: Vec<(usize, usize)>,
+    /// The blocks open now: each one's source lines and the rendered line count at its start.
+    open_blocks: Vec<(usize, usize, usize)>,
     /// Lines holding HTML comment text: hidden even inside a block that renders.
     comment_lines: Vec<(usize, usize)>,
     /// An HTML comment opened on an earlier line of the same HTML block, not yet closed.
@@ -286,11 +306,28 @@ struct Renderer<'a> {
     skip_relative: bool,
 }
 
+/// Whether a block's whole source range shows once it renders a line: a leaf block, an
+/// item, an HTML block.
+fn shows_whole(tag: &Tag<'_>) -> bool {
+    matches!(
+        tag,
+        Tag::Paragraph
+            | Tag::Heading { .. }
+            | Tag::Item
+            | Tag::CodeBlock(_)
+            | Tag::Table(_)
+            | Tag::HtmlBlock
+    )
+}
+
 /// An open `<details>`: its summary (while collecting), and whether its body is silent.
 struct DetailsFrame {
     summary: String,
     collecting_summary: bool,
     skip: bool,
+    /// The opening tag's line, and the key and body line once the summary closes.
+    start: usize,
+    key: Option<(String, usize)>,
 }
 
 impl Renderer<'_> {
@@ -314,13 +351,40 @@ impl Renderer<'_> {
         if matches!(event, Event::Start(Tag::HtmlBlock) | Event::End(TagEnd::HtmlBlock)) {
             self.in_comment = false;
         }
+        // A block shows its whole source range once it renders a line of its own. A tight
+        // item's pending text flushes first, so it never counts as an HTML block's line.
+        if let Event::Start(tag) = &event
+            && shows_whole(tag)
+        {
+            if matches!(tag, Tag::HtmlBlock) && self.emitting() && !self.collecting_summary() {
+                self.flush_block(true);
+            }
+            self.open_blocks.push((self.event_lines.0, self.event_lines.1, self.out.lines.len()));
+        }
+        let closes = matches!(
+            &event,
+            Event::End(
+                TagEnd::Paragraph
+                    | TagEnd::Heading(_)
+                    | TagEnd::Item
+                    | TagEnd::CodeBlock
+                    | TagEnd::Table
+                    | TagEnd::HtmlBlock
+            )
+        );
+        self.dispatch(event, range);
+        if closes
+            && let Some((start, end, before)) = self.open_blocks.pop()
+            && self.out.lines.len() > before
+        {
+            self.covered.push((start, end));
+        }
+    }
+
+    fn dispatch(&mut self, event: Event<'_>, range: Range<usize>) {
         match event {
             Event::InlineHtml(t) => {
-                let shown = self.emitting() && !self.collecting_summary();
-                // A tag-only inline tag shows as much as a tag-only HTML block line does.
-                if !self.handle_html(&t, true, &range) && shown {
-                    self.covered.push(self.event_lines);
-                }
+                self.handle_html(&t, true, &range);
             }
             Event::Html(t) => {
                 if self.emitting() && !self.collecting_summary() {
@@ -330,13 +394,7 @@ impl Renderer<'_> {
                 }
                 self.block_src = self.src_line(range.start);
                 self.block_end = self.end_line(&range);
-                let shown_before = self.emitting() || self.collecting_summary();
-                let commented = self.handle_html(&t, false, &range);
-                // A tag-only line of HTML that shows — a wrapper's open or close, a
-                // disclosure's structure, a summary's text — is shown source.
-                if !commented && (shown_before || self.emitting() || self.collecting_summary()) {
-                    self.covered.push((self.block_src, self.block_end));
-                }
+                self.handle_html(&t, false, &range);
             }
             Event::Start(tag) if self.emitting() && !self.collecting_summary() => {
                 self.start(tag, range);
@@ -393,10 +451,8 @@ impl Renderer<'_> {
         ) {
             self.block_src = self.src_line(range.start);
             self.block_end = self.end_line(&range);
-            // An item's range spans its nested blocks, which cover themselves; a leaf
-            // block covers its whole range, fences and delimiter rows included.
-            if !matches!(tag, Tag::Item) {
-                self.covered.push((self.block_src, self.block_end));
+            if matches!(tag, Tag::CodeBlock(_)) && self.emitting() {
+                self.out.code_blocks.push((self.block_src, self.block_end));
             }
         }
         match tag {
@@ -674,13 +730,19 @@ impl Renderer<'_> {
                     summary: String::new(),
                     collecting_summary: false,
                     skip: true,
+                    start: self.event_lines.0,
+                    key: None,
                 });
             }
             ("details", true, _) => {
                 if self.emitting() {
                     self.flush_block(true);
                 }
-                self.details.pop();
+                if let Some(DetailsFrame { start, key: Some((key, body)), .. }) = self.details.pop()
+                {
+                    let end = self.event_lines.1.max(start);
+                    self.out.disclosures.push(Disclosure { key, start, body, end });
+                }
             }
             ("summary", false, _) => {
                 if let Some(d) = self.details.last_mut() {
@@ -739,8 +801,10 @@ impl Renderer<'_> {
         let key = format!("{summary}#{seen}");
         *seen += 1;
         let open = self.expanded.contains(&key);
+        let body = self.event_lines.1 + 1;
         if let Some(d) = self.details.last_mut() {
             d.skip = !open;
+            d.key = Some((key.clone(), body));
         }
         if !self.details.iter().rev().skip(1).any(|d| d.skip) {
             self.emit_details_summary(&summary, &key, open);
@@ -808,6 +872,14 @@ impl Renderer<'_> {
     /// begins, so a list item never claims the nested blocks that map themselves, and a
     /// line nothing shows is one no range covers.
     fn finish(mut self, text: &str) -> Rendered {
+        // A disclosure left open runs to the end of the file.
+        let last = text.lines().count().max(1);
+        for d in std::mem::take(&mut self.details).into_iter().rev() {
+            if let Some((key, body)) = d.key {
+                let end = last.max(d.start);
+                self.out.disclosures.push(Disclosure { key, start: d.start, body, end });
+            }
+        }
         // Blank once container markers go: a `>`-only line inside a quote shows nothing
         // of its own and hides nothing either.
         let blank: Vec<bool> = text
@@ -836,6 +908,12 @@ impl Renderer<'_> {
         for (start, end) in spans {
             for line in start..=end.min(shown.len() - 1) {
                 shown[line] = true;
+            }
+        }
+        // A collapsed body shows nothing, even inside an HTML block that rendered a summary.
+        for d in self.out.disclosures.iter().filter(|d| !self.expanded.contains(&d.key)) {
+            for line in d.body..d.end.min(shown.len()) {
+                shown[line] = false;
             }
         }
         let mut hidden = vec![false; shown.len()];
@@ -1943,11 +2021,16 @@ mod tests {
         assert!(
             silent("<p align=\"center\">\n<img alt=\"logo\" src=\"x.png\">\n</p>\n").is_empty()
         );
+        // The collapsed body, and the closing tag alone on its line: nothing renders it.
         assert_eq!(
             silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n"),
-            [6]
+            [6, 8]
         );
-        assert!(silent("```\n```\n").is_empty(), "an empty fence is its own shown block");
+        assert_eq!(silent("```\n```\n"), [1, 2], "an empty fence renders no line");
+        // Lone tags and a lone `>` line render nothing either, in any line ending.
+        assert_eq!(silent("<p>\n<summary>\n"), [1, 2]);
+        assert_eq!(silent("<p>\r\n<summary>\r\n"), [1, 2]);
+        assert_eq!(silent(">\n<br>\n"), [2], "a bare `>` is blank, the tag silent");
     }
 
     #[test]

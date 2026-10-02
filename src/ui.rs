@@ -2071,13 +2071,16 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint, rendered } =
         layout;
     let RowState { commented, cursor, selected, hovered, lead } = state;
-    if let Row::Rendered { src, line, .. } = row {
+    if let Row::Rendered { src, line, mark, .. } = row {
         // The block's lead line carries its source number, in the comment accent when a
         // comment covers the block; its other lines a blank one, like a wrapped row's
-        // continuation. The hover's `[+]` covers the field on any line, as on source.
-        let num = if lead { src.to_string() } else { String::new() };
+        // continuation. A marker row stands between lines, so it carries none. The hover's
+        // `[+]` covers the field on any line, as on source. A marked line's bar cell shows its
+        // change mark the way a source row's shows `+`/`-`.
+        let num = if lead && !mark.is_marker() { src.to_string() } else { String::new() };
         let num_color = if commented { pal.orange } else { pal.dim1 };
-        let mut spans = vec![Span::styled(" ", Style::default().fg(pal.dim2))];
+        let bar = if *mark == crate::diff::Mark::None { " " } else { "▌" };
+        let mut spans = vec![Span::styled(bar, Style::default().fg(pal.mark_color(*mark)))];
         if hovered {
             spans.push(Span::raw(" ".repeat(gutter_w - 3)));
             spans.push(Span::styled(

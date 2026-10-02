@@ -88,6 +88,23 @@ impl Palette {
         if color == self.dim2 { self.dim0 } else { color }
     }
 
+    /// A rendered line's change-mark color: an added block's bar takes the insertion green, a
+    /// modified block's and an unrendered change's the amber, a removed marker the deletion
+    /// red — each lifted toward `text` until it clears [`MIN_MARK_CONTRAST`] on `base`, so a
+    /// light theme's pale amber still reads. An unmarked line's empty bar cell keeps the dim
+    /// chrome.
+    #[must_use]
+    pub fn mark_color(&self, mark: crate::diff::Mark) -> Color {
+        use crate::diff::Mark;
+        let hue = match mark {
+            Mark::None => return self.dim2,
+            Mark::Added => self.green,
+            Mark::Modified | Mark::Unrendered => self.yellow,
+            Mark::Removed => self.red,
+        };
+        lift(hue, self.base, self.text, MIN_MARK_CONTRAST)
+    }
+
     /// Recede a painted color behind an open modal: halfway to `base`, so the modal owns the
     /// eye while the page behind stays recognizable. Non-RGB colors are the
     /// terminal's own defaults, which have no known distance to `base`; they pass through.
@@ -341,6 +358,23 @@ const BLACK: Color = Color::Rgb(0x00, 0x00, 0x00);
 /// legible on any base.
 const MIN_FILL_CONTRAST: f64 = 4.5;
 
+/// The lowest contrast a change mark keeps against the base: WCAG's floor for non-text marks.
+const MIN_MARK_CONTRAST: f64 = 3.0;
+
+/// `fg` blended toward `toward` just far enough to clear `min` contrast on `bg`; `fg` itself
+/// when it already does.
+fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
+    let mut t = 0.0;
+    while t < 1.0 {
+        let lifted = blend(fg, toward, t);
+        if contrast(lifted, bg) >= min {
+            return lifted;
+        }
+        t += 0.02;
+    }
+    toward
+}
+
 /// Lift a syntax `fg` painted on `fill` just enough that the fill costs it no legibility: to
 /// its own contrast on the plain `base`, capped at [`MIN_FILL_CONTRAST`].
 ///
@@ -448,6 +482,18 @@ mod tests {
         resolve,
     };
     use ratatui::style::Color;
+
+    #[test]
+    fn change_marks_clear_three_to_one_on_every_base() {
+        use crate::diff::Mark;
+        for name in ["catppuccin", "catppuccin-latte", "rose-pine-dawn", "rose-pine"] {
+            let p = resolve(Some(name)).palette;
+            for mark in [Mark::Added, Mark::Modified, Mark::Removed, Mark::Unrendered] {
+                let c = contrast(p.mark_color(mark), p.base);
+                assert!(c >= 3.0, "{name} {mark:?}: {c:.2}");
+            }
+        }
+    }
 
     #[test]
     fn contrast_black_white_is_max() {

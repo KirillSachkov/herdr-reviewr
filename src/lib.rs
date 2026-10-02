@@ -25,6 +25,7 @@ pub mod keymap;
 #[macro_use]
 pub mod log;
 pub mod markdown;
+pub(crate) mod marks;
 pub mod model;
 pub mod proc;
 pub mod search;

@@ -55,7 +55,31 @@ pub enum Row {
         offset: u32,
         spans: Vec<Span>,
         line: u32,
+        /// The change mark the line wears in the `Changes` tab: a block's bar, or the kind of
+        /// marker row it is.
+        mark: Mark,
     },
+}
+
+/// A rendered line's change mark. A block's rows wear a bar: `Added` when it only gained
+/// lines, `Modified` otherwise. A marker row stands for changes no block shows: `Removed`
+/// source deleted between blocks, `Unrendered` changed source that renders nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Mark {
+    #[default]
+    None,
+    Added,
+    Modified,
+    Removed,
+    Unrendered,
+}
+
+impl Mark {
+    /// Whether a row with this mark is a marker row rather than a block's line.
+    #[must_use]
+    pub fn is_marker(self) -> bool {
+        matches!(self, Mark::Removed | Mark::Unrendered)
+    }
 }
 
 /// A `[start, end)` run of char indices within a line, for word-level emphasis.
@@ -165,6 +189,9 @@ pub struct FileDiff {
     pub state: FileState,
     pub view: View,
     pub rows: Vec<Row>,
+    /// The `(old, new)` line numbers of each deletion paired with its homolog insertion — one
+    /// line edited, not one removed and another added ([`compute_emphasis`]).
+    pub pairs: Vec<(u32, u32)>,
 }
 
 /// A file beyond either budget renders as `too_large` rather than stalling the diff —
@@ -195,6 +222,7 @@ impl FileDiff {
             state: FileState::Normal,
             view: View::Diff,
             rows: Vec::new(),
+            pairs: Vec::new(),
         }
     }
 
@@ -214,6 +242,7 @@ impl FileDiff {
             state,
             view: View::Diff,
             rows: Vec::new(),
+            pairs: Vec::new(),
         };
         if old.contains('\0') || new.contains('\0') {
             return notice(FileState::Binary);
@@ -258,13 +287,14 @@ impl FileDiff {
                 }
             }
         }
-        compute_emphasis(&mut rows);
+        let pairs = compute_emphasis(&mut rows);
         Self {
             path,
             previous_path,
             state: FileState::Normal,
             view: View::Diff,
             rows: collapse_context(&rows),
+            pairs,
         }
     }
 
@@ -278,6 +308,7 @@ impl FileDiff {
             state,
             view: View::File,
             rows: Vec::new(),
+            pairs: Vec::new(),
         };
         if content.contains('\0') {
             return notice(FileState::Binary);
@@ -298,14 +329,28 @@ impl FileDiff {
                 }
             })
             .collect();
-        Self { path, previous_path: None, state: FileState::Normal, view: View::File, rows }
+        Self {
+            path,
+            previous_path: None,
+            state: FileState::Normal,
+            view: View::File,
+            rows,
+            pairs: Vec::new(),
+        }
     }
 
     /// The Diff-view `binary` notice, for a change git already reported as having no text
     /// diff. `set_diff` builds this rather than reading either side's blob, so a `-diff`
     /// lockfile costs no `git show` at all.
     pub fn binary_notice(path: String, previous_path: Option<String>) -> Self {
-        Self { path, previous_path, state: FileState::Binary, view: View::Diff, rows: Vec::new() }
+        Self {
+            path,
+            previous_path,
+            state: FileState::Binary,
+            view: View::Diff,
+            rows: Vec::new(),
+            pairs: Vec::new(),
+        }
     }
 
     /// The File-view `too_large` notice, for an over-budget file the caller declines to read.
@@ -317,6 +362,7 @@ impl FileDiff {
             state: FileState::TooLarge,
             view: View::File,
             rows: Vec::new(),
+            pairs: Vec::new(),
         }
     }
 }
@@ -340,7 +386,9 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
 /// insertion similar enough to be the same line edited (see [`pair_homologs`], after
 /// git-delta's `infer_edits`). Lines with no homolog stay unemphasized, carrying only their
 /// red/green; emphasis then points at a real edit instead of flooding a wholesale rewrite.
-pub(crate) fn compute_emphasis(rows: &mut [Row]) {
+/// Returns the `(old, new)` line numbers of the pairs it found, in diff order.
+pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(u32, u32)> {
+    let mut pairs = Vec::new();
     let mut i = 0;
     while i < rows.len() {
         let del_start = i;
@@ -351,12 +399,13 @@ pub(crate) fn compute_emphasis(rows: &mut [Row]) {
         while i < rows.len() && matches!(rows[i], Row::Insertion { .. }) {
             i += 1;
         }
-        pair_homologs(rows, del_start..ins_start, ins_start..i);
+        pair_homologs(rows, del_start..ins_start, ins_start..i, &mut pairs);
         // No change block started here; step over the context/fold row.
         if del_start == i {
             i += 1;
         }
     }
+    pairs
 }
 
 /// Pair each deletion in `dels` with its homolog insertion in `inss` and set both lines'
@@ -364,7 +413,12 @@ pub(crate) fn compute_emphasis(rows: &mut [Row]) {
 /// last-claimed one whose similarity clears [`MIN_SIMILARITY`]; insertions skipped along the
 /// way are abandoned (they were inserts, not edits of `d`). A deletion with no qualifying
 /// insertion is left unpaired. Mirrors git-delta's homolog inference.
-fn pair_homologs(rows: &mut [Row], dels: std::ops::Range<usize>, inss: std::ops::Range<usize>) {
+fn pair_homologs(
+    rows: &mut [Row],
+    dels: std::ops::Range<usize>,
+    inss: std::ops::Range<usize>,
+    pairs: &mut Vec<(u32, u32)>,
+) {
     let mut next_ins = inss.start;
     for d in dels {
         let old = rows[d].text();
@@ -378,6 +432,9 @@ fn pair_homologs(rows: &mut [Row], dels: std::ops::Range<usize>, inss: std::ops:
                 }
                 if let Row::Insertion { emphasis, .. } = &mut rows[p] {
                     *emphasis = new_e;
+                }
+                if let (Some(o), Some(n)) = (rows[d].old_no(), rows[p].new_no()) {
+                    pairs.push((o, n));
                 }
                 next_ins = p + 1;
                 break;

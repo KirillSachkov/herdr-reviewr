@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
+use herdr_reviewr::diff::{Mark, Row};
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
@@ -241,7 +242,7 @@ fn traversal_repo() -> Repo {
 
 /// The text under the diff cursor — where a hunk step landed.
 fn cursor_text(app: &App) -> String {
-    app.visible[app.diff_cursor].text()
+    painted(app, app.diff_cursor)
 }
 
 /// The file the list has selected, which tracks the open file through every traversal.
@@ -8066,7 +8067,12 @@ fn rendered_review_app() -> (Repo, App) {
 
 /// The first rendered row whose text holds `needle`.
 fn rendered_row(app: &App, needle: &str) -> usize {
-    app.visible.iter().position(|row| row.text().contains(needle)).expect("a row with the text")
+    (0..app.visible.len()).find(|&i| painted(app, i).contains(needle)).expect("a row with the text")
+}
+
+/// The text read-pane row `i` paints: a rendered row's styled line, marker text included.
+fn painted(app: &App, i: usize) -> String {
+    app.painted_text(i).unwrap_or_else(|| app.visible[i].text())
 }
 
 /// Write `text` in the open composer and save it.
@@ -8165,14 +8171,21 @@ fn a_tail_deletion_belongs_to_its_own_block_even_before_a_blank_line() {
 }
 
 #[test]
-fn a_whole_paragraph_removed_between_blocks_lands_on_the_next_block() {
+fn a_whole_paragraph_removed_between_blocks_sits_under_its_removed_marker() {
     let (_r, mut app, row) =
         old_side_card_row("# A\n\npara one\n\ngone para\n\n# C\n", "# A\n\npara one\n\n# C\n");
-    let next = rendered_row(&app, "C");
-    assert_eq!(row, next, "a between-blocks deletion sits under the next block");
+    let marker = rendered_row(&app, "removed");
+    assert_eq!(row, marker, "a between-blocks deletion sits under its removed marker");
+    assert!(marker > rendered_row(&app, "para one") && marker < rendered_row(&app, "C"));
 
-    // The paragraph above does not claim it; a range spanning both blocks takes it.
+    // Neither neighbour claims it; a range spanning both blocks takes it.
     app.store.take(0);
+    app.diff_cursor = rendered_row(&app, "C");
+    app.start_comment();
+    write_comment(&mut app, "next");
+    assert!(!app.store.get(0).unwrap().lines.contains("gone para"));
+    app.store.take(0);
+    let next = rendered_row(&app, "C");
     app.diff_cursor = rendered_row(&app, "para one");
     app.start_comment();
     write_comment(&mut app, "para");
@@ -8393,7 +8406,6 @@ fn a_replaced_line_belongs_to_its_replacement_block() {
     // (old, new, the replacement's rendered text, the block above's text, the snippet)
     let cases = [
         ("- a\n- b\n- c\n", "- a\n- B\n- c\n", "B", "a", "-- b\n+- B"),
-        ("- a\n- b\n- c\n", "- a\n- B\n", "B", "a", "-- b\n-- c\n+- B"),
         (
             "| h |\n|---|\n| x |\n| y |\n",
             "| h |\n|---|\n| X |\n| y |\n",
@@ -8579,4 +8591,259 @@ fn a_card_click_picks_its_comment() {
         assert_eq!(app.mode, Mode::Composing { editing: Some(index) }, "clicked {needle}");
         app.cancel_comment();
     }
+}
+
+// --- rendered change marks -----------------------------------------------------
+
+/// `a.md` with each kind of mark — an amber paragraph, a removed block, a changed HTML
+/// comment, a green list item — and `b.md` with one changed paragraph.
+fn marked_repo() -> Repo {
+    let r = Repo::init();
+    r.write(
+        "a.md",
+        "# A\n\npara one\n\nkeep one\n\ngone para\n\nkeep two\n\n<!-- x -->\n\n- item\n",
+    );
+    r.write("b.md", "# B\n\nold words\n");
+    r.commit_all("init");
+    r.write("a.md", "# A\n\npara ONE\n\nkeep one\n\nkeep two\n\n<!-- y -->\n\n- item\n- added\n");
+    r.write("b.md", "# B\n\nnew words\n");
+    r
+}
+
+/// The change mark the row under the cursor wears.
+fn cursor_mark(app: &App) -> Mark {
+    match &app.visible[app.diff_cursor] {
+        Row::Rendered { mark, .. } => *mark,
+        row => panic!("not a rendered row: {row:?}"),
+    }
+}
+
+#[test]
+fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
+    let r = marked_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(app.rendered_active());
+    app.diff_cursor = 0;
+
+    let mut stops = Vec::new();
+    for _ in 0..4 {
+        app.next_hunk();
+        stops.push((cursor_text(&app), cursor_mark(&app)));
+    }
+    assert_eq!(
+        stops,
+        vec![
+            ("para ONE".to_string(), Mark::Modified),
+            ("− 1 line removed".to_string(), Mark::Removed),
+            ("⚠ 1 changed line doesn't render · m to see".to_string(), Mark::Unrendered),
+            ("• added".to_string(), Mark::Added),
+        ]
+    );
+    // Back up the same stops.
+    app.prev_hunk();
+    assert_eq!(cursor_mark(&app), Mark::Unrendered);
+    app.prev_hunk();
+    assert_eq!(cursor_mark(&app), Mark::Removed);
+    app.prev_hunk();
+    assert_eq!(cursor_text(&app), "para ONE");
+
+    // Past the last mark the step arms a crossing, and the repeat lands on the next file's
+    // first mark, rendered.
+    for _ in 0..3 {
+        app.next_hunk();
+    }
+    app.next_hunk();
+    assert_eq!(app.armed_cross(), Some(true));
+    app.next_hunk();
+    assert_eq!(app.diff_path.as_deref(), Some("b.md"));
+    assert!(app.rendered_active());
+    assert_eq!((cursor_text(&app), cursor_mark(&app)), ("new words".to_string(), Mark::Modified));
+}
+
+#[test]
+fn a_removed_marker_comment_anchors_the_deleted_lines_on_the_old_side() {
+    let r = marked_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let marker = rendered_row(&app, "removed");
+    app.diff_cursor = marker;
+    app.start_comment();
+    write_comment(&mut app, "why drop it?");
+    let c = app.store.get(0).unwrap().clone();
+    assert_eq!(c.side, Side::Old);
+    assert!(c.lines.contains("-gone para"), "{:?}", c.lines);
+    assert!(!c.lines.contains("keep"), "a marker stands for its own lines alone");
+    let out = herdr_reviewr::export::format_all(&[&c]);
+    assert!(out.contains("(removed)"), "{out}");
+    // Its card sits under the marker.
+    assert_eq!(app.card_rows(), vec![(marker, 0)]);
+
+    // The agent restores the paragraph: the card follows the restored lines.
+    r.write(
+        "a.md",
+        "# A\n\npara ONE\n\nkeep one\n\ngone para\n\nkeep two\n\n<!-- y -->\n\n- item\n- added\n",
+    );
+    app.reload().unwrap();
+    assert_eq!(app.card_rows(), vec![(rendered_row(&app, "gone para"), 0)]);
+}
+
+#[test]
+fn an_unrendered_marker_comment_anchors_its_changed_source() {
+    let r = marked_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let marker = rendered_row(&app, "doesn't render");
+    app.diff_cursor = marker;
+    app.start_comment();
+    write_comment(&mut app, "hidden instruction?");
+    let c = app.store.get(0).unwrap().clone();
+    assert_eq!((c.side, c.start, c.end), (Side::New, 9, 9));
+    assert_eq!(c.lines, "-<!-- x -->\n+<!-- y -->");
+    assert_eq!(app.card_rows(), vec![(marker, 0)]);
+
+    // The same lines commented in source make the same comment.
+    let rendered = app.store.take(0).unwrap();
+    app.toggle_preview();
+    app.diff_cursor = app.visible.iter().position(|r| r.text() == "<!-- x -->").unwrap();
+    app.toggle_select();
+    app.diff_cursor = app.visible.iter().position(|r| r.text() == "<!-- y -->").unwrap();
+    app.start_comment();
+    write_comment(&mut app, "hidden instruction?");
+    assert_eq!(*app.store.get(0).unwrap(), rendered);
+}
+
+#[test]
+fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
+    let r = Repo::init();
+    let doc = |body: &str| {
+        format!(
+            "Intro\n\n<details>\n<summary>More</summary>\n\n{body}\n\n</details>\n\n\
+             <details>\n<summary>Quiet</summary>\n\nsame\n\n</details>\n"
+        )
+    };
+    r.write("doc.md", &doc("body one"));
+    r.commit_all("init");
+    r.write("doc.md", &doc("body two"));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    assert!(app.rendered_active());
+
+    // The changed disclosure opens on its own, its changed line marked; the quiet one stays
+    // collapsed.
+    let body = rendered_row(&app, "body two");
+    assert!(matches!(app.visible[body], Row::Rendered { mark: Mark::Modified, .. }));
+    assert!(app.visible.iter().any(|r| r.text().contains("▸ Quiet")));
+    assert!(!app.visible.iter().any(|r| r.text() == "same"));
+
+    // The reviewer collapses it: the summary carries the aggregate mark.
+    app.toggle_details("More#0");
+    assert!(!app.visible.iter().any(|r| r.text().contains("body two")));
+    let summary = rendered_row(&app, "▸ More");
+    assert!(painted(&app, summary).ends_with("· 2 changed lines"), "{}", painted(&app, summary));
+    assert!(!app.visible[summary].text().contains("changed"), "copy and find never read the note");
+    assert!(matches!(app.visible[summary], Row::Rendered { mark: Mark::Modified, .. }));
+
+    // A poll with a fresh change inside never reopens it against the reviewer's choice.
+    r.write("doc.md", &doc("body three"));
+    app.reload().unwrap();
+    assert!(!app.visible.iter().any(|r| r.text().contains("body three")));
+    assert!(rendered_row(&app, "▸ More") < app.visible.len());
+
+    // An old-side comment inside the collapsed body shows its card under the summary.
+    app.toggle_preview();
+    comment_on(&mut app, '-', "lost");
+    app.toggle_preview();
+    let summary = rendered_row(&app, "▸ More");
+    assert_eq!(app.card_rows(), vec![(summary, 0)]);
+}
+
+#[test]
+fn the_files_tab_shows_no_change_marks() {
+    use herdr_reviewr::app::Tab;
+    let r = marked_repo();
+    let mut app = app_on(&r);
+    assert!(
+        app.visible.iter().any(|r| matches!(r, Row::Rendered { mark, .. } if *mark != Mark::None))
+    );
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(app.rendered_active());
+    assert!(app.visible.iter().all(|r| matches!(r, Row::Rendered { mark: Mark::None, .. })));
+}
+
+#[test]
+fn a_comment_opens_its_disclosure_on_the_reviewers_own_input_never_on_a_later_poll() {
+    let r = Repo::init();
+    let doc = |tail: &str| {
+        format!(
+            "Intro\n\n<details>\n<summary>Quiet</summary>\n\nsame body\n\n</details>\n\n{tail}\n"
+        )
+    };
+    r.write("doc.md", &doc("old tail"));
+    r.commit_all("init");
+    r.write("doc.md", &doc("new tail"));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let open = |app: &App| app.visible.iter().any(|r| r.text() == "same body");
+    assert!(!open(&app), "an unchanged disclosure starts collapsed");
+
+    // A comment on its body, made in source, holds it open rendered.
+    app.toggle_preview();
+    app.diff_cursor = app.visible.iter().position(|r| r.hidden() > 0).expect("the fold");
+    expand_fold(&mut app);
+    app.diff_cursor = app.visible.iter().position(|r| r.text() == "same body").unwrap();
+    app.start_comment();
+    write_comment(&mut app, "why?");
+    app.toggle_preview();
+    assert!(open(&app), "the commented disclosure opens");
+
+    // Deleting the comment closes it on that keystroke.
+    app.diff_cursor = rendered_row(&app, "same body");
+    app.delete_comment();
+    assert!(app.store.is_empty());
+    assert!(!open(&app), "the delete closes it at once");
+
+    // An unchanged poll changes nothing.
+    let rows = app.visible.clone();
+    app.reload().unwrap();
+    assert_eq!(app.visible, rows);
+}
+
+#[test]
+fn a_run_of_marked_lines_is_one_stop() {
+    let r = Repo::init();
+    r.write("doc.md", "# Code\n\n```\none\ntwo\nthree\n```\n\ntail\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Code\n\n```\nONE\nTWO\nTHREE\n```\n\nTAIL\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    app.next_hunk();
+    assert!(cursor_text(&app).contains("ONE"), "{}", cursor_text(&app));
+    app.next_hunk();
+    assert_eq!(cursor_text(&app), "TAIL", "the three code lines were one stop");
+    app.prev_hunk();
+    assert!(cursor_text(&app).contains("ONE"));
+}
+
+#[test]
+fn a_block_appended_after_another_leaves_it_unmarked_and_out_of_its_anchor() {
+    let r = Repo::init();
+    r.write("doc.md", "A\n");
+    r.commit_all("init");
+    r.write("doc.md", "A\n\nB\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let a = rendered_row(&app, "A");
+    assert!(matches!(app.visible[a], Row::Rendered { mark: Mark::None, .. }));
+    assert!(matches!(
+        app.visible[rendered_row(&app, "B")],
+        Row::Rendered { mark: Mark::Added, .. }
+    ));
+    app.diff_cursor = a;
+    app.start_comment();
+    write_comment(&mut app, "keep");
+    assert_eq!(app.store.get(0).unwrap().lines, " A", "the inserted blank is B's, not A's");
 }
