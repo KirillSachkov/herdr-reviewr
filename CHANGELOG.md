@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- **PR comment ages honor the timestamp's time zone**: a time with an offset like `+02:00` no longer reads as UTC.
+  Thanks [@beefyhalo](https://github.com/beefyhalo) ([#122](https://github.com/persiyanov/herdr-reviewr/pull/122)).
+
 ## [0.40.0] — 2026-10-02
 
 ### Added

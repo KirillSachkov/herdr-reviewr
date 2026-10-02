@@ -1430,32 +1430,12 @@ pub(crate) fn is_named_bot(name: &str) -> bool {
     is_bot(name) || name.to_ascii_lowercase().ends_with("-bot")
 }
 
-/// Parse a fixed `YYYY-MM-DDTHH:MM:SSZ` timestamp to a Unix epoch second. `None` on any
-/// deviation, so a malformed value yields an empty age rather than a wrong one.
-// The civil-from-days algorithm reads naturally with the conventional short field names.
-#[allow(clippy::many_single_char_names)]
+/// Parse an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SSZ`, any fraction or zone offset) to a
+/// Unix epoch second. `None` on any deviation, so a malformed value yields an empty age rather
+/// than a wrong one.
 pub(crate) fn parse_iso(s: &str) -> Option<i64> {
-    let b = s.as_bytes();
-    if b.len() < 20
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || b[10] != b'T'
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return None;
-    }
-    let n = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
-    let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
-    let (h, mi, se) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
-    // Days from the civil date (Howard Hinnant's algorithm), then to seconds.
-    let y = if mo <= 2 { y - 1 } else { y };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let year_of_era = y - era * 400;
-    let day_of_year = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    let days = era * 146_097 + day_of_era - 719_468;
-    Some(days * 86_400 + h * 3600 + mi * 60 + se)
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::parse(s, &Rfc3339).ok().map(time::OffsetDateTime::unix_timestamp)
 }
 
 #[cfg(test)]
@@ -2069,11 +2049,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_iso_anchors_the_epoch_and_the_feb_year_branch() {
-        // The epoch anchors the civil-from-days math; a Jan/Feb date exercises the `mo <= 2`
-        // year-adjust branch that the June fixtures above never hit.
+    fn parse_iso_reads_every_forge_timestamp_as_epoch_seconds() {
         assert_eq!(parse_iso("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_iso("2000-02-29T00:00:00Z"), Some(951_782_400)); // a leap-day boundary
+        assert_eq!(parse_iso("2000-02-29T02:00:00+02:00"), Some(951_782_400), "a zone offset");
+        assert_eq!(parse_iso("1970-01-01T00:00:00.1234567Z"), Some(0), "Azure's 7-digit fraction");
         assert_eq!(parse_iso("not-a-date"), None);
     }
 
