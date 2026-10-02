@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Fixed
+- **Install works with older curl**, such as on Red Hat 8 and CentOS 7.
+  Thanks [@chengdejerrylin](https://github.com/chengdejerrylin) ([#113](https://github.com/persiyanov/herdr-reviewr/pull/113)).
 - **PR comment ages honor the timestamp's time zone**: a time with an offset like `+02:00` no longer reads as UTC.
   Thanks [@beefyhalo](https://github.com/beefyhalo) ([#122](https://github.com/persiyanov/herdr-reviewr/pull/122)).
 

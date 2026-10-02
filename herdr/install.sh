@@ -42,9 +42,15 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 # Release-asset downloads are eventually-consistent: GitHub's CDN can 404 for a few minutes
-# after a release publishes, even though the asset exists. Retry (incl. on 404) so an install
-# right after a release doesn't fail spuriously.
-dl() { curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --retry-connrefused "$1" -o "$2"; }
+# after a release publishes, even though the asset exists. Retry every failure, 404 included,
+# in the shell rather than with curl's retry flags, which older curls (RHEL 8, CentOS 7) lack.
+dl() {
+  for _ in 1 2 3 4 5 6; do
+    curl -fsSL "$1" -o "$2" && return
+    sleep 3
+  done
+  return 1
+}
 
 echo "$NAME: downloading $archive ($TAG)"
 dl "$base/$archive" "$tmp/$archive"
