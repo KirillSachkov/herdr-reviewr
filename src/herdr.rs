@@ -439,7 +439,13 @@ enum Readiness {
 /// screen and never becomes its next message. The read and the send are two herdr calls, so an
 /// agent can still start a turn in between. herdr offers no atomic send-if-idle.
 pub fn ensure_ready(pane: &str) -> Result<()> {
-    let Ok(agents) = agent_list() else { return Err(Refusal::Unanswered.into()) };
+    let agents = match agent_list() {
+        Ok(agents) => agents,
+        Err(e) => {
+            logln!("agent list failed before the send: {e:#}");
+            return Err(Refusal::Unanswered.into());
+        }
+    };
     match readiness_in(&agents, pane) {
         Readiness::Ready => Ok(()),
         Readiness::Busy(state) => Err(Refusal::Busy(state).into()),
