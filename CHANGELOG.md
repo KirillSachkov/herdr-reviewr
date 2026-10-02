@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`ayu` theme**, ayu Dark with its own syntax colors.
+  Thanks [@r-darwish](https://github.com/r-darwish) ([#118](https://github.com/persiyanov/herdr-reviewr/pull/118)).
+
 ## [0.40.1] — 2026-10-02
 
 ### Fixed
