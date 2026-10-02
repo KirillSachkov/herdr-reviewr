@@ -204,12 +204,12 @@ close_all() {
 $existing
 EOF
   [ -z "$failed" ] || refuse "herdr pane close failed for$failed in $ws"
-  printf 'closed%s in %s\n' "$closed" "$ws"
+  printf 'reviewr: closed%s in %s\n' "$closed" "$ws"
 }
 
 case "$mode" in
 close)
-  [ -n "$existing" ] || { printf 'close: nothing open in %s\n' "$ws"; exit 0; }
+  [ -n "$existing" ] || { printf 'reviewr: nothing open in %s\n' "$ws"; exit 0; }
   close_all
   exit 0
   ;;
@@ -221,7 +221,7 @@ toggle)
   ;;
 open | auto-open)
   if [ -n "$existing" ]; then
-    [ "$mode" = open ] && printf 'open: already open (%s) in %s\n' "$(printf '%s' "$existing" | tr '\n' ' ' | sed 's/ $//')" "$ws"
+    [ "$mode" = open ] && printf 'reviewr: already open (%s) in %s\n' "$(printf '%s' "$existing" | tr '\n' ' ' | sed 's/ $//')" "$ws"
     exit 0
   fi
   ;;
@@ -286,4 +286,4 @@ if [ "$placement" = tab ]; then
   tab=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.tab_id // empty' 2>/dev/null)
   [ -z "$tab" ] || "$H" tab rename "$tab" reviewr >/dev/null 2>&1
 fi
-[ "$mode" = auto-open ] || printf 'opened %s (%s) in %s\n' "$new" "$placement" "$ws"
+[ "$mode" = auto-open ] || printf 'reviewr: opened %s (%s) in %s\n' "$new" "$placement" "$ws"

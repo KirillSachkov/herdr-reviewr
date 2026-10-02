@@ -6,6 +6,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Clearer messages**: a refused send says why and how to get the comments out, and errors name what to fix.
+
 ### Fixed
 - **`q` asks before dropping unsent comments**: `Q` drops them and quits. A config that binds `Q` must move `quit-discard`.
   Thanks [@ruinshe](https://github.com/ruinshe) ([#119](https://github.com/persiyanov/herdr-reviewr/issues/119)).

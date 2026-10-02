@@ -190,7 +190,7 @@ fn corrected_config_recovers_on_the_next_invocation() {
     let output = run("close", dir.path(), &herdr);
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("close: nothing open"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reviewr: nothing open"));
     assert!(fs::read_to_string(log).unwrap().contains("pane list --workspace workspace-1"));
 }
 
@@ -409,7 +409,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     .unwrap();
     let output = run("close", dir.path(), &herdr);
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("close: nothing open"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("reviewr: nothing open"));
 
     // Any other read failure refuses, never reads as "no reviewr pane": an open would
     // stack a duplicate and a close would false-succeed.
