@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.40.1] — 2026-10-02
+
 ### Fixed
 - **Install works with older curl**, such as on Red Hat 8 and CentOS 7.
   Thanks [@chengdejerrylin](https://github.com/chengdejerrylin) ([#113](https://github.com/persiyanov/herdr-reviewr/pull/113)).
