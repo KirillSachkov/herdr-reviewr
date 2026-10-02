@@ -401,6 +401,38 @@ fn candidates<'a>(
         .collect()
 }
 
+/// Whether an agent pane can take a send right now, read from herdr just before the send.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Readiness {
+    /// The agent waits for input, or herdr cannot tell what it is doing.
+    Ready,
+    /// The agent is mid-turn or at a prompt. Holds herdr's label for the state, so the
+    /// refusal names it the way the picker row does.
+    Busy(String),
+    /// The pane is no longer an agent herdr lists.
+    Gone,
+}
+
+/// The pane's [`Readiness`], from a fresh `agent list`.
+pub fn readiness(pane: &str) -> Result<Readiness> {
+    Ok(readiness_in(&agent_list()?, pane))
+}
+
+fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
+    match agents.iter().find(|agent| agent.pane_id == pane) {
+        None => Readiness::Gone,
+        Some(agent) if accepts_input(&agent.agent_status) => Readiness::Ready,
+        Some(agent) => Readiness::Busy(agent.row_state()),
+    }
+}
+
+/// `idle` and `done` wait for input. `unknown` is an agent herdr does not classify, which
+/// would otherwise never be sendable, so it sends as it always did. Every other state, known
+/// or added later, is mid-turn or at a prompt, where a paste lands on whatever is on screen.
+fn accepts_input(wire: &str) -> bool {
+    matches!(wire, "idle" | "done" | "unknown")
+}
+
 /// Write literal text into the agent pane's input, without submitting.
 ///
 /// Uses `pane send-text`, not the agent-level send: herdr 0.7.5 replaced `agent send` with
@@ -475,6 +507,30 @@ mod tests {
         tabs: &HashMap<String, String>,
     ) -> Vec<AgentChoice> {
         super::candidates(agents, ws, me).into_iter().map(|agent| agent.choice(tabs)).collect()
+    }
+
+    #[test]
+    fn a_send_goes_only_to_an_agent_waiting_for_input() {
+        use super::Readiness::{Busy, Gone, Ready};
+        let at = |status: &str| AgentPane {
+            agent_status: status.into(),
+            state_labels: Some(HashMap::from([("compacting".into(), "Compacting".into())])),
+            ..agent("w8:p1", "w8:t1", "w8")
+        };
+        for (status, want) in [
+            ("idle", Ready),
+            ("done", Ready),
+            // An agent herdr does not classify reads `unknown` every time, so refusing it would
+            // make it unsendable.
+            ("unknown", Ready),
+            ("working", Busy("working".into())),
+            ("blocked", Busy("blocked".into())),
+            // A state herdr adds later is busy, named by herdr's own label.
+            ("compacting", Busy("Compacting".into())),
+        ] {
+            assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");
+        }
+        assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), Gone);
     }
 
     #[test]

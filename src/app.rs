@@ -578,6 +578,9 @@ pub enum FooterAction {
     Send,
     List,
     Copy,
+    /// The quit question's own bar: quit and drop the unsent comments, or stay.
+    QuitDiscard,
+    Stay,
     Save,
     Newline,
     Cancel,
@@ -806,6 +809,10 @@ pub struct App {
     /// recovery (Continuity).
     pub keys_expanded: bool,
     pub should_quit: bool,
+    /// The quit key was pressed with unsent comments, and the footer asks before they are
+    /// dropped. The reviewer's next key or click answers it, so it is never left open behind
+    /// another action (#119).
+    pub confirming_quit: bool,
     /// The read-only `PR` tab's view of the pull request.
     pub pr: forge::PrView,
     /// The resolved repository target's forge, from the latest input probe. Display strings
@@ -988,6 +995,7 @@ impl App {
             status: String::new(),
             keys_expanded: false,
             should_quit: false,
+            confirming_quit: false,
             pr: forge::PrView::Pending,
             pr_forge: crate::git::Forge::GitHub,
             pr_notice: None,
@@ -3573,7 +3581,7 @@ impl App {
             Ok(()) => self.status = crate::selection::copied_status(text),
             Err(e) => {
                 crate::logln!("selection copy failed: {e:#}");
-                self.status = target.failure_message();
+                self.status = target.failure_message(&e);
             }
         }
     }
@@ -4709,6 +4717,9 @@ impl App {
         // A modal sub-task owns the whole bar: one row, the primary then its own actions, no `?`
         // and no bands. The escape action comes right after the primary so the exit hint survives a
         // narrow-width trim (trailing `Do` actions drop first).
+        if self.confirming_quit {
+            return vec![(A::QuitDiscard, Primary), (A::Stay, Do), (A::Send, Do), (A::Copy, Do)];
+        }
         match self.mode {
             Mode::Composing { .. } => {
                 return vec![(A::Save, Primary), (A::Cancel, Do), (A::Newline, Do)];
@@ -5361,7 +5372,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.status = target.failure_message();
+                self.status = target.failure_message(&e);
                 logln!("export ERR: {e:#}");
                 false
             }
@@ -5372,6 +5383,22 @@ impl App {
         }
         self.refresh_rendered();
         delivered
+    }
+
+    /// The quit key: quits at once when no comment is unsent, else asks first, since quitting
+    /// drops every unsent comment for good. Asked already, it is the answer that quits.
+    pub fn request_quit(&mut self) {
+        if self.store.is_empty() || self.confirming_quit {
+            self.should_quit = true;
+        } else {
+            self.confirming_quit = true;
+        }
+    }
+
+    /// Whether the footer is the open-ended `Normal` bar, with its `?` and bands. A modal, or the
+    /// quit question, owns the whole bar instead.
+    pub fn open_footer(&self) -> bool {
+        self.mode == Mode::Normal && !self.confirming_quit
     }
 
     /// The number of files changed in the active scope — the header count, the same on both

@@ -48,7 +48,7 @@ impl ExportTarget for FakeTarget {
         let noun = if count == 1 { "comment" } else { "comments" };
         format!("exported {count} {noun}")
     }
-    fn failure_message(&self) -> String {
+    fn failure_message(&self, _error: &anyhow::Error) -> String {
         "fake not found".to_string()
     }
     fn export(&self, text: &str) -> Result<()> {
@@ -6358,7 +6358,7 @@ impl ExportTarget for SelClipboard {
     fn success_message(&self, count: usize) -> String {
         format!("copied {count}")
     }
-    fn failure_message(&self) -> String {
+    fn failure_message(&self, _error: &anyhow::Error) -> String {
         "clipboard failed".to_string()
     }
     fn export(&self, text: &str) -> Result<()> {
@@ -9429,4 +9429,99 @@ fn a_file_that_renders_nothing_never_takes_the_panes_choice() {
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
     assert!(!app.rendered_active(), "the `m` on c.md never flipped the pane");
     assert!(offers_m(&app));
+}
+
+/// `q` with unsent comments asks before dropping them (#119). One row per cell of the
+/// event × state matrix: the states are no comments, unsent comments, and the open question.
+#[test]
+fn quitting_with_unsent_comments_asks_first() {
+    let keymap = Keymap::default();
+    let fresh = || {
+        let r = edited_repo();
+        let mut app = app_on(&r);
+        app.focus = Focus::Diff;
+        (r, app)
+    };
+    let commented = || {
+        let (r, mut app) = fresh();
+        app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+        app.start_comment();
+        write_comment(&mut app, "keep me");
+        (r, app)
+    };
+    let asking = || {
+        let (r, mut app) = commented();
+        press(&mut app, &keymap, KeyCode::Char('q'));
+        (r, app)
+    };
+
+    // No comments: `q` quits at once, as it always has.
+    let (_r, mut app) = fresh();
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert!(app.should_quit);
+
+    // Unsent comments: `q` asks instead, and the footer is the question.
+    let (_r, mut app) = asking();
+    assert!(!app.should_quit, "the first `q` never drops comments");
+    assert!(app.confirming_quit);
+    assert_eq!(
+        app.footer_bands(),
+        [
+            (FooterAction::QuitDiscard, Band::Primary),
+            (FooterAction::Stay, Band::Do),
+            (FooterAction::Send, Band::Do),
+            (FooterAction::Copy, Band::Do),
+        ]
+    );
+
+    // The quit key again: quit, dropping them.
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert!(app.should_quit);
+
+    // `esc` stays, and so does any other key, which does nothing else.
+    for code in [KeyCode::Esc, KeyCode::Char('j'), KeyCode::Char('c')] {
+        let (_r, mut app) = asking();
+        let cursor = app.diff_cursor;
+        press(&mut app, &keymap, code);
+        assert!(!app.confirming_quit, "{code:?} answers the question");
+        assert!(!app.should_quit, "{code:?}");
+        assert!(!app.composing(), "{code:?} only answers");
+        assert_eq!(app.diff_cursor, cursor, "{code:?} only answers");
+        assert_eq!(app.store.len(), 1, "{code:?}");
+        // The answer is final: the next `q` asks again.
+        press(&mut app, &keymap, KeyCode::Char('q'));
+        assert!(!app.should_quit && app.confirming_quit, "{code:?}");
+    }
+
+    // `send` and `copy` answer by doing what they always do; this test process may sit inside
+    // a real herdr, so neither runs here. `the_quit_question_hands_send_to_the_send_path` in
+    // the send flow drives `s` against a fake herdr.
+
+    // A click answers too, and does nothing else. Pointer motion is not an answer.
+    let (_r, mut app) = asking();
+    mouse(&mut app, &keymap, MouseEventKind::Moved);
+    assert!(app.confirming_quit, "motion leaves the question open");
+    let cursor = app.diff_cursor;
+    mouse(&mut app, &keymap, MouseEventKind::Down(MouseButton::Left));
+    assert!(!app.confirming_quit && !app.should_quit);
+    assert_eq!(app.diff_cursor, cursor, "the click only answers");
+
+    // A poll is no answer: the question stays open across it.
+    let (r, mut app) = asking();
+    r.write("a.rs", "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\n");
+    app.reload().unwrap();
+    assert!(app.confirming_quit && !app.should_quit);
+
+    // The PR tab asks the same way.
+    let (_r, mut app) = commented();
+    press(&mut app, &keymap, KeyCode::Char('3'));
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert!(app.confirming_quit && !app.should_quit);
+
+    // Inside the comment list `q` stays inert, and in the composer it is text.
+    let (_r, mut app) = commented();
+    press(&mut app, &keymap, KeyCode::Char('l'));
+    assert_eq!(app.mode, Mode::List);
+    press(&mut app, &keymap, KeyCode::Char('q'));
+    assert!(!app.confirming_quit && !app.should_quit);
 }

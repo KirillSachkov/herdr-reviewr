@@ -30,14 +30,23 @@ use crate::keymap::Keymap;
 use crate::model::{ChangeKind, Comment};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
 use crate::theme::Palette;
+use std::fmt::Write as _;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     // Link hit-testing resolves against the painted frame; each frame repaints its own.
     app.clear_painted_frame();
     if let Some(error) = app.config_error() {
-        let message =
+        let mut message =
             format!("{error}\n\nFix the file to continue. The config reloads automatically.");
+        if app.confirming_quit {
+            let n = app.store.len();
+            let (noun, them) = if n == 1 { ("comment", "it") } else { ("comments", "them") };
+            let _ = write!(
+                message,
+                "\n\nPress q again to quit and drop {n} unsent {noun}. Fixing the file keeps {them}."
+            );
+        }
         frame.render_widget(
             Paragraph::new(message).wrap(ratatui::widgets::Wrap { trim: false }),
             area,
@@ -2732,6 +2741,12 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
+        A::QuitDiscard => {
+            let n = app.store.len();
+            let noun = if n == 1 { "comment" } else { "comments" };
+            return (hint(K::Quit), format!("quit, drop {n} {noun}"));
+        }
+        A::Stay => ("esc".into(), "stay"),
         A::Save => ("enter".into(), "save"),
         A::Newline => ("shift+enter".into(), "newline"),
         A::Cancel | A::ClosePicker => ("esc".into(), "cancel"),
@@ -2856,7 +2871,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 /// The footer's height for the vertical layout: one row collapsed, one plus the wrapped bands when
 /// the `?` expansion is open, capped so the body keeps its `Min(3)`.
 fn footer_height(app: &App, area: Rect) -> u16 {
-    if !(app.keys_expanded && app.mode == Mode::Normal) {
+    if !(app.keys_expanded && app.open_footer()) {
         return 1;
     }
     let want = footer_lines(app, area.width as usize).len() as u16;
@@ -2869,7 +2884,7 @@ fn footer_height(app: &App, area: Rect) -> u16 {
 fn footer_lines(app: &App, w: usize) -> Vec<Line<'static>> {
     let (row1, overflow) = footer_row1(app, w);
     let mut lines = vec![Line::from(row1)];
-    if app.keys_expanded && app.mode == Mode::Normal {
+    if app.keys_expanded && app.open_footer() {
         let bands = app.footer_bands();
         let of_band = |band: Band| -> Vec<FooterAction> {
             bands.iter().filter(|&&(_, b)| b == band).map(|&(a, _)| a).collect()
@@ -2892,7 +2907,7 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
     let do_acts: Vec<FooterAction> =
         bands.iter().filter(|&&(_, b)| b == Band::Do).map(|&(a, _)| a).collect();
     let send = bands.iter().find(|&&(_, b)| b == Band::Send).map(|&(a, _)| a);
-    let show_more = app.mode == Mode::Normal;
+    let show_more = app.open_footer();
     let reserve = if show_more { 2 } else { 0 }; // a gap plus the `?`
 
     // `send` and the `?` share the right of the row and never drop, so the primary and the actions

@@ -161,9 +161,32 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "added 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
-    // `enter` sends to the digit-selected agent and consumes the set.
+    // An agent mid-turn or at a prompt takes no send: a paste there lands on whatever is on
+    // screen and never becomes its next message. The state is read at the send, so a picker
+    // row that went stale is caught too, and every comment stays.
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
     write_comment(&mut app, "two");
+    for (status, line) in [
+        ("working", "codex is working · comments kept"),
+        ("blocked", "codex is blocked · comments kept"),
+    ] {
+        press(&mut app, KeyCode::Char('s'), area, &keymap);
+        press(&mut app, KeyCode::Char('2'), area, &keymap);
+        fs::write(
+            fake_dir.join("agents.json"),
+            TWO_AGENTS.replace("\"working\"", &format!("\"{status}\"")),
+        )
+        .unwrap();
+        let sends = log(&fake_dir).matches("pane send-text w8:p2").count();
+        press(&mut app, KeyCode::Enter, area, &keymap);
+        assert_eq!(app.mode, Mode::Normal, "{status}");
+        assert_eq!(app.store.len(), 1, "a busy agent keeps every comment: {status}");
+        assert_eq!(app.status, line);
+        assert_eq!(log(&fake_dir).matches("pane send-text w8:p2").count(), sends, "{status}");
+    }
+
+    // `enter` sends to the digit-selected agent once it waits for input, and consumes the set.
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS.replace("\"working\"", "\"idle\"")).unwrap();
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     press(&mut app, KeyCode::Char('2'), area, &keymap);
     press(&mut app, KeyCode::Enter, area, &keymap);
@@ -237,4 +260,14 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     // A failed enumeration says so rather than claiming a count. The argv and herdr's stderr go
     // to the log, so the sentence still fits a 40-column footer.
     assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
+
+    // The quit question hands `s` to the send itself: the comments go out, the pane stays open.
+    fail_on_nothing(&fake_dir);
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT).unwrap();
+    press(&mut app, KeyCode::Char('q'), area, &keymap);
+    assert!(app.confirming_quit && !app.should_quit, "unsent comments make `q` ask");
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    assert!(!app.confirming_quit && !app.should_quit);
+    assert!(app.store.is_empty(), "the answer sent them");
+    assert_eq!(app.status, "added 1 comment to claude");
 }

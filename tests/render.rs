@@ -4619,3 +4619,27 @@ fn a_collapsed_summary_paints_the_changes_its_body_hides() {
     let out = render(&app);
     assert!(out.contains("▸ More  · 2 changed lines"), "the summary names what it hides:\n{out}");
 }
+
+#[test]
+fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    app.start_comment();
+    app.input_push('n');
+    app.submit_comment();
+    app.request_quit();
+    let row = footer_line(&render_at(&app, 100));
+    assert!(
+        row.contains("q quit, drop 1 comment") && row.contains("esc stay"),
+        "the footer is the question:\n{row}"
+    );
+    assert!(row.contains("s send 1") && row.contains("y copy"), "{row}");
+    assert!(!row.trim_end().ends_with('?'), "the question owns the bar:\n{row}");
+
+    app.set_config_error("config: invalid value for `theme`".to_string());
+    let out = render(&app);
+    assert!(
+        out.contains("Press q again to quit and drop 1 unsent comment. Fixing the file keeps it."),
+        "{out}"
+    );
+}

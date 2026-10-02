@@ -1416,11 +1416,15 @@ fn handle_blocked_event(app: &mut App, event: &Event) {
         Event::Key(k) if k.kind == KeyEventKind::Press => {
             // The blocked screen's escape hatch stays modifier-agnostic: a stuck user's `q` quits
             // whatever the modifiers, exactly as before the keymap gained chords.
+            // Unsent comments survive the recovery, so the quit asks first here too, and any
+            // other key answers it.
             if let KeyCode::Char(c) = k.code
                 && keymap::default_keymap().action_for(keymap::Key::plain(c))
                     == Some(keymap::Action::Quit)
             {
-                app.should_quit = true;
+                app.request_quit();
+            } else {
+                app.confirming_quit = false;
             }
         }
         Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), .. })
@@ -1742,6 +1746,21 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     };
     let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
 
+    // The quit question takes the next key as its answer. The quit key quits, and `send` and
+    // `copy` answer by doing exactly what they always do. Every other key, `esc` included, only
+    // answers, so a reflexive keystroke can neither drop the comments nor act behind the prompt.
+    if app.confirming_quit {
+        app.confirming_quit = false;
+        match action {
+            Some(K::Quit) => {
+                app.should_quit = true;
+                return Ok(());
+            }
+            Some(K::Send | K::Copy) => {}
+            _ => return Ok(()),
+        }
+    }
+
     // An armed crossing waits for a repeat of the hunk step that armed it. Every other key drops
     // it, and still does its own work. The steps themselves settle their arm in
     // `step_hunk`, which is what makes the other direction disarm too. `esc` is exempt: the `esc`
@@ -1823,7 +1842,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     // The read-only PR tab: navigate the snapshot and open links; authoring actions are inert.
     if app.tab == crate::app::Tab::Pr {
         match (action, key.code) {
-            (Some(K::Quit), _) => app.should_quit = true,
+            (Some(K::Quit), _) => app.request_quit(),
             (Some(K::Refresh), _) => {
                 app.request_pr_refresh(crate::app::RefreshKind::Forced);
                 app.refresh_commanded = true;
@@ -1871,7 +1890,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     if let Some(action) = action {
         match action {
-            K::Quit => app.should_quit = true,
+            K::Quit => app.request_quit(),
             K::Refresh => {
                 app.request_world_refresh(false, false);
                 app.refresh_commanded = true;
@@ -2391,6 +2410,12 @@ fn dispatch_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     app.hover = Some((m.column, m.row));
+    // A click or a wheel answers the quit question and does nothing else, like any key that is
+    // not the quit key. Pointer motion is no answer.
+    if app.confirming_quit && !matches!(m.kind, MouseEventKind::Moved) {
+        app.confirming_quit = false;
+        return Ok(());
+    }
     // Pointer motion with no button held, or a fresh mouse-down, proves an active gesture's
     // release was lost — herdr routes mouse by pointer position, so a release over another
     // pane never arrives here. The proof completes the old gesture (a visible selection
@@ -2973,6 +2998,30 @@ mod refresh_tests {
 
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('q'))));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn the_blocked_screen_asks_before_dropping_unsent_comments() {
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.store.add(crate::model::Comment {
+            file: "a.rs".into(),
+            side: crate::model::Side::New,
+            start: 1,
+            end: 1,
+            lines: "+a".into(),
+            text: "keep".into(),
+            diff_anchored: true,
+            rev: crate::model::Rev::Worktree,
+        });
+        app.set_config_error("invalid config".to_string());
+        let q = Event::Key(KeyEvent::from(KeyCode::Char('q')));
+        handle_blocked_event(&mut app, &q);
+        assert!(app.confirming_quit && !app.should_quit, "the first `q` asks");
+        handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Esc)));
+        assert!(!app.confirming_quit && !app.should_quit, "any other key answers and stays");
+        handle_blocked_event(&mut app, &q);
+        handle_blocked_event(&mut app, &q);
+        assert!(app.should_quit, "asked, `q` quits");
     }
 
     #[test]
