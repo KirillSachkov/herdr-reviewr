@@ -45,41 +45,41 @@ pub enum Row {
         lines: Vec<Row>,
     },
     /// One line of a markdown file's rendered view, pre-wrapped by the renderer. `src..=src_end`
-    /// is the 1-based source range its block maps to, and `offset` its index among the
-    /// consecutive rows sharing `src`, so `(src, offset)` names the line across a rebuild.
-    /// `spans` carry the plain text by color, so text, find, and selection read it like any
-    /// row. `line` indexes the styled line the app holds, keeping this module terminal-free.
+    /// is the 1-based source range its unit maps to: a block's, or the changed lines a marker
+    /// row stands for. `spans` carry the plain text by color, so text, find, and selection read
+    /// it like any row. `line` indexes the styled line the app holds, keeping this module
+    /// terminal-free. `kind` says which of the two it is.
     Rendered {
         src: u32,
         src_end: u32,
-        offset: u32,
         spans: Vec<Span>,
         line: u32,
-        /// The change mark the line wears in the `Changes` tab: a block's bar, or the kind of
-        /// marker row it is.
-        mark: Mark,
+        kind: RenderedKind,
     },
 }
 
-/// A rendered line's change mark. A block's rows wear a bar: `Added` when it only gained
-/// lines, `Modified` otherwise. A marker row stands for changes no block shows: `Removed`
-/// source deleted between blocks, `Unrendered` changed source that renders nothing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Mark {
-    #[default]
-    None,
-    Added,
-    Modified,
-    Removed,
-    Unrendered,
+/// What a rendered row is: a block's line — `offset` its index among the block's rows, so
+/// `(src, offset)` names it across a rebuild, and `bar` its change bar in the `Changes` tab —
+/// or a marker row standing for changes no block shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenderedKind {
+    Block { offset: u32, bar: Option<Bar> },
+    Marker(MarkerKind),
 }
 
-impl Mark {
-    /// Whether a row with this mark is a marker row rather than a block's line.
-    #[must_use]
-    pub fn is_marker(self) -> bool {
-        matches!(self, Mark::Removed | Mark::Unrendered)
-    }
+/// A changed block's bar: `Added` when it only gained lines, `Modified` otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Bar {
+    Added,
+    Modified,
+}
+
+/// A marker row's kind: `Removed` source deleted with its whole block, `Unrendered` changed
+/// source that renders nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum MarkerKind {
+    Removed,
+    Unrendered,
 }
 
 /// A `[start, end)` run of char indices within a line, for word-level emphasis.
@@ -96,9 +96,8 @@ impl Row {
     pub fn new_no(&self) -> Option<u32> {
         match self {
             Row::Context { new_no, .. } | Row::Insertion { new_no, .. } => Some(*new_no),
-            // A rendered line names its block's first source line.
-            Row::Rendered { src, .. } => Some(*src),
-            Row::Deletion { .. } | Row::Fold { .. } => None,
+            // A rendered line is no source line: its unit names its range.
+            Row::Deletion { .. } | Row::Fold { .. } | Row::Rendered { .. } => None,
         }
     }
 

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::diff::{DiffCache, FileDiff, Mark, Row, View};
+use crate::diff::{DiffCache, FileDiff, MarkerKind, RenderedKind, Row, View};
 use crate::export::{Agent, ExportTarget, format_all};
 use crate::file_list::{self, Annotation, Entry, RowKind};
 use crate::forge;
@@ -21,6 +21,7 @@ use crate::highlight::Highlighter;
 use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines, landing};
 use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
+use crate::rendered::{Built, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::theme::{self, Palette};
 use crate::world::{PickStatus, PickVerdict};
 
@@ -109,45 +110,10 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
-    rendered: bool,
-    rendered_text: String,
-    rendered_old: String,
-    rendered_details: HashMap<String, bool>,
-    rendered_doc: crate::markdown::Rendered,
-    rendered_marks: MarkMap,
-    rendered_built: Option<RenderedInput>,
+    rendered: RenderedView,
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
     visited: bool,
-}
-
-/// The input a file tab's rendered rows were built from — the content, the open
-/// `<details>` keys (sorted), the wrap width, the theme, and the changes the marks read — and
-/// whether that content rendered no rows at all.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct RenderedInput {
-    text: String,
-    details: Vec<String>,
-    width: usize,
-    theme: &'static str,
-    /// A digest of the diff's changed lines in the `Changes` tab, `0` elsewhere: a scope
-    /// switch moves the marks without touching the text.
-    changes: u64,
-    /// The `m` key's label the don't-render markers name, so a rebind rebuilds them.
-    see: String,
-    empty: bool,
-}
-
-impl RenderedInput {
-    /// Whether `other` would build exactly these rows.
-    fn same_input(&self, other: &Self) -> bool {
-        self.width == other.width
-            && self.theme == other.theme
-            && self.details == other.details
-            && self.changes == other.changes
-            && self.see == other.see
-            && self.text == other.text
-    }
 }
 
 /// A picked comment ([`App::comment_target`]): its store index, the anchor it had when picked
@@ -672,6 +638,18 @@ pub struct EditTarget {
     pub line: u32,
 }
 
+/// One mouse-down of the multi-click chain: when and where it landed, the row its cell mapped
+/// to on its surface, and the click count it reached (1 single, 2 double, 3 triple).
+#[derive(Clone, Copy, Debug)]
+struct LastClick {
+    at: std::time::Instant,
+    col: u16,
+    row: u16,
+    target: usize,
+    count: u8,
+    surface: crate::selection::Surface,
+}
+
 /// The full state of the review session.
 // The several bools (wrap, reveal_files, reveal_diff, should_quit, and refresh flags) are independent
 // toggles, not a state machine in disguise, so the excessive-bools lint does not apply.
@@ -752,32 +730,10 @@ pub struct App {
     pub h_scroll: usize,
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
-    /// Whether the open markdown file shows rendered rather than as source. Per file tab, and
-    /// every file open resets it to rendered, so `m` flips one file and never the next. Only
-    /// the armed toggle — `rendered_active()` is the honest on-screen predicate.
-    rendered: bool,
-    /// The open markdown file's current content — the rendered rows' input, refreshed by
-    /// `set_diff` and `set_file_view` so no frame rebuilds it. Empty whenever the current
-    /// content does not render: a non-markdown file, a notice, or an empty new side (a
-    /// deleted or empty file), so such a file always shows its source.
-    rendered_text: String,
-    /// The open file's old side in the `Changes` tab — the document its deleted lines belonged
-    /// to — empty elsewhere. Held beside `rendered_text`, so a rebuild reads no git.
-    rendered_old: String,
-    /// The old side's source map, with the old text and open `<details>` it came from: the
-    /// width never moves it, so a resize renders the new side alone.
-    rendered_old_map: Option<(String, Vec<String>, crate::marks::DocMap)>,
-    /// The change marks of the rendered rows on screen, from the build that made them: the
-    /// bars, the markers, and each diff line's owner the anchors and cards read.
-    rendered_marks: MarkMap,
-    /// The render behind the rendered rows: the styled lines a `Row::Rendered` indexes, and
-    /// each line's links, `<details>`, and the heading anchors. Lives here, not in the rows,
-    /// so the row model stays terminal-free.
-    rendered_doc: crate::markdown::Rendered,
-    /// What the rendered rows were built from. An unchanged poll or frame keeps the rows it
-    /// has instead of rebuilding them, a frame compares the width alone, and a changed
-    /// content maps the place through its edits. `None` forces the next build.
-    rendered_built: Option<RenderedInput>,
+    /// The open file's rendered markdown view: the reviewer's rendered/source choice, the
+    /// content, the render, its marks, and the index over its rows. Per file tab, stashed
+    /// whole. `rendered_active()` is the honest on-screen predicate.
+    rendered: RenderedView,
     /// The rendered rows' wrap width — the read pane's code column, noted each frame by
     /// [`Self::sync_rendered_width`]. `0` until the first frame, which builds at a default.
     rendered_width: usize,
@@ -798,10 +754,6 @@ pub struct App {
     painted_details: std::cell::RefCell<Vec<PaintedDetails>>,
     /// Open `<details>` on the selected PR description or thread.
     pr_expanded_details: HashSet<String>,
-    /// The reviewer's own `<details>` choices in the file tab's rendered markdown, by key:
-    /// open or closed. A disclosure without one opens while it holds a change or a comment
-    /// ([`crate::marks::open_details`]). Stashed per file tab.
-    rendered_details: HashMap<String, bool>,
     /// The PR read pane's maximum useful scroll, noted the same way for
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
@@ -829,9 +781,8 @@ pub struct App {
     /// The pointer's last reported cell, recomputed against each frame for the gutter hover
     /// `+`.
     pub hover: Option<(u16, u16)>,
-    /// The multi-click chain: the last mouse-down's time, cell, mapped target row, and count
-    /// within the window.
-    last_click: Option<(std::time::Instant, u16, u16, usize, u8, crate::selection::Surface)>,
+    /// The multi-click chain: the last mouse-down, while the window holds.
+    last_click: Option<LastClick>,
     /// Whether a view-anchored gesture held the open view's reload while snapshots landed
     /// beneath it, so the gesture's end reloads it once.
     view_reload_held: bool,
@@ -1006,13 +957,7 @@ impl App {
             diff_scroll: 0,
             h_scroll: 0,
             wrap: true,
-            rendered: true,
-            rendered_text: String::new(),
-            rendered_old: String::new(),
-            rendered_old_map: None,
-            rendered_marks: MarkMap::default(),
-            rendered_doc: crate::markdown::Rendered::default(),
-            rendered_built: None,
+            rendered: RenderedView::new(),
             rendered_width: 0,
             pane_width: std::cell::Cell::new(0),
             painted_links: std::cell::RefCell::new(Vec::new()),
@@ -1020,7 +965,6 @@ impl App {
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
-            rendered_details: HashMap::new(),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
             navigator_position: crate::config::NavigatorPosition::Right,
             navigator_side_pct: DEFAULT_SIDE_PCT,
@@ -1230,13 +1174,7 @@ impl App {
                 self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
                 self.stash = std::mem::take(&mut old.stash);
                 self.wrap = old.wrap;
-                self.rendered = old.rendered;
-                self.rendered_text = std::mem::take(&mut old.rendered_text);
-                self.rendered_old = std::mem::take(&mut old.rendered_old);
-                self.rendered_marks = std::mem::take(&mut old.rendered_marks);
-                self.rendered_details = std::mem::take(&mut old.rendered_details);
-                self.rendered_doc = std::mem::take(&mut old.rendered_doc);
-                self.rendered_built = old.rendered_built.take();
+                self.rendered = std::mem::take(&mut old.rendered);
                 self.rendered_width = old.rendered_width;
                 self.pr_expanded_details = std::mem::take(&mut old.pr_expanded_details);
                 self.mode = old.mode.clone();
@@ -1370,7 +1308,7 @@ impl App {
             if !self.composing() {
                 self.diff = FileDiff::empty();
                 self.diff_path = None;
-                self.rendered_text.clear();
+                self.rendered.text.clear();
                 self.visible.clear(); // keep `visible` mirroring `diff` so no stale rows paint
                 self.drop_read_marks();
                 self.reset_diff_view();
@@ -1486,11 +1424,11 @@ impl App {
     /// The text of the read-pane row the multi-click chain last targeted, for the rebuild's
     /// revalidation. `None` for a chain on another surface, which no rebuild moves.
     fn clicked_target_text(&self) -> Option<String> {
-        let (_, _, _, target, _, surface) = self.last_click?;
-        if surface != crate::selection::Surface::Read {
+        let click = self.last_click?;
+        if click.surface != crate::selection::Surface::Read {
             return None;
         }
-        Some(self.visible.get(target)?.text())
+        Some(self.visible.get(click.target)?.text())
     }
 
     /// Reload the open view against the reconciled list: only a different shown file resets
@@ -1510,7 +1448,7 @@ impl App {
         let Some(entry) = self.shown_entry() else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
-            self.rendered_text.clear();
+            self.rendered.text.clear();
             self.visible.clear();
             self.drop_read_marks();
             self.reset_diff_view();
@@ -1560,11 +1498,11 @@ impl App {
         // notice, or a deleted file (empty new side) holds nothing, so it shows its source and
         // its toggle stays inert.
         if self.markdown_file() && self.diff.state == crate::diff::FileState::Normal {
-            self.rendered_text = new;
-            self.rendered_old = old;
+            self.rendered.text = new;
+            self.rendered.old = old;
         } else {
-            self.rendered_text.clear();
-            self.rendered_old.clear();
+            self.rendered.text.clear();
+            self.rendered.old.clear();
         }
         self.rebuild_visible();
         self.settle_read();
@@ -1583,11 +1521,11 @@ impl App {
         let (diff, content) = self.file_view(path);
         // Keep the render input current without a per-frame rebuild. A file the source view
         // degrades to a notice never renders, so its content is not held either.
-        self.rendered_old.clear();
+        self.rendered.old.clear();
         if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
-            self.rendered_text = content;
+            self.rendered.text = content;
         } else {
-            self.rendered_text.clear();
+            self.rendered.text.clear();
         }
         self.diff = diff;
         self.rebuild_visible();
@@ -1635,9 +1573,9 @@ impl App {
     /// markdown, with every `<details>` collapsed. The rows of the file being left are dropped
     /// first, so no place or mark is carried from one file to another.
     fn open_fresh(&mut self) {
-        self.rendered = true;
-        self.rendered_details.clear();
-        self.rendered_built = None;
+        self.rendered.on = true;
+        self.rendered.details.clear();
+        self.rendered.built = None;
         self.visible.clear();
         self.drop_read_marks();
     }
@@ -1662,10 +1600,10 @@ impl App {
             let anchor = self.select_anchor.map(line_at);
             (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll), anchor)
         });
-        let rendered = self.wants_rendered() && self.rebuild_rendered();
+        let rendered = self.rendered.wants() && self.rebuild_rendered();
         if !rendered {
-            if !self.wants_rendered() {
-                self.rendered_built = None;
+            if !self.rendered.wants() {
+                self.rendered.built = None;
             }
             self.visible = self
                 .diff
@@ -1689,7 +1627,7 @@ impl App {
             let to = |line: Option<u32>| -> Option<usize> {
                 let line = line?;
                 if rendered {
-                    rendered_row_at_line(&self.visible, line)
+                    self.rendered.index.row_at_line(line)
                 } else {
                     Some(source_row_of(&self.visible, line))
                 }
@@ -1710,13 +1648,13 @@ impl App {
         self.revalidate_read_marks(clicked_before.as_deref());
     }
 
-    /// The current-content source line of rendered row `i`: its block's first line, mapped
+    /// The current-content source line of rendered row `i`: its unit's first line, mapped
     /// through any edit since the rows were built.
     fn rendered_line_of(&self, i: usize) -> Option<u32> {
-        let (src, _) = self.visible.get(i).and_then(rendered_id)?;
-        match self.rendered_built.as_ref() {
-            Some(b) if b.text != self.rendered_text => {
-                Some(LineMap::new(&b.text, &self.rendered_text).line(src))
+        let src = self.rendered.index.unit_at(i)?.src;
+        match self.rendered.built.as_ref() {
+            Some(b) if b.input.text != self.rendered.text => {
+                Some(LineMap::new(&b.input.text, &self.rendered.text).line(src))
             }
             _ => Some(src),
         }
@@ -1743,7 +1681,7 @@ impl App {
     /// gone. A navigator mark survives, being on rows the open file never touched.
     fn drop_read_marks(&mut self) {
         use crate::selection::Surface;
-        if self.last_click.is_some_and(|c| c.5 == Surface::Read) {
+        if self.last_click.is_some_and(|c| c.surface == Surface::Read) {
             self.last_click = None;
         }
         if self
@@ -1782,7 +1720,7 @@ impl App {
                 }
             }
         }
-        crate::marks::open_details(disclosures, &self.rendered_details, &spots)
+        crate::marks::open_details(disclosures, &self.rendered.details, &spots)
     }
 
     /// The input the rendered rows build from right now, with `details` open.
@@ -1801,7 +1739,7 @@ impl App {
             0
         };
         RenderedInput {
-            text: self.rendered_text.clone(),
+            text: self.rendered.text.clone(),
             details,
             width: if self.rendered_width == 0 {
                 DEFAULT_RENDER_WIDTH
@@ -1811,33 +1749,34 @@ impl App {
             theme: self.theme_name,
             changes,
             see: self.keymap().hint(crate::keymap::Action::Rendered).label(),
-            empty: false,
         }
     }
 
     /// The old side's source map with `open` disclosures opened: the cached one when the old
     /// text and the open set are the ones it came from, else a fresh render's.
     fn old_map(&mut self, open: &[String]) -> crate::marks::DocMap {
-        if let Some((text, keys, map)) = &self.rendered_old_map
-            && *text == self.rendered_old
+        if let Some((text, keys, map)) = &self.rendered.old_map
+            && *text == self.rendered.old
             && keys == open
         {
             return map.clone();
         }
         let set: HashSet<String> = open.iter().cloned().collect();
         let doc = crate::markdown::render_expanded(
-            &self.rendered_old,
+            &self.rendered.old,
             DEFAULT_RENDER_WIDTH,
             &self.highlighter,
             &self.palette,
             &set,
         );
-        let map = crate::marks::doc_map(&doc, &set);
-        self.rendered_old_map = Some((self.rendered_old.clone(), open.to_vec(), map.clone()));
+        let mut doc = doc;
+        crate::marks::fold_collapsed(&mut doc, &set);
+        let map = crate::marks::doc_map(&doc);
+        self.rendered.old_map = Some((self.rendered.old.clone(), open.to_vec(), map.clone()));
         map
     }
 
-    /// Build the rendered rows from `rendered_text` at the noted width, theme, and open
+    /// Build the rendered rows from the view's text at the noted width, theme, and open
     /// `<details>`, unless the rows on screen already came from exactly that input. A rebuild
     /// over rendered rows carries the cursor and the scroll top by their `(src, offset)`
     /// identity, never by row index, mapping the line through the content's own edits when it
@@ -1848,46 +1787,48 @@ impl App {
         // text is the same. A changed text renders with the last open set, and again only when
         // its own disclosures derive another.
         let known = self
-            .rendered_built
+            .rendered
+            .built
             .as_ref()
-            .is_some_and(|b| b.text == self.rendered_text && !b.empty)
-            .then(|| self.derived_details(&self.rendered_doc.disclosures));
+            .is_some_and(|b| b.input.text == self.rendered.text && !b.empty)
+            .then(|| self.derived_details(&self.rendered.doc.disclosures));
         let guessed = known.is_none();
         let details = known.unwrap_or_else(|| {
-            self.rendered_built.as_ref().map(|b| b.details.clone()).unwrap_or_default()
+            self.rendered.built.as_ref().map(|b| b.input.details.clone()).unwrap_or_default()
         });
         let mut input = self.rendered_input(details);
         let showing = matches!(self.visible.first(), Some(Row::Rendered { .. }));
-        if let Some(b) = self.rendered_built.as_ref()
-            && b.same_input(&input)
+        if let Some(b) = self.rendered.built.as_ref()
+            && b.input == input
             && (b.empty || showing)
         {
             return !b.empty;
         }
         let mut open: HashSet<String> = input.details.iter().cloned().collect();
-        let mut doc = self.markdown_render(&self.rendered_text, input.width, &open);
+        let mut doc = self.markdown_render(&self.rendered.text, input.width, &open);
         if guessed {
             let derived = self.derived_details(&doc.disclosures);
             if derived != input.details {
                 open = derived.iter().cloned().collect();
                 input.details = derived;
-                doc = self.markdown_render(&self.rendered_text, input.width, &open);
+                doc = self.markdown_render(&self.rendered.text, input.width, &open);
             }
         }
         if doc.lines.is_empty() {
-            input.empty = true;
-            self.rendered_built = Some(input);
+            self.rendered.built = Some(Built { input, empty: true });
             return false;
         }
+        crate::marks::fold_collapsed(&mut doc, &open);
         // The place, re-expressed in the new content's line numbers.
-        let built = self.rendered_built.as_ref().filter(|b| showing && !b.empty);
+        let built = self.rendered.built.as_ref().filter(|b| showing && !b.empty);
         let place = built.map(|b| {
-            let map = (b.text != input.text).then(|| LineMap::new(&b.text, &input.text));
+            let map =
+                (b.input.text != input.text).then(|| LineMap::new(&b.input.text, &input.text));
             let id = |i: usize| {
-                let (src, off) = self.visible.get(i).and_then(rendered_id)?;
+                let id = self.visible.get(i).and_then(RowId::of)?;
                 Some(match &map {
-                    Some(m) => (m.line(src), off),
-                    None => (src, off),
+                    Some(m) => id.at(m.line(id.src())),
+                    None => id,
                 })
             };
             (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
@@ -1912,122 +1853,103 @@ impl App {
             rows.push(Row::Rendered {
                 src: meta.source_line as u32,
                 src_end: meta.source_end as u32,
-                offset,
                 spans,
                 line: i as u32,
-                mark: Mark::None,
+                kind: RenderedKind::Block { offset, bar: None },
             });
         }
-        let new_map = crate::marks::doc_map(&doc, &open);
         let marks = if self.diff.view == View::Diff {
+            let new_map = crate::marks::doc_map(&doc);
             let old_map = self.old_map(&input.details);
             let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
             crate::marks::derive(&lines, &self.diff.pairs, &new_map, &old_map)
         } else {
             MarkMap::default()
         };
-        self.mark_rendered(&mut rows, &mut doc, &new_map, &marks, &input);
-        self.rendered_marks = marks;
-        self.rendered_doc = doc;
-        self.rendered_built = Some(input);
+        self.mark_rendered(&mut rows, &mut doc, &marks, &input);
+        self.rendered.index = RenderedIndex::build(&rows);
+        self.rendered.marks = marks;
+        self.rendered.doc = doc;
+        self.rendered.built = Some(Built { input, empty: false });
         self.visible = rows;
         if let Some((cursor, scroll, anchor)) = place {
+            let index = &self.rendered.index;
             // A live range's anchor reconciles by the same identity as the cursor.
-            if let Some(i) = anchor.flatten().and_then(|id| rendered_row_of(&self.visible, id)) {
+            if let Some(i) = anchor.flatten().and_then(|id| index.row_of(id)) {
                 self.select_anchor = Some(i);
             }
-            if let Some(i) = cursor.and_then(|id| rendered_row_of(&self.visible, id)) {
+            if let Some(i) = cursor.and_then(|id| index.row_of(id)) {
                 self.diff_cursor = i;
             }
-            if let Some(i) = scroll.and_then(|id| rendered_row_of(&self.visible, id)) {
+            if let Some(i) = scroll.and_then(|id| index.row_of(id)) {
                 self.diff_scroll = i;
             }
         }
         true
     }
 
-    /// Settle freshly built rendered rows on their source map and change marks: each block's
-    /// rows take its range from `map` — a collapsed `<details>` summary spanning its element —
-    /// a marked block's rows from its lead line on wear its bar, a collapsed summary hiding
-    /// changes names how many, and each marker gets a row of its own: after the block it
-    /// hides in, else where its lines sit. The synthetic text lives in the styled line alone,
-    /// so copy and find never read it, and it fits the pane, cut with `…`.
+    /// Settle freshly built rendered rows on their change marks: a marked block's rows from
+    /// its lead line on wear its bar, a collapsed summary hiding changes names how many, and
+    /// each marker gets a row of its own — after the block it hides in, else where its lines
+    /// sit. The synthetic text lives in the styled line alone, so copy and find never read it,
+    /// and it fits the pane, cut with `…`.
     fn mark_rendered(
         &self,
         rows: &mut Vec<Row>,
         doc: &mut crate::markdown::Rendered,
-        map: &crate::marks::DocMap,
         marks: &MarkMap,
         input: &RenderedInput,
     ) {
+        use crate::marks::Place;
         use ratatui::style::Style;
         use ratatui::text::Span;
-        let pal = &self.palette;
-        let width = input.width;
-        let bars: HashMap<u32, &crate::marks::BlockMark> =
-            marks.blocks.iter().map(|b| (b.src, b)).collect();
-        // Per block, its row run: ranges, bars, and the summary note in one pass.
-        let mut ends: HashMap<u32, usize> = HashMap::new();
-        let mut start = 0;
-        let mut k = 0;
-        while start < rows.len() {
-            let src = rows[start].new_no().unwrap_or_default();
-            let mut end = start + 1;
-            while end < rows.len() && rows[end].new_no() == Some(src) {
-                end += 1;
-            }
-            let src_end = map.units.get(k).filter(|u| u.0 == src).map(|u| u.1);
-            k += 1;
-            ends.insert(src, end);
-            for row in &mut rows[start..end] {
-                if let (Row::Rendered { src_end: e, .. }, Some(to)) = (row, src_end) {
-                    *e = to;
-                }
-            }
-            if let Some(b) = bars.get(&src) {
-                let lead = block_lead(rows, start);
-                for row in &mut rows[lead..end] {
-                    if let Row::Rendered { mark, .. } = row {
-                        *mark = b.mark;
-                    }
-                }
-                // A collapsed summary names the changes it hides.
-                let line = match &rows[lead] {
-                    Row::Rendered { line, .. } => *line as usize,
-                    _ => usize::MAX,
-                };
-                let collapsed = doc
-                    .meta
-                    .get(line)
-                    .and_then(|m| m.details.as_ref())
-                    .is_some_and(|d| !input.details.iter().any(|k| *k == *d.key));
-                if collapsed && let Some(l) = doc.lines.get_mut(line) {
-                    let room = width.saturating_sub(l.width());
-                    let note = format!("  · {} changed {}", b.lines, plural(b.lines, "line"));
-                    let note = fit(&note, room);
-                    if !note.is_empty() {
-                        l.spans
-                            .push(Span::styled(note, Style::default().fg(pal.mark_color(b.mark))));
-                    }
-                }
-            }
-            start = end;
-        }
-        if marks.markers.is_empty() {
+        if marks.blocks.is_empty() && marks.markers.is_empty() {
             return;
         }
-        // Each marker's slot: after its block, else ahead of the first row at or past it.
+        let pal = &self.palette;
+        let index = RenderedIndex::build(rows);
+        for b in &marks.blocks {
+            let Some(u) = index.get(Unit::Block(b.src)) else { continue };
+            for row in &mut rows[u.lead..u.end] {
+                if let Row::Rendered { kind: RenderedKind::Block { bar, .. }, .. } = row {
+                    *bar = Some(b.bar);
+                }
+            }
+            // A collapsed summary names the changes it hides.
+            let Row::Rendered { line, .. } = &rows[u.lead] else { continue };
+            let line = *line as usize;
+            let collapsed = doc
+                .meta
+                .get(line)
+                .and_then(|m| m.details.as_ref())
+                .is_some_and(|d| !input.details.iter().any(|k| *k == *d.key));
+            if collapsed && let Some(l) = doc.lines.get_mut(line) {
+                let room = input.width.saturating_sub(l.width());
+                let note =
+                    fit(&format!("  · {} changed {}", b.lines, plural(b.lines, "line")), room);
+                if !note.is_empty() {
+                    l.spans.push(Span::styled(note, Style::default().fg(pal.bar_color(b.bar))));
+                }
+            }
+        }
+        // Each marker's slot: after its block, else ahead of the first unit at or past it.
         let mut slots: Vec<(usize, &crate::marks::Marker)> = marks
             .markers
             .iter()
             .map(|m| {
-                let at = m.after.and_then(|b| ends.get(&b).copied()).unwrap_or_else(|| {
-                    rows.partition_point(|r| r.new_no().is_some_and(|s| s < m.unit.src))
+                let after = match m.place {
+                    Place::After(block) => index.get(Unit::Block(block)).map(|u| u.end),
+                    Place::At | Place::Gone => None,
+                };
+                let at = after.unwrap_or_else(|| {
+                    let units = index.units();
+                    let k = units.partition_point(|u| u.src < m.src);
+                    units.get(k).map_or(rows.len(), |u| u.start)
                 });
                 (at, m)
             })
             .collect();
-        slots.sort_by_key(|&(at, m)| (at, m.unit));
+        slots.sort_by_key(|&(at, m)| (at, m.unit()));
         let mut out = Vec::with_capacity(rows.len() + slots.len());
         let mut next = slots.into_iter().peekable();
         for (i, row) in std::mem::take(rows).into_iter().enumerate() {
@@ -2052,29 +1974,30 @@ impl App {
     ) -> Row {
         let n = m.lines;
         let see = &input.see;
-        let text = match m.unit.marker {
-            Mark::Removed => format!("− {n} {} removed", plural(n, "line")),
-            _ if n == 1 => format!("⚠ 1 changed line doesn't render · {see} to see"),
-            _ => format!("⚠ {n} changed lines don't render · {see} to see"),
+        let text = match m.kind {
+            MarkerKind::Removed => format!("− {n} {} removed", plural(n, "line")),
+            MarkerKind::Unrendered if n == 1 => {
+                format!("⚠ 1 changed line doesn't render · {see} to see")
+            }
+            MarkerKind::Unrendered => format!("⚠ {n} changed lines don't render · {see} to see"),
         };
         let line = doc.lines.len() as u32;
         doc.lines.push(ratatui::text::Line::from(ratatui::text::Span::styled(
             fit(&text, input.width),
-            ratatui::style::Style::default().fg(self.palette.mark_color(m.unit.marker)),
+            ratatui::style::Style::default().fg(self.palette.marker_color(m.kind)),
         )));
         doc.meta.push(crate::markdown::LineMeta {
-            source_line: m.unit.src as usize,
+            source_line: m.src as usize,
             source_end: m.src_end as usize,
             links: Vec::new(),
             details: None,
         });
         Row::Rendered {
-            src: m.unit.src,
+            src: m.src,
             src_end: m.src_end,
-            offset: marker_offset(m.unit.marker),
             spans: Vec::new(),
             line,
-            mark: m.unit.marker,
+            kind: RenderedKind::Marker(m.kind),
         }
     }
 
@@ -2090,13 +2013,14 @@ impl App {
         // Content and `<details>` only move through their own rebuilds, so a frame compares
         // the width and the theme alone.
         if self
-            .rendered_built
+            .rendered
+            .built
             .as_ref()
-            .is_some_and(|b| b.width == width && b.theme == self.theme_name)
+            .is_some_and(|b| b.input.width == width && b.input.theme == self.theme_name)
         {
             return;
         }
-        if self.renders_markdown() && !self.mode.is_modal() && !self.view_anchored_gesture() {
+        if self.rendered.shows() && !self.mode.is_modal() && !self.view_anchored_gesture() {
             self.rebuild_visible();
             self.settle_read();
         }
@@ -2291,55 +2215,32 @@ impl App {
         self.diff_path.as_deref().is_some_and(is_markdown_path)
     }
 
-    /// Whether the `m` toggle acts here: a file tab holding current markdown content.
-    /// `rendered_text` is filled only for a markdown file whose source rows render, so a
-    /// notice, a deleted file (empty new side), an emptied changeset, or a rename away from
-    /// markdown empties it and makes the toggle inert. The footer offers `m` exactly when
-    /// this holds.
-    #[must_use]
-    fn renderable(&self) -> bool {
-        self.tab.is_file_tab() && !self.rendered_text.is_empty()
-    }
-
-    /// Whether the open file asks for rendered rows: the toggle armed over current markdown
-    /// content.
-    #[must_use]
-    fn wants_rendered(&self) -> bool {
-        self.rendered && !self.rendered_text.is_empty()
-    }
-
-    /// Whether the current content was found to render no rows at all — its source shows,
-    /// though the toggle stays armed.
-    #[must_use]
-    fn renders_nothing(&self) -> bool {
-        self.rendered_built.as_ref().is_some_and(|b| b.empty && b.text == self.rendered_text)
-    }
-
-    /// Whether `visible` holds the rendered rows. Tab-independent, since a file tab keeps its
-    /// rows while `PR` is in front.
-    #[must_use]
-    fn renders_markdown(&self) -> bool {
-        self.wants_rendered() && !self.renders_nothing()
-    }
-
     /// Whether the read pane shows a markdown file rendered. A file renamed away from
     /// markdown, degraded to a notice, or rendering nothing shows its source without
     /// disarming the toggle.
     #[must_use]
     pub fn rendered_active(&self) -> bool {
-        self.tab.is_file_tab() && self.renders_markdown()
+        self.tab.is_file_tab() && self.rendered.shows()
+    }
+
+    /// Whether the `m` toggle acts here: a file tab holding current markdown content, filled
+    /// only for a markdown file whose source rows render — a notice, a deleted file, an
+    /// emptied changeset, or a rename away from markdown leaves it empty and the toggle
+    /// inert.
+    fn toggle_acts(&self) -> bool {
+        self.tab.is_file_tab() && !self.rendered.text.is_empty()
     }
 
     /// `m`: flip the open markdown file between rendered and source, at the same block;
     /// inert anywhere else. A live line selection clears first, its rows are about to go.
     pub fn toggle_rendered(&mut self) {
-        if !self.renderable() {
+        if !self.toggle_acts() {
             return;
         }
         self.clear_selection();
-        if self.renders_nothing() {
+        if self.rendered.renders_nothing() {
             self.status = "nothing here renders".to_string();
-        } else if self.rendered {
+        } else if self.rendered.on {
             self.flip(false);
         } else {
             self.flip(true);
@@ -2352,41 +2253,31 @@ impl App {
     /// from the pane's top where the new rows allow; the old highlight goes with the old rows.
     fn flip(&mut self, rendered: bool) {
         let above = self.diff_cursor.saturating_sub(self.diff_scroll);
-        self.rendered = rendered;
+        self.rendered.on = rendered;
         self.rebuild_visible();
-        if rendered && self.renders_nothing() {
+        if rendered && self.rendered.renders_nothing() {
             self.status = "nothing here renders".to_string();
             return;
         }
         self.diff_scroll = self.diff_cursor.saturating_sub(above);
         self.settled_sel = None;
         self.settle_read();
-        self.refind();
         self.reveal_diff = true;
-    }
-
-    /// Re-run a live find over rows that just replaced the ones it searched: the cursor
-    /// lands on the match nearest it, here the block it crossed to. Nothing moves when no
-    /// match shows on screen; a step then reaches one hidden in a fold.
-    fn refind(&mut self) {
-        let Some(query) = self.find.as_ref().map(|f| f.query.clone()).filter(|q| !q.is_empty())
-        else {
-            return;
-        };
-        let cursor = self.diff_cursor;
-        let nearest = self.find_hits(&query).0.into_iter().filter_map(|h| match h {
-            FindHit::Visible(v) => Some(v),
-            FindHit::Folded { .. } => None,
-        });
-        if let Some(v) = nearest.min_by_key(|v| v.abs_diff(cursor)) {
-            self.diff_cursor = v;
-        }
     }
 
     /// The styled lines the rendered rows paint, indexed by a `Row::Rendered`'s `line`.
     #[must_use]
     pub(crate) fn rendered_lines(&self) -> &[ratatui::text::Line<'static>] {
-        &self.rendered_doc.lines
+        &self.rendered.doc.lines
+    }
+
+    /// Whether row `i` is a rendered block's lead row, the one whose gutter carries the
+    /// block's source line number.
+    pub(crate) fn is_rendered_lead(&self, i: usize) -> bool {
+        self.rendered
+            .index
+            .unit_at(i)
+            .is_some_and(|u| matches!(u.unit, Unit::Block(_)) && u.lead == i)
     }
 
     /// The text rendered row `i` paints, from its styled line: a marker's or a collapsed
@@ -2395,14 +2286,14 @@ impl App {
     #[must_use]
     pub fn painted_text(&self, i: usize) -> Option<String> {
         let Some(Row::Rendered { line, .. }) = self.visible.get(i) else { return None };
-        let l = self.rendered_doc.lines.get(*line as usize)?;
+        let l = self.rendered.doc.lines.get(*line as usize)?;
         Some(l.spans.iter().map(|s| s.content.as_ref()).collect())
     }
 
     /// The links and `<details>` of rendered line `line`, for the paint's hit regions.
     #[must_use]
     pub(crate) fn rendered_meta(&self, line: u32) -> Option<&crate::markdown::LineMeta> {
-        self.rendered_doc.meta.get(line as usize)
+        self.rendered.doc.meta.get(line as usize)
     }
 
     /// Note the PR read pane's maximum useful scroll; the renderer calls this each frame.
@@ -2516,7 +2407,7 @@ impl App {
                 self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
             }
         } else if self.rendered_active() {
-            let Some(&(_, line)) = self.rendered_doc.anchors.iter().find(|(s, _)| s == slug) else {
+            let Some(&(_, line)) = self.rendered.doc.anchors.iter().find(|(s, _)| s == slug) else {
                 return;
             };
             let at = |r: &Row| matches!(r, Row::Rendered { line: l, .. } if *l as usize == line);
@@ -2602,9 +2493,12 @@ impl App {
                 self.pr_expanded_details.insert(key.to_string());
             }
         } else {
-            let open =
-                self.rendered_built.as_ref().is_some_and(|b| b.details.iter().any(|k| k == key));
-            self.rendered_details.insert(key.to_string(), !open);
+            let open = self
+                .rendered
+                .built
+                .as_ref()
+                .is_some_and(|b| b.input.details.iter().any(|k| k == key));
+            self.rendered.details.insert(key.to_string(), !open);
         }
         if self.rendered_active() {
             self.rebuild_visible();
@@ -3222,12 +3116,6 @@ impl App {
         std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
         std::mem::swap(&mut self.rendered, &mut self.stash.rendered);
-        std::mem::swap(&mut self.rendered_text, &mut self.stash.rendered_text);
-        std::mem::swap(&mut self.rendered_old, &mut self.stash.rendered_old);
-        std::mem::swap(&mut self.rendered_marks, &mut self.stash.rendered_marks);
-        std::mem::swap(&mut self.rendered_details, &mut self.stash.rendered_details);
-        std::mem::swap(&mut self.rendered_doc, &mut self.stash.rendered_doc);
-        std::mem::swap(&mut self.rendered_built, &mut self.stash.rendered_built);
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -3742,18 +3630,16 @@ impl App {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
         let now = std::time::Instant::now();
         let count = match self.last_click {
-            Some((t, c, r, tgt, n, sf))
-                if c == col
-                    && r == row
-                    && tgt == target
-                    && sf == surface
-                    && now.duration_since(t) < WINDOW =>
+            Some(last)
+                if (last.col, last.row, last.target, last.surface)
+                    == (col, row, target, surface)
+                    && now.duration_since(last.at) < WINDOW =>
             {
-                (n + 1).min(3)
+                (last.count + 1).min(3)
             }
             _ => 1,
         };
-        self.last_click = Some((now, col, row, target, count, surface));
+        self.last_click = Some(LastClick { at: now, col, row, target, count, surface });
         count
     }
 
@@ -3907,17 +3793,26 @@ impl App {
             let commit_diff = self.scope == Scope::Commits && self.diff.view == View::Diff;
             (self.diff_path.clone()?, !commit_diff)
         };
-        // The nearest row at or above the cursor carrying a worktree line number. A deletion
-        // and a fold carry none, and a notice diff paints no rows at all, so each falls back
-        // to the file's start.
-        // Rendered, the cursor row names its block's first source line, and a marker row the
-        // line it sits at — past the file's end for a deletion at its tail, so that clamps.
-        let last = self.rendered_text.lines().count().max(1) as u32;
-        let line = numbered
-            .then(|| self.visible.get(..=self.diff_cursor))
-            .flatten()
-            .and_then(|above| above.iter().rev().find_map(Row::new_no))
-            .map_or(1, |l| if self.rendered_active() { l.clamp(1, last) } else { l });
+        let line = if !numbered {
+            1
+        } else if self.rendered_active() {
+            // Rendered, a block opens at its first source line, and a marker row at the line
+            // it sits at — past the file's end for a deletion at its tail, so that clamps.
+            let last = self.rendered.text.lines().count().max(1) as u32;
+            match self.rendered.index.unit_at(self.diff_cursor).map(|u| u.unit) {
+                Some(Unit::Block(src)) => src,
+                Some(Unit::Marker(src, _)) => src.clamp(1, last),
+                None => 1,
+            }
+        } else {
+            // The nearest row at or above the cursor carrying a worktree line number. A
+            // deletion and a fold carry none, and a notice diff paints no rows at all, so each
+            // falls back to the file's start.
+            self.visible
+                .get(..=self.diff_cursor)
+                .and_then(|above| above.iter().rev().find_map(Row::new_no))
+                .unwrap_or(1)
+        };
         Some(EditTarget { path, line })
     }
 
@@ -4243,7 +4138,7 @@ impl App {
     /// (Continuity). The place reconciles by identity, as on any rebuild.
     fn refresh_rendered(&mut self) {
         // A draft freezes its anchor's rows; nothing else here holds them still.
-        if self.renders_markdown() && !matches!(self.mode, Mode::Composing { .. }) {
+        if self.rendered.shows() && !matches!(self.mode, Mode::Composing { .. }) {
             self.rebuild_visible();
             self.settle_read();
         }
@@ -4252,7 +4147,7 @@ impl App {
     /// Whether the selection has at least one content row a comment can attach to —
     /// a fold marker does not qualify.
     fn has_anchorable_selection(&self) -> bool {
-        if self.renders_markdown() {
+        if self.rendered.shows() {
             return self.selection_anchor().is_some();
         }
         let (lo, hi) = self.selection_range();
@@ -4263,7 +4158,7 @@ impl App {
     /// selection anchors through the source diff rows it stands for, so the same `anchor()`
     /// makes both views' comments (G1).
     fn selection_anchor(&self) -> Option<(Side, u32, u32, String)> {
-        if self.renders_markdown() {
+        if self.rendered.shows() {
             return anchor(&self.rendered_anchor_rows());
         }
         let (lo, hi) = self.selection_range();
@@ -4279,13 +4174,16 @@ impl App {
     /// equals the source comment on the same rows, export included.
     fn rendered_anchor_rows(&self) -> Vec<Row> {
         let (lo, hi) = self.selection_range();
-        let Some(selected) = self.visible.get(lo..=hi) else { return Vec::new() };
-        let units = rendered_units(selected);
-        let picked: Vec<Unit> = units.iter().map(|&(u, _)| u).collect();
-        let blocks: Vec<(u32, u32)> =
-            units.iter().filter(|(u, _)| u.marker == Mark::None).map(|&(_, r)| r).collect();
+        let units: Vec<&crate::rendered::UnitRows> =
+            self.rendered.index.units().iter().filter(|u| u.end > lo && u.start <= hi).collect();
+        let picked: Vec<Unit> = units.iter().map(|u| u.unit).collect();
+        let blocks: Vec<(u32, u32)> = units
+            .iter()
+            .filter(|u| matches!(u.unit, Unit::Block(_)))
+            .map(|u| (u.src, u.src_end))
+            .collect();
         let span = blocks.iter().map(|&(s, _)| s).min().zip(blocks.iter().map(|&(_, e)| e).max());
-        let marks = &self.rendered_marks;
+        let marks = &self.rendered.marks;
         let inside = |n: u32| span.is_some_and(|(first, last)| (first..=last).contains(&n));
         diff_lines(&self.diff.rows)
             .enumerate()
@@ -4310,13 +4208,10 @@ impl App {
     #[must_use]
     pub fn compose_row(&self) -> usize {
         let (_, hi) = self.selection_range();
-        match self.visible.get(hi).and_then(unit_of) {
-            Some(u) => {
-                let same = |r: &&Row| unit_of(r) == Some(u);
-                hi + self.visible[hi + 1..].iter().take_while(same).count()
-            }
-            None => hi,
+        if !self.rendered_active() {
+            return hi;
         }
+        self.rendered.index.unit_at(hi).map_or(hi, |u| u.end - 1)
     }
 
     fn build_comment(&self, text: String) -> Option<Comment> {
@@ -4407,7 +4302,7 @@ impl App {
         shown
             .into_iter()
             .map(|(ci, c)| {
-                if index.units.is_empty() {
+                if !index.rendered {
                     let rows =
                         (0..self.visible.len()).filter(|&i| line_in(c, &self.visible[i])).collect();
                     return (ci, rows);
@@ -4416,7 +4311,8 @@ impl App {
                 cover.sort_unstable();
                 cover.dedup();
                 // Each covered unit's rows, in row order.
-                let rows = cover.into_iter().flat_map(|k| index.rows[k].0..index.rows[k].1);
+                let units = self.rendered.index.units();
+                let rows = cover.into_iter().flat_map(|k| units[k].start..units[k].end);
                 (ci, rows.collect())
             })
             .collect()
@@ -4451,9 +4347,10 @@ impl App {
                 let owner = match last {
                     Some(i) if lines[i].new_no().is_some() => land(lines[i].new_no()),
                     Some(i) => self
-                        .rendered_marks
+                        .rendered
+                        .marks
                         .owner(i)
-                        .and_then(|u| index.by_unit.get(&u).copied())
+                        .and_then(|u| self.rendered.index.position(u))
                         .or_else(|| land(None)),
                     None => land(None),
                 };
@@ -4709,10 +4606,8 @@ impl App {
     /// row below or above it, wrapping. A match in a collapsed fold expands it first, then the
     /// cursor lands on the revealed row. Inert while nothing matches.
     pub fn find_step(&mut self, delta: i32) {
-        // The band lives only where it can search; the hits index source rows.
-        if !self.find_available() {
-            return;
-        }
+        // A query lives only while the band is open, and every path that leaves the rows
+        // unsearchable closes the band — so a query here always has rows to search.
         let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else { return };
         if query.is_empty() {
             return;
@@ -4925,8 +4820,8 @@ impl App {
             // the block holding it, any other file on the line itself.
             let last = self.visible.len().saturating_sub(1);
             self.diff_cursor = if self.rendered_active() {
-                rendered_row_at_line(&self.visible, u32::try_from(line).unwrap_or(u32::MAX))
-                    .unwrap_or(0)
+                let line = u32::try_from(line).unwrap_or(u32::MAX);
+                self.rendered.index.row_at_line(line).unwrap_or(0)
             } else {
                 (line.saturating_sub(1) as usize).min(last)
             };
@@ -5106,10 +5001,10 @@ impl App {
         } else {
             out.push((A::Comment, Primary));
             out.push((A::Select, Do));
-            // On a markdown file's source line, surface the way back to the rendered
-            // view. A deleted
-            // file, holding no current content, offers nothing.
-            if self.renderable() {
+            // On a markdown file, surface the flip: `m source` rendered, `m rendered` on its
+            // source. A deleted file, holding no current content, offers nothing, and content
+            // that renders nothing has no rendered view to offer.
+            if self.toggle_acts() && !self.rendered.renders_nothing() {
                 out.push((A::Rendered, Do));
             }
         }
@@ -5655,51 +5550,40 @@ impl App {
 }
 
 /// Step `cur` by `delta` within `0..n`, clamping at both ends.
-/// What [`App::comment_rows`] reads for every comment, built once per call: the rendered
-/// units in row order with each one's rows, the units a new-side line can sit in (blocks,
-/// and markers over new lines) with their ranges, and — when an old-side comment needs them
-/// — each unit's index and the diff's lines. A cover names units by index.
+/// What [`App::comment_rows`] reads for every comment, built once per call over the rendered
+/// index: the units a new-side line can sit in (blocks, and markers over new lines) with their
+/// ranges, and — when an old-side comment needs them — the diff's lines. A cover names units
+/// by their position in the index.
 struct CoverIndex<'a> {
-    units: Vec<Unit>,
-    rows: Vec<(usize, usize)>,
+    rendered: bool,
     new_side: Vec<usize>,
     ranges: Vec<(u32, u32)>,
-    by_unit: HashMap<Unit, usize>,
     lines: Vec<&'a Row>,
 }
 
 impl<'a> CoverIndex<'a> {
     fn new(app: &'a App, old_side: bool) -> Self {
-        let (mut units, mut rows, mut new_side, mut ranges) =
-            (Vec::new(), Vec::<(usize, usize)>::new(), Vec::new(), Vec::new());
-        for (i, row) in app.visible.iter().enumerate() {
-            let (Some(u), Row::Rendered { src, src_end, .. }) = (unit_of(row), row) else {
-                continue;
-            };
-            if units.last() == Some(&u) {
-                if let Some(r) = rows.last_mut() {
-                    r.1 = i + 1;
+        let rendered = app.rendered_active();
+        let (mut new_side, mut ranges) = (Vec::new(), Vec::new());
+        if rendered {
+            for (k, u) in app.rendered.index.units().iter().enumerate() {
+                let shown = match u.unit {
+                    Unit::Block(_) => true,
+                    Unit::Marker(..) => app
+                        .rendered
+                        .marks
+                        .marker(u.unit)
+                        .is_some_and(|m| m.place != crate::marks::Place::Gone),
+                };
+                if shown {
+                    new_side.push(k);
+                    ranges.push((u.src, u.src_end));
                 }
-                continue;
             }
-            if u.marker == Mark::None || app.rendered_marks.marker(u).is_some_and(|m| !m.gone) {
-                new_side.push(units.len());
-                ranges.push((*src, *src_end));
-            }
-            units.push(u);
-            rows.push((i, i + 1));
         }
-        let by_unit = if old_side {
-            units.iter().enumerate().map(|(k, &u)| (u, k)).collect()
-        } else {
-            HashMap::new()
-        };
-        let lines = if old_side && !units.is_empty() {
-            diff_lines(&app.diff.rows).collect()
-        } else {
-            Vec::new()
-        };
-        Self { units, rows, new_side, ranges, by_unit, lines }
+        let lines =
+            if old_side && rendered { diff_lines(&app.diff.rows).collect() } else { Vec::new() };
+        Self { rendered, new_side, ranges, lines }
     }
 }
 
@@ -5793,11 +5677,13 @@ fn clamp_scroll(base: usize, delta: isize, max: usize) -> usize {
 }
 
 /// Whether `row` is one of a hunk's changed lines: a source change row, or a rendered line
-/// wearing a change mark — a marked block's line or a marker row.
+/// wearing a change mark — a changed block's line or a marker row.
 fn is_change(row: &Row) -> bool {
     match row {
-        Row::Deletion { .. } | Row::Insertion { .. } => true,
-        Row::Rendered { mark, .. } => *mark != Mark::None,
+        Row::Deletion { .. }
+        | Row::Insertion { .. }
+        | Row::Rendered { kind: RenderedKind::Marker(_), .. } => true,
+        Row::Rendered { kind: RenderedKind::Block { bar, .. }, .. } => bar.is_some(),
         Row::Context { .. } | Row::Fold { .. } => false,
     }
 }
@@ -5808,12 +5694,13 @@ fn is_change(row: &Row) -> bool {
 /// fold, rendered ones by an unmarked row, as a run of marked lines reads as one edit. A
 /// marker row is a stop of its own.
 fn hunk_row(rows: &[Row], from: Option<usize>, forward: bool) -> Option<usize> {
-    let marker = |r: &Row| matches!(r, Row::Rendered { mark, .. } if mark.is_marker());
-    let joins = |a: &Row, b: &Row| {
-        is_change(a)
-            && !marker(a)
-            && !marker(b)
-            && matches!(a, Row::Rendered { .. }) == matches!(b, Row::Rendered { .. })
+    let joins = |a: &Row, b: &Row| match (a, b) {
+        (
+            Row::Rendered { kind: RenderedKind::Block { bar: Some(_), .. }, .. },
+            Row::Rendered { kind: RenderedKind::Block { .. }, .. },
+        ) => true,
+        (Row::Rendered { .. }, _) | (_, Row::Rendered { .. }) => false,
+        _ => is_change(a),
     };
     let starts_hunk =
         |&i: &usize| is_change(&rows[i]) && (i == 0 || !joins(&rows[i - 1], &rows[i]));
@@ -5841,84 +5728,6 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The `offset` a marker row carries in place of a line index: past any block's, and one per
-/// kind, so `(src, offset)` names it apart from a block starting on the same line.
-fn marker_offset(kind: Mark) -> u32 {
-    match kind {
-        Mark::Unrendered => u32::MAX - 1,
-        _ => u32::MAX,
-    }
-}
-
-/// Whether `offset` names a marker row ([`marker_offset`]).
-fn is_marker_offset(offset: u32) -> bool {
-    offset >= u32::MAX - 1
-}
-
-/// A rendered row's identity across rebuilds: its block's first source line and its index
-/// within that block — a marker row's kind in place of the index. `None` for every other row.
-fn rendered_id(row: &Row) -> Option<(u32, u32)> {
-    match row {
-        Row::Rendered { src, offset, .. } => Some((*src, *offset)),
-        _ => None,
-    }
-}
-
-/// The unit a rendered row belongs to: its block, or the marker it is. `None` for every
-/// other row.
-fn unit_of(row: &Row) -> Option<Unit> {
-    match row {
-        Row::Rendered { src, mark, .. } => {
-            Some(Unit { src: *src, marker: if mark.is_marker() { *mark } else { Mark::None } })
-        }
-        _ => None,
-    }
-}
-
-/// The rendered row `id` reconciles onto (Continuity): the same `(src, offset)`, else the
-/// same block at its nearest line. A line inside a block (a line prepended to its paragraph)
-/// keeps its row there: the offset grows by the line's distance from the block start,
-/// clamped to the block. Else the lead row ([`block_lead`]) of the block starting nearest
-/// it. `None` only over no rows, which the caller's clamp settles.
-fn rendered_row_of(rows: &[Row], (src, offset): (u32, u32)) -> Option<usize> {
-    let marker = is_marker_offset(offset);
-    let block: Vec<(usize, u32)> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| match r {
-            Row::Rendered { src: s, offset: o, .. }
-                if *s == src && is_marker_offset(*o) == marker =>
-            {
-                Some((i, *o))
-            }
-            _ => None,
-        })
-        .collect();
-    if let Some(&(i, _)) = block.iter().find(|&&(_, o)| o == offset).or_else(|| block.last()) {
-        return Some(i);
-    }
-    let starts = rows.iter().enumerate().filter_map(|(i, r)| match r {
-        Row::Rendered { src: s, src_end, offset: 0, .. } => Some((i, *s, *src_end)),
-        _ => None,
-    });
-    let mut nearest: Option<(usize, u32)> = None;
-    for (i, s, end) in starts {
-        if !marker && (s..=end).contains(&src) {
-            let want = offset.saturating_add(src - s) as usize;
-            let len = rows[i..]
-                .iter()
-                .take_while(|r| rendered_id(r).is_some_and(|(b, o)| b == s && !is_marker_offset(o)))
-                .count();
-            return Some(i + want.min(len - 1));
-        }
-        let d = s.abs_diff(src);
-        if nearest.is_none_or(|(_, best)| d < best) {
-            nearest = Some((i, d));
-        }
-    }
-    nearest.map(|(i, _)| block_lead(rows, i))
-}
-
 /// The current-content line source row `i` stands for: its own, else — a deletion or a fold
 /// names none — a fold's first hidden line, the nearest line below, then the nearest above.
 fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
@@ -5928,37 +5737,6 @@ fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
     };
     let at = i.min(rows.len());
     rows[at..].iter().find_map(line_of).or_else(|| rows[..at].iter().rev().find_map(line_of))
-}
-
-/// The rendered row source line `line` lands on: the lead row of the block whose source range
-/// holds it, else of the first block below it — a blank source line between blocks paints as
-/// the gap above the next — else the last row. Marker rows stand between lines, so a line
-/// never lands on one.
-fn rendered_row_at_line(rows: &[Row], line: u32) -> Option<usize> {
-    let range = |r: &Row| match r {
-        Row::Rendered { src, src_end, mark, .. } if !mark.is_marker() => Some((*src, *src_end)),
-        _ => None,
-    };
-    let start = rows
-        .iter()
-        .position(|r| range(r).is_some_and(|(s, e)| (s..=e).contains(&line)))
-        .or_else(|| rows.iter().position(|r| range(r).is_some_and(|(s, _)| s > line)))
-        .or_else(|| rows.len().checked_sub(1))?;
-    Some(block_lead(rows, start))
-}
-
-/// The rendered units in row order, one per run of rows of one unit, with each one's source
-/// range.
-fn rendered_units(rows: &[Row]) -> Vec<(Unit, (u32, u32))> {
-    let mut out: Vec<(Unit, (u32, u32))> = Vec::new();
-    for row in rows {
-        if let (Some(u), Row::Rendered { src, src_end, .. }) = (unit_of(row), row)
-            && out.last().is_none_or(|&(l, _)| l != u)
-        {
-            out.push((u, (*src, *src_end)));
-        }
-    }
-    out
 }
 
 /// `n` `word`s, plural past one.
@@ -5986,29 +5764,6 @@ fn fit(text: &str, width: usize) -> String {
         out.push('…');
     }
     out
-}
-
-/// The lead row of the rendered block holding row `i`: its first line with text, else its
-/// first line. A block's leading rows are the blank gap the renderer sets above it, so the
-/// lead is where the block reads as starting — where a flip lands and the gutter numbers it.
-/// A marker row leads itself.
-fn block_lead(rows: &[Row], i: usize) -> usize {
-    let Some((src, offset)) = rows.get(i).and_then(rendered_id) else { return i };
-    if is_marker_offset(offset) {
-        return i;
-    }
-    let start = i.saturating_sub(offset as usize);
-    let texted = rows[start..]
-        .iter()
-        .take_while(|r| rendered_id(r).is_some_and(|(s, o)| s == src && !is_marker_offset(o)))
-        .position(|r| !r.text().trim().is_empty());
-    start + texted.unwrap_or(0)
-}
-
-/// Whether row `i` is a rendered block's lead row ([`block_lead`]), the one whose gutter
-/// carries the block's source line number.
-pub(crate) fn is_rendered_lead(rows: &[Row], i: usize) -> bool {
-    matches!(rows.get(i), Some(Row::Rendered { .. })) && block_lead(rows, i) == i
 }
 
 /// The source row a rendered block starting on line `src` lands on: the row numbered `src`,
@@ -6146,17 +5901,17 @@ mod tests {
     fn config_recovery_carries_the_rendered_choice_and_open_details() {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.mode = Mode::List;
-        old.rendered = false; // flipped to source, away from the default
-        old.rendered_text = "# doc".to_string();
-        old.rendered_details.insert("Details#0".to_string(), true);
+        old.rendered.on = false; // flipped to source, away from the default
+        old.rendered.text = "# doc".to_string();
+        old.rendered.details.insert("Details#0".to_string(), true);
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
 
-        assert!(!recovered.rendered, "the source choice survives config recovery");
-        assert_eq!(recovered.rendered_text, "# doc");
+        assert!(!recovered.rendered.on, "the source choice survives config recovery");
+        assert_eq!(recovered.rendered.text, "# doc");
         assert_eq!(
-            recovered.rendered_details.get("Details#0"),
+            recovered.rendered.details.get("Details#0"),
             Some(&true),
             "open details survive"
         );
@@ -6170,7 +5925,7 @@ mod tests {
             a.visible.iter().flat_map(|r| r.spans().iter().map(|s| s.color)).collect()
         };
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
-        old.rendered_text = "# Heading\n\nbody\n".into();
+        old.rendered.text = "# Heading\n\nbody\n".into();
         old.rebuild_visible();
         old.mode = Mode::List;
         let before = colors(&old);
@@ -6523,8 +6278,8 @@ mod tests {
             (
                 "read pane, rendered markdown",
                 Box::new(|a: &mut App| {
-                    a.rendered_text = "intro\n\n# heading\n".into();
-                    a.rendered = true;
+                    a.rendered.text = "intro\n\n# heading\n".into();
+                    a.rendered.on = true;
                     a.rebuild_visible();
                     a.diff_cursor = a.visible.len() - 1;
                 }),
@@ -6650,15 +6405,15 @@ mod tests {
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
         });
-        app.rendered_text = "# heading".into();
-        app.rendered = true;
+        app.rendered.text = "# heading".into();
+        app.rendered.on = true;
         app.rebuild_visible();
         app.diff_cursor = 0;
 
         app.start_edit();
         assert!(app.composing(), "the card on screen claims the key");
         assert_eq!(app.editor_request, None, "so the file does not open");
-        assert!(app.renders_markdown(), "the edit stays rendered");
+        assert!(app.rendered.shows(), "the edit stays rendered");
     }
 
     #[test]

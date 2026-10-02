@@ -6,7 +6,7 @@ mod common;
 use common::{Repo, app_on, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
-use herdr_reviewr::diff::{Mark, Row};
+use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
@@ -4540,21 +4540,26 @@ fn rendered_change_marks_paint_bars_and_marker_rows() {
         let cell = buf.cell((inner.x, row_of(needle))).unwrap();
         (cell.symbol().to_string(), cell.fg)
     };
-    let color = |m: Mark| ("▌".to_string(), pal.mark_color(m));
-    assert_eq!(bar("new words"), color(Mark::Modified), "a modified block is amber");
-    assert_eq!(bar("added"), color(Mark::Added), "a block that only gained is green");
+    let bar_cell = |b: Bar| ("▌".to_string(), pal.bar_color(b));
+    let marker_cell = |k: MarkerKind| ("▌".to_string(), pal.marker_color(k));
+    assert_eq!(bar("new words"), bar_cell(Bar::Modified), "a modified block is amber");
+    assert_eq!(bar("added"), bar_cell(Bar::Added), "a block that only gained is green");
     assert_eq!(bar("same para").0, " ", "an unchanged block wears no bar");
-    assert_eq!(bar("− 1 line removed"), color(Mark::Removed));
-    assert_eq!(bar("⚠ 1 changed line doesn't render · m to see"), color(Mark::Unrendered));
-    assert_eq!(pal.mark_color(Mark::Added), pal.green, "a dark theme's hues already read");
+    assert_eq!(bar("− 1 line removed"), marker_cell(MarkerKind::Removed));
+    assert_eq!(
+        bar("⚠ 1 changed line doesn't render · m to see"),
+        marker_cell(MarkerKind::Unrendered)
+    );
+    assert_eq!(pal.bar_color(Bar::Added), pal.green, "a dark theme's hues already read");
     // The removed marker sits where the block was, between its neighbours.
     let (words, removed, keep) = (row_of("keep one"), row_of("line removed"), row_of("9 keep"));
     assert!(words < removed && removed < keep, "{}", dump(&buf));
 
     // A narrow pane cuts a marker to its width with `…`, never past the pane's edge.
     app.sync_rendered_width(20);
-    let i =
-        app.visible.iter().position(|r| matches!(r, Row::Rendered { mark: Mark::Unrendered, .. }));
+    let i = app.visible.iter().position(|r| {
+        matches!(r, Row::Rendered { kind: RenderedKind::Marker(MarkerKind::Unrendered), .. })
+    });
     let text = app.painted_text(i.expect("the marker row")).unwrap();
     assert!(text.ends_with('…') && text.width() <= 20, "{text:?}");
 }

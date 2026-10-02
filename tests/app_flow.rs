@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use common::{Repo, app_on, enter_tab, typed};
 use herdr_reviewr::app::{App, Band, Focus, FooterAction, Mode};
 use herdr_reviewr::config::NavigatorPosition;
-use herdr_reviewr::diff::{Mark, Row};
+use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
@@ -3930,16 +3930,19 @@ fn find_in_rendered_markdown_reads_the_rendered_text() {
         assert_eq!(app.find_count(), Some((None, 0)), "{q}");
     }
 
-    // Flipping with the band open keeps the query and lands on the match nearest the block.
+    // Flipping with the band open keeps the query, the cursor stays on its block, and the
+    // hits recompute over the new rows — `keep` matches nothing, so the cursor never chases one.
     app.find.as_mut().unwrap().query = "total".to_string();
-    app.diff_cursor = rendered_row(&app, "total second");
+    app.diff_cursor = rendered_row(&app, "keep");
     app.toggle_rendered();
     assert!(!app.rendered_active());
     assert_eq!(app.find.as_ref().unwrap().query, "total");
-    assert_eq!(app.visible[app.diff_cursor].text(), "**total** second");
+    assert_eq!(app.visible[app.diff_cursor].text(), "keep", "the block's own line");
+    assert_eq!(app.find_count().map(|(_, n)| n), Some(2), "both source lines match");
     app.toggle_rendered();
     assert!(app.rendered_active());
-    assert_eq!(app.visible[app.diff_cursor].text(), "total second");
+    assert_eq!(app.visible[app.diff_cursor].text(), "keep");
+    assert_eq!(app.find_count(), Some((None, 2)));
 }
 
 #[test]
@@ -4093,7 +4096,11 @@ fn a_markdown_file_opens_rendered_with_a_cursor() {
     assert!(app.visible.iter().all(|row| matches!(row, Row::Rendered { .. })));
     assert!(app.visible[0].text().contains("Title"));
     assert!(!app.visible.iter().any(|row| row.text().contains("**")), "emphasis is consumed");
-    assert_eq!(app.visible[0].new_no(), Some(1), "a rendered row names its source line");
+    assert!(
+        matches!(app.visible[0], Row::Rendered { src: 1, .. }),
+        "a rendered row names its block"
+    );
+    assert_eq!(app.visible[0].new_no(), None, "and is no source line itself");
 
     // The rows take the cursor, the page keys, and the wheel like any read pane.
     app.focus = Focus::Diff;
@@ -4244,7 +4251,9 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
     let block_of = |app: &App| match app.visible[app.diff_cursor] {
-        Row::Rendered { src, src_end, offset, .. } => (src, src_end, offset),
+        Row::Rendered { src, src_end, kind: RenderedKind::Block { offset, .. }, .. } => {
+            (src, src_end, offset)
+        }
         _ => panic!("the cursor is on a rendered row"),
     };
 
@@ -4437,7 +4446,7 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::diff::Row;
     let id = |app: &App| match app.visible[app.diff_cursor] {
-        Row::Rendered { src, offset, .. } => (src, offset),
+        Row::Rendered { src, kind: RenderedKind::Block { offset, .. }, .. } => (src, offset),
         _ => panic!("the cursor is on a rendered row"),
     };
     let long = "word ".repeat(40);
@@ -4460,7 +4469,12 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     app.diff_cursor = app
         .visible
         .iter()
-        .position(|row| matches!(row, Row::Rendered { src: 12, offset: 1, .. }))
+        .position(|row| {
+            matches!(
+                row,
+                Row::Rendered { src: 12, kind: RenderedKind::Block { offset: 1, .. }, .. }
+            )
+        })
         .expect("the paragraph wraps at 60 columns");
     app.diff_scroll = app.diff_cursor - 1;
 
@@ -4468,7 +4482,10 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
     r.write("doc.md", &doc("intro line, now rewritten at length to change its own wrapping"));
     app.reload().unwrap();
     assert_eq!(id(&app), (12, 1), "a poll edit above keeps the cursor's line");
-    assert!(matches!(app.visible[app.diff_scroll], Row::Rendered { src: 12, offset: 0, .. }));
+    assert!(matches!(
+        app.visible[app.diff_scroll],
+        Row::Rendered { src: 12, kind: RenderedKind::Block { offset: 0, .. }, .. }
+    ));
 
     // A narrower pane rewraps; the line holds. A wide one folds the paragraph to one line,
     // so the cursor takes the block's nearest surviving line.
@@ -7953,14 +7970,17 @@ fn a_source_comment_on_markdown_survives_the_view_flips() {
     app.toggle_rendered(); // to source
     comment_on(&mut app, '+', "note");
     assert_eq!(app.store.len(), 1);
-    assert!(!app.card_rows().is_empty());
+    let card_text = |app: &App| -> Vec<String> {
+        app.card_rows().iter().map(|&(row, _)| app.visible[row].text()).collect()
+    };
+    assert_eq!(card_text(&app), ["body edited"]);
 
     app.toggle_rendered();
     assert!(app.rendered_active());
+    assert_eq!(card_text(&app), ["body edited"], "the card sits under its block rendered");
     app.toggle_rendered();
     assert_eq!(app.store.len(), 1, "the comment survives the flips");
-    assert!(!app.card_rows().is_empty(), "its card shows again in source");
-    assert!(!app.commented_lines().is_empty());
+    assert_eq!(card_text(&app), ["body edited"], "and under its line in source again");
 }
 
 #[test]
@@ -7984,8 +8004,7 @@ fn a_transient_render_nothing_poll_returns_to_rendered() {
     r.write("doc.md", "# A\n\npara one\n\npara two\n");
     app.reload().unwrap();
     assert!(app.rendered_active(), "content that renders shows rendered again");
-    assert!(app.diff_cursor < app.visible.len());
-    assert!(!app.visible[app.diff_cursor].text().trim().is_empty());
+    assert_eq!(app.visible[app.diff_cursor].text(), "A", "the cursor crosses back by its line");
 }
 
 #[test]
@@ -8656,9 +8675,23 @@ fn marked_repo() -> Repo {
 }
 
 /// The change mark the row under the cursor wears.
-fn cursor_mark(app: &App) -> Mark {
-    match &app.visible[app.diff_cursor] {
-        Row::Rendered { mark, .. } => *mark,
+fn cursor_mark(app: &App) -> Wears {
+    wears(&app.visible[app.diff_cursor])
+}
+
+/// The change mark a rendered row wears: its block's bar, or the marker it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wears {
+    Nothing,
+    Bar(Bar),
+    Marker(MarkerKind),
+}
+
+fn wears(row: &Row) -> Wears {
+    match row {
+        Row::Rendered { kind: RenderedKind::Block { bar: None, .. }, .. } => Wears::Nothing,
+        Row::Rendered { kind: RenderedKind::Block { bar: Some(b), .. }, .. } => Wears::Bar(*b),
+        Row::Rendered { kind: RenderedKind::Marker(k), .. } => Wears::Marker(*k),
         row => panic!("not a rendered row: {row:?}"),
     }
 }
@@ -8680,17 +8713,20 @@ fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
     assert_eq!(
         stops,
         vec![
-            ("para ONE".to_string(), Mark::Modified),
-            ("− 1 line removed".to_string(), Mark::Removed),
-            ("⚠ 1 changed line doesn't render · m to see".to_string(), Mark::Unrendered),
-            ("• added".to_string(), Mark::Added),
+            ("para ONE".to_string(), Wears::Bar(Bar::Modified)),
+            ("− 1 line removed".to_string(), Wears::Marker(MarkerKind::Removed)),
+            (
+                "⚠ 1 changed line doesn't render · m to see".to_string(),
+                Wears::Marker(MarkerKind::Unrendered)
+            ),
+            ("• added".to_string(), Wears::Bar(Bar::Added)),
         ]
     );
     // Back up the same stops.
     app.prev_hunk();
-    assert_eq!(cursor_mark(&app), Mark::Unrendered);
+    assert_eq!(cursor_mark(&app), Wears::Marker(MarkerKind::Unrendered));
     app.prev_hunk();
-    assert_eq!(cursor_mark(&app), Mark::Removed);
+    assert_eq!(cursor_mark(&app), Wears::Marker(MarkerKind::Removed));
     app.prev_hunk();
     assert_eq!(cursor_text(&app), "para ONE");
 
@@ -8704,7 +8740,10 @@ fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
     app.next_hunk();
     assert_eq!(app.diff_path.as_deref(), Some("b.md"));
     assert!(app.rendered_active());
-    assert_eq!((cursor_text(&app), cursor_mark(&app)), ("new words".to_string(), Mark::Modified));
+    assert_eq!(
+        (cursor_text(&app), cursor_mark(&app)),
+        ("new words".to_string(), Wears::Bar(Bar::Modified))
+    );
 }
 
 #[test]
@@ -8778,7 +8817,7 @@ fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
     // The changed disclosure opens on its own, its changed line marked; the quiet one stays
     // collapsed.
     let body = rendered_row(&app, "body two");
-    assert!(matches!(app.visible[body], Row::Rendered { mark: Mark::Modified, .. }));
+    assert_eq!(wears(&app.visible[body]), Wears::Bar(Bar::Modified));
     assert!(app.visible.iter().any(|r| r.text().contains("▸ Quiet")));
     assert!(!app.visible.iter().any(|r| r.text() == "same"));
 
@@ -8788,7 +8827,7 @@ fn a_changed_details_opens_and_a_reviewer_collapse_holds_across_a_poll() {
     let summary = rendered_row(&app, "▸ More");
     assert!(painted(&app, summary).ends_with("· 2 changed lines"), "{}", painted(&app, summary));
     assert!(!app.visible[summary].text().contains("changed"), "copy and find never read the note");
-    assert!(matches!(app.visible[summary], Row::Rendered { mark: Mark::Modified, .. }));
+    assert_eq!(wears(&app.visible[summary]), Wears::Bar(Bar::Modified));
 
     // A poll with a fresh change inside never reopens it against the reviewer's choice.
     r.write("doc.md", &doc("body three"));
@@ -8809,13 +8848,11 @@ fn the_files_tab_shows_no_change_marks() {
     use herdr_reviewr::app::Tab;
     let r = marked_repo();
     let mut app = app_on(&r);
-    assert!(
-        app.visible.iter().any(|r| matches!(r, Row::Rendered { mark, .. } if *mark != Mark::None))
-    );
+    assert!(app.visible.iter().any(|r| wears(r) != Wears::Nothing));
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
     assert!(app.rendered_active());
-    assert!(app.visible.iter().all(|r| matches!(r, Row::Rendered { mark: Mark::None, .. })));
+    assert!(app.visible.iter().all(|r| wears(r) == Wears::Nothing));
 }
 
 #[test]
@@ -8882,11 +8919,8 @@ fn a_block_appended_after_another_leaves_it_unmarked_and_out_of_its_anchor() {
     let mut app = app_on(&r);
     app.focus = Focus::Diff;
     let a = rendered_row(&app, "A");
-    assert!(matches!(app.visible[a], Row::Rendered { mark: Mark::None, .. }));
-    assert!(matches!(
-        app.visible[rendered_row(&app, "B")],
-        Row::Rendered { mark: Mark::Added, .. }
-    ));
+    assert_eq!(wears(&app.visible[a]), Wears::Nothing);
+    assert_eq!(wears(&app.visible[rendered_row(&app, "B")]), Wears::Bar(Bar::Added));
     app.diff_cursor = a;
     app.start_comment();
     write_comment(&mut app, "keep");
@@ -8916,7 +8950,9 @@ fn edit_in_the_rendered_view_opens_at_the_cursor_blocks_first_source_line() {
 
     // A marker row opens at the line it sits at: the removed block's place.
     app.diff_cursor = rendered_row(&app, "removed");
-    let at = app.visible[app.diff_cursor].new_no().unwrap();
+    let Row::Rendered { src: at, .. } = app.visible[app.diff_cursor] else {
+        panic!("a marker row")
+    };
     press(&mut app, &keymap, KeyCode::Char('e'));
     assert_eq!(resolve(&mut app).0, at);
     assert_eq!(at, 6, "the blank line where `gone para` was, between `keep one` and `keep two`");
@@ -8952,4 +8988,27 @@ fn edit_in_a_rendered_commit_diff_opens_the_file_at_its_start() {
     app.start_edit();
     let target = app.editor_request.take().unwrap();
     assert_eq!((target.path.as_str(), target.line), ("doc.md", 1), "the commit's numbers stay put");
+}
+
+#[test]
+fn the_footer_offers_the_rendered_view_only_where_something_renders() {
+    use herdr_reviewr::app::Tab;
+    let offers = |app: &App| app.footer_bands().iter().any(|&(a, _)| a == FooterAction::Rendered);
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\nbody\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    assert!(offers(&app), "a rendered file offers its source");
+    app.toggle_rendered();
+    assert!(offers(&app), "its source offers the rendered view");
+
+    // Content that renders nothing has no rendered view to offer.
+    r.write("doc.md", "<!-- wip -->\n");
+    app.reload().unwrap();
+    app.toggle_rendered();
+    app.toggle_rendered();
+    assert!(!app.rendered_active());
+    assert!(!offers(&app), "nothing renders, so `m rendered` stays silent");
 }

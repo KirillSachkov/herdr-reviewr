@@ -88,19 +88,27 @@ impl Palette {
         if color == self.dim2 { self.dim0 } else { color }
     }
 
-    /// A rendered line's change-mark color: an added block's bar takes the insertion green, a
-    /// modified block's and an unrendered change's the amber, a removed marker the deletion
-    /// red — each lifted toward `text` until it clears [`MIN_MARK_CONTRAST`] on `base`, so a
-    /// light theme's pale amber still reads. An unmarked line's empty bar cell keeps the dim
-    /// chrome.
+    /// A changed block's bar color: the insertion green when it only gained lines, the amber
+    /// otherwise — lifted toward `text` until it clears [`MIN_MARK_CONTRAST`] on `base`, so a
+    /// light theme's pale amber still reads.
     #[must_use]
-    pub fn mark_color(&self, mark: crate::diff::Mark) -> Color {
-        use crate::diff::Mark;
-        let hue = match mark {
-            Mark::None => return self.dim2,
-            Mark::Added => self.green,
-            Mark::Modified | Mark::Unrendered => self.yellow,
-            Mark::Removed => self.red,
+    pub fn bar_color(&self, bar: crate::diff::Bar) -> Color {
+        use crate::diff::Bar;
+        let hue = match bar {
+            Bar::Added => self.green,
+            Bar::Modified => self.yellow,
+        };
+        lift(hue, self.base, self.text, MIN_MARK_CONTRAST)
+    }
+
+    /// A marker row's color: the deletion red for a removed block, the amber for changed
+    /// source that renders nothing — lifted like [`Self::bar_color`].
+    #[must_use]
+    pub fn marker_color(&self, kind: crate::diff::MarkerKind) -> Color {
+        use crate::diff::MarkerKind;
+        let hue = match kind {
+            MarkerKind::Removed => self.red,
+            MarkerKind::Unrendered => self.yellow,
         };
         lift(hue, self.base, self.text, MIN_MARK_CONTRAST)
     }
@@ -485,12 +493,18 @@ mod tests {
 
     #[test]
     fn change_marks_clear_three_to_one_on_every_base() {
-        use crate::diff::Mark;
+        use crate::diff::{Bar, MarkerKind};
         for name in ["catppuccin", "catppuccin-latte", "rose-pine-dawn", "rose-pine"] {
             let p = resolve(Some(name)).palette;
-            for mark in [Mark::Added, Mark::Modified, Mark::Removed, Mark::Unrendered] {
-                let c = contrast(p.mark_color(mark), p.base);
-                assert!(c >= 3.0, "{name} {mark:?}: {c:.2}");
+            let colors = [
+                p.bar_color(Bar::Added),
+                p.bar_color(Bar::Modified),
+                p.marker_color(MarkerKind::Removed),
+                p.marker_color(MarkerKind::Unrendered),
+            ];
+            for c in colors {
+                let ratio = contrast(c, p.base);
+                assert!(ratio >= 3.0, "{name} {c:?}: {ratio:.2}");
             }
         }
     }

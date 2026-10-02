@@ -72,15 +72,14 @@ pub struct LineMeta {
     pub details: Option<DetailsHit>,
 }
 
-/// Click target for a `<details>` summary: display columns, the summary text, and the
-/// key the expand state keys on — the summary plus how many earlier disclosures share it
+/// Click target for a `<details>` summary: display columns, and the key the expand state
+/// keys on — the summary plus how many earlier disclosures share it
 /// (`Details#1`). Two disclosures sharing a summary open independently, and an edit above
 /// keeps every key unless it adds a disclosure with that same summary.
 #[derive(Clone, Debug)]
 pub struct DetailsHit {
     pub start: usize,
     pub end: usize,
-    pub summary: std::sync::Arc<str>,
     pub key: std::sync::Arc<str>,
 }
 
@@ -823,7 +822,6 @@ impl Renderer<'_> {
         self.pending_details = Some(DetailsHit {
             start: off,
             end: off + glyph.width() + summary_w,
-            summary: std::sync::Arc::from(summary),
             key: std::sync::Arc::from(key),
         });
         self.push_line(
@@ -1896,7 +1894,7 @@ mod tests {
         assert!(t.iter().any(|l| l.contains("▸ hi")), "{t:?}");
         assert!(t.iter().all(|l| !l.contains("chrome") && !l.contains("<details>")), "{t:?}");
         let hit = r.meta.iter().find_map(|m| m.details.as_ref()).expect("summary hit");
-        assert_eq!(&*hit.summary, "hi");
+        assert_eq!(&*hit.key, "hi#0");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
-use crate::diff::{FileDiff, FileState, Row};
+use crate::diff::{FileDiff, FileState, RenderedKind, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
 use crate::git;
@@ -1939,7 +1939,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         cursor: row == app.diff_cursor,
                         selected: selecting && row >= lo && row <= hi,
                         hovered: hovered_row == Some(row),
-                        lead: crate::app::is_rendered_lead(&app.visible, row),
+                        lead: app.is_rendered_lead(row),
                     };
                     row_cache = Some((row, render_row(&app.visible[row], layout, state)));
                 }
@@ -2071,16 +2071,20 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint, rendered } =
         layout;
     let RowState { commented, cursor, selected, hovered, lead } = state;
-    if let Row::Rendered { src, line, mark, .. } = row {
+    if let Row::Rendered { src, line, kind, .. } = row {
         // The block's lead line carries its source number, in the comment accent when a
         // comment covers the block; its other lines a blank one, like a wrapped row's
         // continuation. A marker row stands between lines, so it carries none. The hover's
         // `[+]` covers the field on any line, as on source. A marked line's bar cell shows its
         // change mark the way a source row's shows `+`/`-`.
-        let num = if lead && !mark.is_marker() { src.to_string() } else { String::new() };
+        let num = if lead { src.to_string() } else { String::new() };
         let num_color = if commented { pal.orange } else { pal.dim1 };
-        let bar = if *mark == crate::diff::Mark::None { " " } else { "▌" };
-        let mut spans = vec![Span::styled(bar, Style::default().fg(pal.mark_color(*mark)))];
+        let (bar, bar_color) = match kind {
+            RenderedKind::Block { bar: None, .. } => (" ", pal.dim2),
+            RenderedKind::Block { bar: Some(b), .. } => ("▌", pal.bar_color(*b)),
+            RenderedKind::Marker(k) => ("▌", pal.marker_color(*k)),
+        };
+        let mut spans = vec![Span::styled(bar, Style::default().fg(bar_color))];
         if hovered {
             spans.push(Span::raw(" ".repeat(gutter_w - 3)));
             spans.push(Span::styled(
