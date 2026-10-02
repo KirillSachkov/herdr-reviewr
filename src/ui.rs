@@ -1300,7 +1300,7 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     if row != area.y {
         return None;
     }
-    let spans = tab_spans(keymap);
+    let spans = tab_spans(keymap, app.pr_forge);
     for &(tab, start, end) in &spans {
         if (start as u16..end as u16).contains(&col) {
             return Some(HeaderHit::Tab(tab));
@@ -1326,14 +1326,15 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     None
 }
 
-/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key
-/// Column math uses display width, since a bound hint key can be wide.
-fn tab_labels(keymap: &Keymap) -> [(Tab, String); 3] {
+/// The three tabs and their labels, left to right, each led by its `tab-*` action's hint key.
+/// The third names the forge's own noun, `PR` or `MR`. Column math uses display width, since a
+/// bound hint key can be wide.
+fn tab_labels(keymap: &Keymap, forge: crate::git::Forge) -> [(Tab, String); 3] {
     use crate::keymap::Action as K;
     [
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
         (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
-        (Tab::Pr, format!("{} PR", keymap.hint(K::TabPr).label())),
+        (Tab::Pr, format!("{} {}", keymap.hint(K::TabPr).label(), forge.abbr())),
     ]
 }
 const HEADER_LEAD: &str = " ";
@@ -1355,10 +1356,10 @@ fn indicator_glyph(app: &App) -> &'static str {
 
 /// Each tab's `(tab, start_col, end_col)` in the header, the single source the bar paints and
 /// the click hit-tests against.
-fn tab_spans(keymap: &Keymap) -> Vec<(Tab, usize, usize)> {
+fn tab_spans(keymap: &Keymap, forge: crate::git::Forge) -> Vec<(Tab, usize, usize)> {
     let mut col = HEADER_LEAD.len();
     let mut out = Vec::new();
-    for (i, (tab, label)) in tab_labels(keymap).iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(keymap, forge).iter().enumerate() {
         if i > 0 {
             col += TAB_GAP.len();
         }
@@ -1441,7 +1442,7 @@ fn pick_label(app: &App) -> Option<(String, String, String, String)> {
 fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String, String)> {
     let (lead, shown, marker, tail) = base_label(app)?;
     // Everything else on the line plus the base's own gap and the suffix's minimum gap.
-    let fixed = header_prefix_len(&tab_spans(keymap))
+    let fixed = header_prefix_len(&tab_spans(keymap, app.pr_forge))
         + scope_chip(app).len()
         + BASE_GAP.len()
         + lead.width()
@@ -1492,7 +1493,7 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     let p = app.palette();
     let bar = Style::default().bg(p.surface0);
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in tab_labels(app.keymap()).into_iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(app.keymap(), app.pr_forge).into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
@@ -1518,7 +1519,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         BASE_GAP.len() + lead.width() + name.width() + tail.width()
     });
     let suffix = header_suffix(app);
-    let prefix = header_prefix_len(&tab_spans(app.keymap()));
+    let prefix = header_prefix_len(&tab_spans(app.keymap(), app.pr_forge));
     // The suffix keeps the same edge pad as the tab strip's lead.
     let used = prefix + chip.len() + base_width + suffix.width() + HEADER_LEAD.len();
     // Right-align the suffix; at least one gap column when the bar overflows.
@@ -4394,13 +4395,14 @@ fn pr_state_line(_app: &App, s: &forge::PrSnapshot) -> String {
     parts.join(" · ")
 }
 
-/// A one-token checks summary for the footer (`✓ checks` / `✗ N failing` / `● running`).
+/// The checks rollup in one token, worded the same in the footer and the navigator header:
+/// `✗ N failing`, `● running`, `✓ N passed`, or `no checks`.
 fn checks_summary(s: &forge::PrSnapshot) -> String {
     match s.checks_rollup() {
         None => "no checks".into(),
         Some(forge::CheckStatus::Failure) => format!("✗ {} failing", s.failing_checks()),
-        Some(forge::CheckStatus::Running) => "● checks running".into(),
-        Some(_) => "✓ checks".into(),
+        Some(forge::CheckStatus::Running) => "● running".into(),
+        Some(_) => format!("✓ {} passed", s.checks.len()),
     }
 }
 
@@ -4497,14 +4499,9 @@ fn settle_pr_nav_scroll(
     (scroll.min(max), max)
 }
 
-/// The `checks` section header with its rollup (`✗ 1 failing` / `✓ N passed` / `running`).
+/// The `checks` section header: the label, then the rollup the footer shows.
 fn pr_checks_header(s: &forge::PrSnapshot) -> String {
-    match s.checks_rollup() {
-        None => "checks  none".into(),
-        Some(forge::CheckStatus::Failure) => format!("checks  ✗ {} failing", s.failing_checks()),
-        Some(forge::CheckStatus::Running) => "checks  running".into(),
-        Some(_) => format!("checks  ✓ {} passed", s.checks.len()),
-    }
+    format!("checks · {}", checks_summary(s))
 }
 
 /// One comment row: `@author anchor`, then a trailing `resolved`/`outdated` marker or the age.

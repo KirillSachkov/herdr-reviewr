@@ -4646,3 +4646,31 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
         "{out}"
     );
 }
+
+#[test]
+fn the_pr_tab_names_the_forge_and_words_checks_one_way() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Check, CheckStatus, PrSnapshot, PrView};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    app.pr_forge = herdr_reviewr::git::Forge::GitLab;
+    assert!(render(&app).contains("3 MR"), "GitLab's tab says MR");
+
+    app.set_tab(Tab::Pr).unwrap();
+    for (status, rollup) in [
+        (CheckStatus::Success, "✓ 2 passed"),
+        (CheckStatus::Failure, "✗ 2 failing"),
+        (CheckStatus::Running, "● running"),
+    ] {
+        let check = |name: &str| Check { name: name.into(), status };
+        app.pr = PrView::Pr(Box::new(PrSnapshot {
+            checks: vec![check("ci"), check("lint")],
+            ..common::pr_snapshot()
+        }));
+        let out = render_at(&app, 140);
+        assert!(footer_line(&out).contains(rollup), "the footer says {rollup}:\n{out}");
+        assert!(out.contains(&format!("checks · {rollup}")), "the navigator says {rollup}:\n{out}");
+    }
+}
