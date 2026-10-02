@@ -1006,6 +1006,9 @@ fn event_loop(
             } else {
                 viewport
             };
+            // Rendered markdown wraps to this frame's code column; a resize rebuilds it before
+            // the heights below measure it.
+            app.sync_rendered_width(ui::rendered_width(area, app));
             let heights = ui::diff_row_heights(app, area);
             if std::mem::take(&mut app.reveal_diff) || app.composing() {
                 app.reveal_diff_cursor(&heights, effective);
@@ -1953,7 +1956,7 @@ fn handle_text_down(app: &mut App, m: MouseEvent, area: Rect) -> bool {
     use crate::selection::{Gesture, Point, Surface, TextDrag};
     let file_tab = app.tab != crate::app::Tab::Pr;
     let arm = |app: &mut App, surface: Surface, point: Point| {
-        let count = app.note_click(m.column, m.row, point.row);
+        let count = app.note_click(m.column, m.row, point.row, surface);
         app.gesture =
             Gesture::Text { drag: TextDrag { surface, anchor: point, extent: point }, count };
     };
@@ -2033,11 +2036,7 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
             let Some(rect) = ui::painted_sel(app, area).map(|s| s.rect) else { return };
             let delta = edge_delta(m.row, rect);
             if rect.height > 0 && delta != 0 {
-                if app.tab == crate::app::Tab::Pr {
-                    app.pr_scroll_read(delta);
-                } else {
-                    app.wheel_diff(delta); // the preview's scroll path
-                }
+                app.pr_scroll_read(delta);
             }
         }
         Surface::PrNav => {
@@ -2094,7 +2093,8 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
         // The same event's extent update maps against the post-scroll layout.
         ui::refresh_read_layout(app, area);
     }
-    if horizontal && !app.wrap {
+    // Rendered markdown never scrolls sideways, so its drag leaves the source's offset alone.
+    if horizontal && !app.wrap && !app.rendered_active() {
         if m.column < content.x {
             app.h_scroll = app.h_scroll.saturating_sub(2);
         } else if m.column >= content.x + content.width {
@@ -2331,8 +2331,8 @@ fn perform_click(
             } else if let Some(key) = app.painted_details_at(m.column, m.row) {
                 app.focus = Focus::Diff;
                 app.toggle_details(&key);
-            } else if app.tab == crate::app::Tab::Pr || app.preview_active() {
-                // The painted surfaces have no cursor: a click only focuses the pane.
+            } else if app.tab == crate::app::Tab::Pr {
+                // The painted surface has no cursor: a click only focuses the pane.
                 if ui::in_diff_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Diff;
                 }
@@ -2586,15 +2586,8 @@ pub fn handle_mouse(
                 // composer opens on release.
                 app.start_gutter_drag(row);
             } else if handle_text_down(app, m, area) {
-                // A pending click or text drag armed. Every painted preview cell is claimed
+                // A pending click or text drag armed. Every painted text cell is claimed
                 // here, so link opens live in `perform_click`, at the release
-            } else if app.preview_active() {
-                // A preview click only focuses the pane. The pane-rect test, not the
-                // source-row hit test — the rendered preview can be taller than the
-                // source has rows.
-                if ui::in_diff_pane(area, app, m.column, m.row) {
-                    app.focus = Focus::Diff;
-                }
             } else if let Some(i) =
                 ui::hit_diff(area, app, m.column, m.row, heights, app.diff_scroll)
             {

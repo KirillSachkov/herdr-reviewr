@@ -1549,29 +1549,31 @@ fn header_tab_hits_align_with_wide_hint_keys() {
 }
 
 #[test]
-fn the_markdown_preview_renders_styled_lines_without_a_gutter() {
+fn a_markdown_file_paints_rendered_rows_numbered_by_block() {
     let r = Repo::init();
     r.write("README.md", "# Install\n\nRun `cargo test` for **all** checks.\n");
     r.commit_all("init");
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
 
-    // Source view: raw markdown, and the footer surfaces the way into the preview.
+    // Rendered by default: markers consumed, each block's lead line numbered by its source
+    // line, and the footer offers the way to source.
     app.focus = Focus::Diff;
+    let out = render(&app);
+    assert!(out.contains("  1 Install"), "the heading's row carries line 1:\n{out}");
+    assert!(!out.contains("# Install"), "the # markers are gone rendered:\n{out}");
+    assert!(!out.contains("**all**"), "emphasis markers are consumed:\n{out}");
+    assert!(out.contains("  3 Run cargo test"), "the paragraph's row carries line 3:\n{out}");
+    let footer = out.lines().last().unwrap();
+    assert!(footer.contains("m source"), "the footer leads to source:\n{footer}");
+    assert!(!footer.contains("c comment"), "no comment key rendered:\n{footer}");
+
+    // Source view: raw markdown, and the footer leads back.
+    app.toggle_preview();
     let source = render(&app);
     assert!(source.contains("# Install"), "source shows raw markdown:\n{source}");
     let footer = source.lines().last().unwrap();
-    assert!(footer.contains("m preview"), "source discovers the preview:\n{footer}");
-
-    app.toggle_preview();
-    let out = render(&app);
-    assert!(out.contains("Install"), "the heading text renders:\n{out}");
-    assert!(!out.contains("# Install"), "the # markers are gone in the preview:\n{out}");
-    assert!(!out.contains("**all**"), "emphasis markers are consumed:\n{out}");
-    assert!(!out.contains("  1 "), "the preview has no line-number gutter:\n{out}");
-    let footer = out.lines().last().unwrap();
-    assert!(footer.contains("m source"), "the footer leads back to source:\n{footer}");
-    assert!(!footer.contains("c comment"), "no comment key in the preview:\n{footer}");
+    assert!(footer.contains("m preview"), "source leads back to the rendered view:\n{footer}");
 }
 
 #[test]
@@ -2077,7 +2079,7 @@ fn markdown_links_paint_click_regions_and_the_guard_gates_them() {
 }
 
 #[test]
-fn an_anchor_click_scrolls_the_preview_to_its_heading() {
+fn an_anchor_click_moves_the_rendered_cursor_to_its_heading() {
     let mut md = String::from(
         "# Top
 
@@ -2101,29 +2103,22 @@ the target body
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
 
-    // In source view an anchor click is inert: no anchors are painted there.
+    // In source view an anchor click is inert: no heading anchors are rendered there.
+    app.toggle_preview();
     let _ = render(&app);
     app.open_link("#section-two");
-    assert_eq!(app.preview_scroll, 0, "source view ignores anchor destinations");
+    assert_eq!(app.diff_cursor, 0, "source view ignores anchor destinations");
 
     app.toggle_preview();
-    let _ = render(&app); // paint: anchors and link regions note themselves
-
-    assert_eq!(app.preview_scroll, 0);
+    let _ = render(&app);
+    assert_eq!(app.diff_cursor, 0);
     app.open_link("#section-two");
-    assert!(app.preview_scroll > 40, "the preview jumped to the heading: {}", app.preview_scroll);
+    assert!(app.diff_cursor > 40, "the cursor jumped to the heading: {}", app.diff_cursor);
+    assert_eq!(app.visible[app.diff_cursor].text(), "Section Two");
+    assert_eq!(app.diff_scroll, app.diff_cursor, "the heading tops the pane");
     let out = render(&app);
-    assert!(
-        out.contains("Section Two"),
-        "the heading is on screen:
-{out}"
-    );
-    assert!(
-        !out.contains("# Top"),
-        "the top scrolled away:
-{out}"
-    );
-    assert!(out.contains('┃'), "an overflowing preview shows the scrollbar thumb:\n{out}");
+    assert!(out.contains("Section Two"), "the heading is on screen:\n{out}");
+    assert!(!out.contains("jump go"), "the top scrolled away:\n{out}");
 }
 
 #[test]
@@ -2152,27 +2147,58 @@ fn a_body_that_fits_the_pane_shows_no_scrollbar() {
 }
 
 #[test]
-fn the_preview_paints_link_regions_and_names_itself_in_the_title() {
+fn rendered_rows_paint_link_and_details_regions() {
     let r = Repo::init();
-    r.write("README.md", "# Install\n\nsee [docs](https://docs.example/x)\n");
+    r.write(
+        "README.md",
+        "# Install\n\nsee [docs](https://docs.example/x)\n\n\
+         <details>\n<summary>More</summary>\n\nhidden body\n\n</details>\n",
+    );
     r.commit_all("init");
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
+    let cell_of = |buf: &Buffer, needle: &str| -> (u16, u16) {
+        let out = dump(buf);
+        let (y, line) =
+            out.lines().enumerate().find(|(_, l)| l.contains(needle)).expect("painted needle");
+        let x = line[..line.find(needle).unwrap()].chars().count();
+        (u16::try_from(x).unwrap(), u16::try_from(y).unwrap())
+    };
 
-    let source = render(&app);
-    assert!(!source.contains("· preview"), "source view has no preview marker");
-    let miss = first_painted_link(&app);
-    assert_eq!(miss, None, "raw source paints no link regions");
+    // The regions sit where the text paints, right of the gutter: the link's first cell
+    // resolves and the cell before it does not.
+    let buf = render_buffer(&app);
+    assert!(dump(&buf).contains("README.md · preview"), "the title names the mode");
+    let (x, y) = cell_of(&buf, "docs");
+    assert_eq!(app.painted_link_at(x, y).as_deref(), Some("https://docs.example/x"));
+    assert_eq!(app.painted_link_at(x - 1, y), None, "the region starts at the link text");
 
+    // A click on the summary opens the disclosure in place.
+    let (x, y) = cell_of(&buf, "More");
+    assert_eq!(app.painted_details_at(x, y).as_deref(), Some("More#0"));
+    assert!(!dump(&buf).contains("hidden body"), "the disclosure starts collapsed");
+    let area = Rect::new(0, 0, 140, 40);
+    let heights = ui::diff_row_heights(&app, area);
+    let keymap = Keymap::default();
+    for kind in [
+        MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left),
+        MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Left),
+    ] {
+        let m = MouseEvent { kind, column: x, row: y, modifiers: KeyModifiers::NONE };
+        handle_mouse(&mut app, m, area, &heights, &keymap, &herdr_reviewr::export::Clipboard)
+            .unwrap();
+    }
+    assert!(render(&app).contains("hidden body"), "the click opened the disclosure");
+
+    // Source paints no regions.
     app.toggle_preview();
-    let out = render(&app);
-    assert!(out.contains("README.md · preview"), "the title names the mode:\n{out}");
-    let hit = first_painted_link(&app);
-    assert_eq!(hit.as_deref(), Some("https://docs.example/x"));
+    let source = render(&app);
+    assert!(!source.contains("· preview"), "source view has no rendered marker");
+    assert_eq!(first_painted_link(&app), None, "raw source paints no link regions");
 }
 
 #[test]
-fn the_changes_tab_paints_the_markdown_preview() {
+fn the_changes_tab_paints_rendered_markdown() {
     let r = Repo::init();
     r.write("README.md", "# Install\n");
     r.commit_all("init");
@@ -2180,23 +2206,23 @@ fn the_changes_tab_paints_the_markdown_preview() {
     let mut app = app_on(&r);
     app.focus = Focus::Diff;
 
-    // The Changes diff shows raw markdown, and the footer surfaces the way into the preview.
-    let source = render(&app);
-    assert!(source.contains("# Install"), "the diff shows raw markdown:\n{source}");
-    let footer = source.lines().last().unwrap();
-    assert!(footer.contains("m preview"), "the diff discovers the preview:\n{footer}");
-
-    // The toggle paints the rendered document over the diff and names the mode in the title.
-    app.toggle_preview();
+    // The Changes tab opens the markdown file rendered and names the mode in the title.
     let out = render(&app);
     assert!(out.contains("README.md · preview"), "the title names the mode:\n{out}");
     assert!(out.contains("Install"), "the heading text renders:\n{out}");
-    assert!(!out.contains("# Install"), "the # markers are gone in the preview:\n{out}");
+    assert!(!out.contains("# Install"), "the # markers are gone rendered:\n{out}");
     // "checks" is on the new side only (the committed side is the bare heading), so this
-    // proves the preview renders current content, not the old version being diffed.
-    assert!(out.contains("checks"), "the preview renders the new-side content:\n{out}");
+    // proves the render shows current content, not the old version being diffed.
+    assert!(out.contains("checks"), "the render shows the new-side content:\n{out}");
     let footer = out.lines().last().unwrap();
-    assert!(footer.contains("m source"), "the footer leads back to the diff:\n{footer}");
+    assert!(footer.contains("m source"), "the footer leads to the diff:\n{footer}");
+
+    // The toggle paints the diff of the raw markdown.
+    app.toggle_preview();
+    let source = render(&app);
+    assert!(source.contains("# Install"), "the diff shows raw markdown:\n{source}");
+    let footer = source.lines().last().unwrap();
+    assert!(footer.contains("m preview"), "the diff leads back:\n{footer}");
 }
 
 #[test]
@@ -2212,12 +2238,11 @@ fn an_uppercase_unicode_anchor_still_finds_its_heading() {
     r.commit_all("init");
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
-    app.toggle_preview();
     let _ = render(&app);
 
     // The click side must Unicode-lowercase like the slugger: #ÜBER-ZIEL → über-ziel.
     app.open_link("#ÜBER-ZIEL");
-    assert!(app.preview_scroll > 40, "the jump matched the slug: {}", app.preview_scroll);
+    assert!(app.diff_cursor > 40, "the jump matched the slug: {}", app.diff_cursor);
 }
 
 #[test]

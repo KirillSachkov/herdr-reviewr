@@ -245,8 +245,8 @@ pub fn in_files_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
     contains(panes(area, app).files, col, row)
 }
 
-/// Whether `(col, row)` falls in the diff pane — the markdown preview's click target,
-/// whose rendered geometry the source-row hit test cannot describe.
+/// Whether `(col, row)` falls in the diff pane — the `PR` read pane's click target, whose
+/// painted geometry the row hit test cannot describe.
 #[must_use]
 pub fn in_diff_pane(area: Rect, app: &App, col: u16, row: u16) -> bool {
     contains(panes(area, app).diff, col, row)
@@ -361,9 +361,9 @@ fn tail<T: Clone>(v: Vec<T>, cap: usize) -> Vec<T> {
 
 /// The read pane's display lines top to bottom for the current state — the one layout walk.
 /// Two callers: `render_diff_view` paints from it and records it, and a mid-gesture scroll
-/// re-runs it (`refresh_read_layout`). Empty in the preview and on a notice.
+/// re-runs it (`refresh_read_layout`). Empty on a notice.
 fn read_layout(app: &App, inner: Rect) -> Vec<Slot> {
-    if app.preview_active() || app.visible.is_empty() || inner.height == 0 {
+    if app.visible.is_empty() || inner.height == 0 {
         return Vec::new();
     }
     let height = inner.height as usize;
@@ -431,9 +431,18 @@ pub fn refresh_read_layout(app: &App, area: Rect) {
 }
 
 /// The display-cell range a code display line paints over `cells`: the wrap segment with
-/// wrap on, the `h_scroll`-skipped tail with wrap off.
-fn seg_cell_range(app: &App, cells: &[Cell], seg: usize, code_width: usize) -> (usize, usize) {
-    if app.wrap {
+/// wrap on, the `h_scroll`-skipped tail with wrap off. A rendered row is one whole line,
+/// pre-wrapped by the renderer and never scrolled sideways.
+fn seg_cell_range(
+    app: &App,
+    row: &Row,
+    cells: &[Cell],
+    seg: usize,
+    code_width: usize,
+) -> (usize, usize) {
+    if matches!(row, Row::Rendered { .. }) {
+        (0, cells.len())
+    } else if app.wrap {
         let segs = wrap_segments(cells, code_width.max(1), ContinuationSpaces::Trim);
         segs.get(seg).copied().unwrap_or((0, 0))
     } else {
@@ -445,7 +454,7 @@ fn seg_cell_range(app: &App, cells: &[Cell], seg: usize, code_width: usize) -> (
 /// line: past its end selects its last char (a stream selection runs to the row's end).
 fn seg_char_at(app: &App, row: &Row, seg: usize, code_width: usize, col_in_code: usize) -> usize {
     let cells = code_cells(row, false, &[]);
-    let (s, e) = seg_cell_range(app, &cells, seg, code_width);
+    let (s, e) = seg_cell_range(app, row, &cells, seg, code_width);
     if s >= e {
         // The line is scrolled entirely off (h-scroll past its end): past the end selects
         // its last char, the same as a column past the painted text below.
@@ -567,10 +576,10 @@ pub fn read_point_clamped(
 
 /// The commentable logical row whose gutter `(col, row)` lands on, `None` elsewhere. The
 /// whole gutter width takes the click and the drag, and a continuation line's gutter belongs
-/// to its logical row.
+/// to its logical row. The rendered view's gutter takes no comments yet.
 #[must_use]
 pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    if app.tab == Tab::Pr {
+    if app.tab == Tab::Pr || app.rendered_active() {
         return None;
     }
     let pane = read_pane(area, app);
@@ -633,7 +642,7 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                     continue;
                 }
                 let cells = code_cells(row_ref, false, &[]);
-                let (seg_s, seg_e) = seg_cell_range(app, &cells, seg, code_width);
+                let (seg_s, seg_e) = seg_cell_range(app, row_ref, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
                 let max_x = (pane.inner.x + pane.inner.width) as usize;
                 let mut x = pane.inner.x as usize + pane.prefix_w;
@@ -887,7 +896,7 @@ pub(crate) struct PaintedSel {
     pub offsets: Vec<usize>,
 }
 
-/// The open painted surface: the `PR` read pane on the `PR` tab, else the markdown preview
+/// The open painted surface: the `PR` read pane, on the `PR` tab only.
 pub(crate) fn painted_sel(app: &App, area: Rect) -> Option<PaintedSel> {
     let inner = inner_rect(panes(area, app).diff);
     if app.tab == Tab::Pr {
@@ -914,22 +923,6 @@ pub(crate) fn painted_sel(app: &App, area: Rect) -> Option<PaintedSel> {
             .map(|(i, l)| painted_text(&skip_display_cols(&line_text(l), offsets[i])))
             .collect();
         return Some(PaintedSel { rect, scroll, texts, offsets });
-    }
-    if app.preview_active() {
-        let texts: Vec<String> = app
-            .markdown_render(app.preview_text(), (inner.width as usize).max(1))
-            .lines
-            .iter()
-            .map(|l| painted_text(&line_text(l)))
-            .collect();
-        let max = texts.len().saturating_sub(inner.height as usize);
-        let offsets = vec![0; texts.len()];
-        return Some(PaintedSel {
-            rect: inner,
-            scroll: app.preview_scroll.min(max),
-            texts,
-            offsets,
-        });
     }
     None
 }
@@ -1039,6 +1032,15 @@ pub fn composer_height(app: &App, width: usize) -> usize {
 #[must_use]
 pub fn composer_content_width(width: usize) -> usize {
     width.saturating_sub(2).max(1)
+}
+
+/// The rendered markdown's wrap width for the full terminal `area`: the read pane's code
+/// column, right of the gutter the rendered rows paint — the width the frame hook hands
+/// [`App::sync_rendered_width`].
+#[must_use]
+pub fn rendered_width(area: Rect, app: &App) -> usize {
+    let inner = inner_rect(panes(area, app).diff).width as usize;
+    inner.saturating_sub(gutter_prefix_width(gutter_for(&app.diff)))
 }
 
 /// The diff pane's inner content width for the full terminal `area`, so the event loop can
@@ -1833,7 +1835,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         }
         .to_string(),
     };
-    if app.preview_active() {
+    if app.rendered_active() {
         title.push_str(" · preview");
     }
     let block = bordered(&title, app.focus == Focus::Diff, p);
@@ -1870,30 +1872,6 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     }
     let width = inner.width as usize;
 
-    // The markdown preview: rendered lines, no gutter, no cursor; the scroll clamps to
-    // the rendered length so a refresh that shrank the file keeps the reader in range
-    if app.preview_active() {
-        let rendered = app.markdown_render(app.preview_text(), width.max(1));
-        // Scrolling stops with the last line at the pane's bottom edge; content that
-        // fits the pane does not scroll.
-        let max = rendered.lines.len().saturating_sub(height);
-        app.note_preview_max_scroll(max);
-        let scroll = app.preview_scroll.min(max);
-        note_markdown_regions(app, &rendered, inner, scroll, 0);
-        frame.render_widget(
-            Paragraph::new(rendered.lines).scroll((saturating_row(scroll), 0)),
-            inner,
-        );
-        render_overflow_scrollbar(
-            frame,
-            area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
-            max,
-            scroll,
-            p,
-        );
-        return;
-    }
-
     let gutter_w = gutter_for(&app.diff);
     let expand_hint = app.keymap().hint(crate::keymap::Action::Expand).label();
     let layout = RowLayout {
@@ -1908,6 +1886,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             .as_ref()
             .map(|f| (f.query.as_str(), crate::app::find_case_sensitive(&f.query))),
         expand_hint: &expand_hint,
+        rendered: app.rendered_lines(),
     };
     let commented = app.commented_lines();
     let (lo, hi) = app.selection_range();
@@ -1917,6 +1896,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     // tests, so the screen and the maps cannot disagree.
     let slots = read_layout(app, inner);
     app.note_painted_slots(slots.clone());
+    note_rendered_regions(app, &slots, inner, gutter_prefix_width(gutter_w));
 
     // The row the pointer's last reported cell rests on, recomputed each frame; the gutter
     // is inert under every modal — composing, the list, the pickers — so its `+` hides
@@ -1946,6 +1926,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
                         cursor: row == app.diff_cursor,
                         selected: selecting && row >= lo && row <= hi,
                         hovered: hovered_row == Some(row),
+                        lead: crate::app::is_rendered_lead(&app.visible, row),
                     };
                     row_cache = Some((row, render_row(&app.visible[row], layout, state)));
                 }
@@ -2025,7 +2006,8 @@ fn gutter_prefix_width(gutter_w: usize) -> usize {
 /// word-wrapped segments its (tab-expanded) content fills. Shares [`wrap_segments`] with
 /// the renderer so per-row geometry stays aligned with what gets painted.
 fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
-    if !wrap || matches!(row, Row::Fold { .. }) {
+    // A rendered row is one line the renderer already wrapped to the code column.
+    if !wrap || matches!(row, Row::Fold { .. } | Row::Rendered { .. }) {
         return 1;
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
@@ -2049,6 +2031,8 @@ struct RowLayout<'a> {
     find: Option<(&'a str, bool)>,
     /// The `expand` hint the cursor's fold row advertises, following a rebind.
     expand_hint: &'a str,
+    /// The styled lines a `Row::Rendered` paints, indexed by its `line`.
+    rendered: &'a [Line<'static>],
 }
 
 /// A row's per-row highlight state.
@@ -2061,6 +2045,9 @@ struct RowState {
     /// Whether the pointer hovers this row — its change bar cell shows the gutter `+`
     /// Always false on a PR snippet, whose rows take no comments.
     hovered: bool,
+    /// Whether a rendered row leads its block, so its gutter carries the block's source
+    /// line number (`app::is_rendered_lead`). Read only on rendered rows.
+    lead: bool,
 }
 
 /// A diff row as one or more full-width display lines: a left change bar, the line
@@ -2068,8 +2055,35 @@ struct RowState {
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
 fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint } = layout;
-    let RowState { commented, cursor, selected, hovered } = state;
+    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint, rendered } =
+        layout;
+    let RowState { commented, cursor, selected, hovered, lead } = state;
+    if let Row::Rendered { src, line, .. } = row {
+        // The block's lead line carries its source number; its other lines a blank one,
+        // like a wrapped row's continuation.
+        let num = if lead { src.to_string() } else { String::new() };
+        let mut spans = vec![
+            Span::styled(" ", Style::default().fg(pal.dim2)),
+            Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(pal.dim1)),
+        ];
+        spans.extend(rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default());
+        let mut out = Line::from(spans);
+        if let Some(pad) = width.checked_sub(out.width()).filter(|p| *p > 0) {
+            out.push_span(Span::raw(" ".repeat(pad)));
+        }
+        // A line-level fill under span styles: a span's own background (none today) wins.
+        let bg = if cursor {
+            Some(pal.cursor_bg(focused))
+        } else if selected {
+            Some(pal.surface1)
+        } else {
+            None
+        };
+        return vec![match bg {
+            Some(bg) => out.style(Style::default().bg(bg)),
+            None => out,
+        }];
+    }
     if let Row::Fold { .. } = row {
         let label = if cursor {
             format!("  ⋯  {} unmodified lines — {expand_hint} expand", row.hidden())
@@ -2583,7 +2597,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::TogglePane => {
             return ("tab".into(), if app.focus == Focus::Files { "diff" } else { "files" }.into());
         }
-        A::Preview => (hint(K::Preview), if app.preview_active() { "source" } else { "preview" }),
+        A::Preview => (hint(K::Preview), if app.rendered_active() { "source" } else { "preview" }),
         A::NavigatorPosition => (hint(K::NavigatorPosition), "layout"),
         A::NavigatorHide => {
             (hint(K::NavigatorHide), if app.navigator_hidden_here() { "show" } else { "hide" })
@@ -4374,6 +4388,33 @@ fn pr_comment_row(
     ]
 }
 
+/// Note the link and `<details>` regions of the rendered rows this frame painted: each
+/// rendered `Code` slot's line, shifted right past the gutter and clipped at the pane's edge,
+/// so a click resolves against exactly what is on screen.
+fn note_rendered_regions(app: &App, slots: &[Slot], inner: Rect, prefix_w: usize) {
+    let code_w = (inner.width as usize).saturating_sub(prefix_w);
+    let x0 = inner.x + prefix_w as u16;
+    let clip = |c: usize| x0 + c.min(code_w) as u16;
+    for (off, slot) in slots.iter().enumerate() {
+        let Slot::Code { row, .. } = *slot else { continue };
+        let Some(Row::Rendered { line, .. }) = app.visible.get(row) else { continue };
+        let Some(meta) = app.rendered_meta(*line) else { continue };
+        let y = inner.y + off as u16;
+        for link in &meta.links {
+            let (x1, x2) = (clip(link.start), clip(link.end));
+            if x1 < x2 {
+                app.note_painted_link(x1, x2, y, link.url.clone());
+            }
+        }
+        if let Some(d) = &meta.details {
+            let (x1, x2) = (clip(d.start), clip(d.end));
+            if x1 < x2 {
+                app.note_painted_details(x1, x2, y, d.key.clone());
+            }
+        }
+    }
+}
+
 /// Note the painted link regions and heading anchors for a markdown render drawn
 /// inside `inner`, scrolled by `scroll`, with the body's first line at display index
 /// `offset` — so a click can resolve against exactly what this frame painted
@@ -4483,6 +4524,7 @@ fn push_finding_quote(
             find: None,
             // Snippet rows never carry the cursor, so no fold ever shows the hint here.
             expand_hint: "",
+            rendered: &[],
         };
         let from = lines.len();
         for row in &rows {
@@ -4491,6 +4533,7 @@ fn push_finding_quote(
                 cursor: false,
                 selected: false,
                 hovered: false,
+                lead: false,
             };
             lines.extend(render_row(row, layout, state));
         }

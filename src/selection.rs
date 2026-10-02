@@ -10,10 +10,10 @@ use crate::file_list::{self, RowKind};
 /// Where a text drag lives, locked at mouse-down (`TS-ONE-SURFACE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// The read pane's `FileDiff` rows (Diff or File view): character-precise source text.
+    /// The read pane's rows (Diff, File, or rendered markdown view): character-precise row
+    /// text.
     Read,
-    /// The read pane's painted lines (markdown preview, `PR` read pane): character-precise
-    /// painted text.
+    /// The `PR` read pane's painted lines: character-precise painted text.
     Painted,
     /// A spliced comment card in the read pane: character-precise card text, confined to the
     /// card it started on (`TS-ONE-SURFACE`).

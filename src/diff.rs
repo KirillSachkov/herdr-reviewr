@@ -22,14 +22,40 @@ pub struct Span {
     pub color: Rgb,
 }
 
-/// A rendered diff row. Content rows (`Context`/`Deletion`/`Insertion`) are selectable
-/// for comments; a `Fold` is a collapsed run of context lines it owns.
+/// A rendered diff row. Content rows (`Context`/`Deletion`/`Insertion`/`Rendered`) are
+/// selectable for comments; a `Fold` is a collapsed run of context lines it owns.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Row {
-    Context { old_no: u32, new_no: u32, spans: Vec<Span> },
-    Deletion { old_no: u32, spans: Vec<Span>, emphasis: Vec<CharRange> },
-    Insertion { new_no: u32, spans: Vec<Span>, emphasis: Vec<CharRange> },
-    Fold { lines: Vec<Row> },
+    Context {
+        old_no: u32,
+        new_no: u32,
+        spans: Vec<Span>,
+    },
+    Deletion {
+        old_no: u32,
+        spans: Vec<Span>,
+        emphasis: Vec<CharRange>,
+    },
+    Insertion {
+        new_no: u32,
+        spans: Vec<Span>,
+        emphasis: Vec<CharRange>,
+    },
+    Fold {
+        lines: Vec<Row>,
+    },
+    /// One line of a markdown file's rendered view, pre-wrapped by the renderer. `src..=src_end`
+    /// is the 1-based source range its block maps to, and `offset` its index among the
+    /// consecutive rows sharing `src`, so `(src, offset)` names the line across a rebuild.
+    /// `spans` carry the plain text by color, so text, find, and selection read it like any
+    /// row. `line` indexes the styled line the app holds, keeping this module terminal-free.
+    Rendered {
+        src: u32,
+        src_end: u32,
+        offset: u32,
+        spans: Vec<Span>,
+        line: u32,
+    },
 }
 
 /// A `[start, end)` run of char indices within a line, for word-level emphasis.
@@ -39,13 +65,15 @@ impl Row {
     pub fn old_no(&self) -> Option<u32> {
         match self {
             Row::Context { old_no, .. } | Row::Deletion { old_no, .. } => Some(*old_no),
-            Row::Insertion { .. } | Row::Fold { .. } => None,
+            Row::Insertion { .. } | Row::Fold { .. } | Row::Rendered { .. } => None,
         }
     }
 
     pub fn new_no(&self) -> Option<u32> {
         match self {
             Row::Context { new_no, .. } | Row::Insertion { new_no, .. } => Some(*new_no),
+            // A rendered line names its block's first source line.
+            Row::Rendered { src, .. } => Some(*src),
             Row::Deletion { .. } | Row::Fold { .. } => None,
         }
     }
@@ -54,7 +82,8 @@ impl Row {
         match self {
             Row::Context { spans, .. }
             | Row::Deletion { spans, .. }
-            | Row::Insertion { spans, .. } => spans,
+            | Row::Insertion { spans, .. }
+            | Row::Rendered { spans, .. } => spans,
             Row::Fold { .. } => &[],
         }
     }
@@ -64,7 +93,7 @@ impl Row {
     pub fn emphasis(&self) -> &[CharRange] {
         match self {
             Row::Deletion { emphasis, .. } | Row::Insertion { emphasis, .. } => emphasis,
-            Row::Context { .. } | Row::Fold { .. } => &[],
+            Row::Context { .. } | Row::Fold { .. } | Row::Rendered { .. } => &[],
         }
     }
 
@@ -73,7 +102,7 @@ impl Row {
         match self {
             Row::Deletion { .. } => '-',
             Row::Insertion { .. } => '+',
-            Row::Context { .. } | Row::Fold { .. } => ' ',
+            Row::Context { .. } | Row::Fold { .. } | Row::Rendered { .. } => ' ',
         }
     }
 
@@ -294,7 +323,10 @@ impl FileDiff {
 
 pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
     match row {
-        Row::Context { spans, .. } | Row::Deletion { spans, .. } | Row::Insertion { spans, .. } => {
+        Row::Context { spans, .. }
+        | Row::Deletion { spans, .. }
+        | Row::Insertion { spans, .. }
+        | Row::Rendered { spans, .. } => {
             *spans = next;
         }
         Row::Fold { .. } => {}

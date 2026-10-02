@@ -507,27 +507,27 @@ fn hunk_steps_are_inert_where_no_change_rows_are_painted() {
 }
 
 #[test]
-fn a_file_skip_out_of_a_preview_opens_the_next_file_in_source() {
+fn the_next_markdown_file_opens_rendered_after_m_on_the_previous_one() {
     let r = Repo::init();
     r.write("a.md", "# title\n");
-    r.write("b.rs", "x\n");
+    r.write("b.md", "# other\n");
     r.commit_all("init");
     r.write("a.md", "# title\n\nbody\n");
-    r.write("b.rs", "x2\n");
+    r.write("b.md", "# other\n\nmore\n");
     let mut app = app_on(&r);
     app.focus = Focus::Diff;
     assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(app.rendered_active(), "a markdown file opens rendered");
     app.toggle_preview();
-    assert!(app.preview_active(), "the markdown preview is open");
+    assert!(!app.rendered_active(), "`m` flips it to source");
 
-    // The preview has no cursor, so a hunk step has no target there.
-    app.next_hunk();
-    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
-    assert!(app.preview_active());
-
+    // The flag resets on every file open: the next file, and a return to the first.
     app.next_file();
-    assert_eq!(app.diff_path.as_deref(), Some("b.rs"));
-    assert!(!app.preview_active(), "the opened file starts in source");
+    assert_eq!(app.diff_path.as_deref(), Some("b.md"));
+    assert!(app.rendered_active(), "the next markdown file opens rendered");
+    app.prev_file();
+    assert_eq!(app.diff_path.as_deref(), Some("a.md"));
+    assert!(app.rendered_active(), "reopening the flipped file opens it rendered again");
 }
 
 #[test]
@@ -3906,7 +3906,7 @@ fn find_is_inert_without_content_rows() {
 }
 
 #[test]
-fn find_is_inert_in_the_markdown_preview() {
+fn find_is_inert_in_rendered_markdown() {
     let r = Repo::init();
     r.write("base.txt", "x\n");
     r.commit_all("init");
@@ -3915,10 +3915,15 @@ fn find_is_inert_in_the_markdown_preview() {
     let keymap = Keymap::default();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
     app.focus = Focus::Diff;
-    press(&mut app, &keymap, KeyCode::Char('m')); // open the markdown preview
-    assert!(app.preview_active(), "the preview is open");
+    assert!(app.rendered_active(), "the markdown file opens rendered");
     open_find(&mut app, &keymap);
-    assert_ne!(app.mode, Mode::Find, "find is inert in the markdown preview");
+    assert_ne!(app.mode, Mode::Find, "find is inert in the rendered view");
+
+    // The source view searches as any file does.
+    press(&mut app, &keymap, KeyCode::Char('m'));
+    assert!(!app.rendered_active());
+    open_find(&mut app, &keymap);
+    assert_eq!(app.mode, Mode::Find, "find opens over the markdown source");
 }
 
 #[test]
@@ -4056,111 +4061,109 @@ fn markdown_app() -> (Repo, App) {
 }
 
 #[test]
-fn the_markdown_preview_toggles_on_a_markdown_file_in_either_tab() {
+fn a_markdown_file_opens_rendered_with_a_cursor() {
     use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::Row;
     let r = Repo::init();
     r.write("README.md", "# Title\n");
     r.commit_all("init");
-    r.write("README.md", "# Title\nmore\n");
+    r.write("README.md", "# Title\n\nalpha **beta** gamma\n\n- one\n- two\n");
     let mut app = app_on(&r);
 
-    // `Changes` previews the diff's markdown file, and toggles back to the diff.
+    // `Changes` opens the diff's markdown file rendered: real rows, markers consumed, each
+    // naming its block's source line.
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
-    app.toggle_preview();
-    assert!(app.preview_active(), "a markdown file previews on the Changes tab");
-    app.toggle_preview();
-    assert!(!app.preview_active(), "the toggle returns to the diff");
+    assert!(app.rendered_active(), "a markdown file opens rendered on the Changes tab");
+    assert!(app.visible.iter().all(|row| matches!(row, Row::Rendered { .. })));
+    assert!(app.visible[0].text().contains("Title"));
+    assert!(!app.visible.iter().any(|row| row.text().contains("**")), "emphasis is consumed");
+    assert_eq!(app.visible[0].new_no(), Some(1), "a rendered row names its source line");
 
-    // `All files` previews the same file the same way.
+    // The rows take the cursor, the page keys, and the wheel like any read pane.
+    app.focus = Focus::Diff;
+    app.move_cursor(1).unwrap();
+    assert_eq!(app.diff_cursor, 1, "the cursor steps over rendered rows");
+    assert!(app.reveal_diff);
+    app.move_cursor(100).unwrap();
+    assert_eq!(app.diff_cursor, app.visible.len() - 1, "a page clamps at the last row");
+    let cursor = app.diff_cursor;
+    app.wheel_diff(1);
+    assert_eq!(app.diff_scroll, 1, "the wheel scrolls the rendered rows");
+    assert_eq!(app.diff_cursor, cursor, "and leaves the cursor put");
+
+    // `All files` opens the same file rendered the same way.
     enter_tab(&mut app, Tab::AllFiles);
-    app.toggle_preview();
-    assert!(app.preview_active(), "a markdown file previews in All files");
-    app.toggle_preview();
-    assert!(!app.preview_active(), "the toggle returns to source");
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+    assert!(app.rendered_active(), "a markdown file opens rendered in All files");
+    assert!(app.visible.iter().all(|row| matches!(row, Row::Rendered { .. })));
 }
 
 #[test]
-fn a_non_markdown_file_never_previews() {
+fn a_non_markdown_file_never_renders() {
     let (_repo, mut app) = markdown_app();
     app.move_cursor(1).unwrap(); // the file list is focused; move opens code.rs
     assert_eq!(app.diff_path.as_deref(), Some("code.rs"));
+    assert!(!app.rendered_active(), "a non-markdown file shows its source");
     app.toggle_preview();
-    assert!(!app.preview_active(), "the toggle is inert on a non-markdown file");
+    assert!(!app.rendered_active(), "the toggle is inert on a non-markdown file");
 }
 
 #[test]
-fn the_preview_is_read_only_and_scrolls_without_touching_the_source() {
+fn the_rendered_view_takes_no_comments_and_clears_a_selection_on_entry() {
     let (_repo, mut app) = markdown_app();
     app.focus = Focus::Diff;
+    app.toggle_preview(); // to source
+    assert!(!app.rendered_active());
     app.diff_cursor = 2;
     app.toggle_select();
     assert!(app.select_anchor.is_some());
 
     app.toggle_preview();
-    assert!(app.preview_active());
-    assert!(app.select_anchor.is_none(), "entering the preview clears a live selection");
+    assert!(app.rendered_active());
+    assert!(app.select_anchor.is_none(), "entering the rendered view clears a live selection");
 
-    // Vertical movement scrolls the preview; the source cursor waits untouched.
-    app.move_cursor(3).unwrap();
-    assert_eq!(app.preview_scroll, 3);
-    assert_eq!(app.diff_cursor, 2, "the source cursor is untouched");
-
-    // Authoring and source-view keys are inert.
+    // Authoring keys stay inert here for now, and the rows come pre-wrapped.
     app.toggle_select();
-    assert!(app.select_anchor.is_none(), "no selection in the preview");
+    assert!(app.select_anchor.is_none(), "no line selection in the rendered view");
     app.start_comment();
-    assert!(!app.composing(), "no commenting in the preview");
+    assert!(!app.composing(), "no commenting in the rendered view");
     app.toggle_wrap();
-    assert!(app.wrap, "the wrap toggle is inert in the preview");
-
-    // Over-scroll stops with the last line at the pane's bottom edge, so scrolling
-    // back responds at once and content that fits the pane does not scroll.
-    app.note_preview_max_scroll(4);
-    app.preview_scroll_by(100);
-    assert_eq!(app.preview_scroll, 4, "scroll stops at the bottom edge");
-    app.preview_scroll_by(-1);
-    assert_eq!(app.preview_scroll, 3, "no dead zone above the clamp");
-    app.note_preview_max_scroll(0);
-    app.preview_scroll_by(1);
-    assert_eq!(app.preview_scroll, 0, "content that fits the pane does not scroll");
-
-    // Returning to source restores the cursor and view state.
-    app.toggle_preview();
-    assert_eq!(app.diff_cursor, 2, "source restores its cursor");
+    assert!(app.wrap, "the wrap toggle is inert in the rendered view");
 }
 
 #[test]
-fn the_preview_choice_survives_a_refresh_and_dies_with_a_file_change() {
+fn the_rendered_choice_survives_a_refresh_and_resets_with_a_file_change() {
     let (_repo, mut app) = markdown_app();
     app.toggle_preview();
-    app.preview_scroll_by(2);
+    assert!(!app.rendered_active(), "flipped to source");
 
     app.reload().unwrap();
-    assert!(app.preview_active(), "a same-file refresh keeps the preview");
-    assert_eq!(app.preview_scroll, 2, "the preview scroll survives the refresh");
+    assert!(!app.rendered_active(), "a same-file refresh keeps the source choice");
 
     app.move_cursor(1).unwrap(); // open code.rs
-    assert!(!app.preview_active(), "another file opens in source");
     app.move_cursor(-1).unwrap(); // back to README.md
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
-    assert!(!app.preview_active(), "reopening a file starts in source");
+    assert!(app.rendered_active(), "reopening a file starts rendered");
 }
 
 #[test]
-fn a_tab_switch_restores_the_preview_choice() {
+fn a_tab_switch_restores_the_rendered_choice() {
     use herdr_reviewr::app::Tab;
-    let (_repo, mut app) = markdown_app();
+    let (repo, mut app) = markdown_app();
+    // Give the Changes tab a markdown file of its own.
+    repo.write("README.md", "# Title\n\nalpha beta gamma\n\nedited\n");
     app.toggle_preview();
-    assert!(app.preview_active());
+    assert!(!app.rendered_active(), "All files flipped to source");
 
     enter_tab(&mut app, Tab::Changes);
-    assert!(!app.preview_active(), "the Changes tab holds its own choice, not All files'");
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+    assert!(app.rendered_active(), "the Changes tab holds its own choice, not All files'");
     enter_tab(&mut app, Tab::AllFiles);
-    assert!(app.preview_active(), "the tab restores its preview choice");
+    assert!(!app.rendered_active(), "the tab restores its source choice");
 
     app.set_tab(Tab::Pr).unwrap();
     enter_tab(&mut app, Tab::AllFiles);
-    assert!(app.preview_active(), "a PR round-trip also restores it");
+    assert!(!app.rendered_active(), "a PR round-trip also restores it");
 }
 
 #[test]
@@ -4220,57 +4223,67 @@ fn the_description_row_pins_first_and_follows_refetches() {
 }
 
 #[test]
-fn the_toggle_carries_the_reading_position_block_aligned() {
+fn m_flips_between_rendered_and_source_at_the_same_block() {
     use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::Row;
+    let block_of = |app: &App| match app.visible[app.diff_cursor] {
+        Row::Rendered { src, src_end, offset, .. } => (src, src_end, offset),
+        _ => panic!("the cursor is on a rendered row"),
+    };
+
+    // All files: the rendered cursor's block lands the source cursor on its first line, and
+    // back again onto the block whose source range holds the source cursor's line.
     let doc = "# Title\n\npara one\n\n## Section two\n\npara two\n";
     let r = Repo::init();
     r.write("doc.md", doc);
     r.commit_all("init");
+    r.write("edit.md", "# Doc\n\nalpha\n\nbeta\n\ngamma\n");
+    r.commit_all("edit base");
+    r.write("edit.md", "# Doc\n\nalpha\n\ngamma\n"); // delete "beta" and its blank line
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    app.note_diff_width(80);
     app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
+    app.toggle_preview();
+    assert!(!app.rendered_active());
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(7), "source lands on the block's line");
+    assert!(app.reveal_diff);
 
-    // Entering opens at the block holding the cursor's line ("para two", source line 7).
-    // The expectation derives from the render contract, not a hardcoded layout index.
-    let theme = herdr_reviewr::theme::resolve(Some("catppuccin"));
-    let rendered = herdr_reviewr::markdown::render(
-        doc,
-        80,
-        &herdr_reviewr::highlight::Highlighter::new(theme.syntax),
-        &theme.palette,
-    );
-    let block_start =
-        rendered.meta.iter().position(|m| m.source_line == 7).expect("the block renders");
-    app.diff_cursor = 6;
+    app.diff_cursor = 4; // "## Section two" (source line 5)
     app.toggle_preview();
-    assert!(app.preview_active());
-    assert_eq!(app.preview_scroll, block_start, "the preview opens at the cursor's block");
+    assert!(app.rendered_active());
+    assert_eq!(block_of(&app), (5, 5, 1), "rendered lands on the heading's text row");
+    assert_eq!(app.visible[app.diff_cursor].text(), "Section two");
 
-    // A scrolled return maps the top visible block back to a source cursor.
-    app.preview_scroll_by(-5);
+    // A blank source line between blocks paints as the gap above the next block.
     app.toggle_preview();
-    assert!(!app.preview_active());
-    assert_eq!(app.diff_cursor, 0, "the top block (source line 1) becomes the cursor");
+    app.diff_cursor = 5; // source line 6
+    app.toggle_preview();
+    assert_eq!(app.visible[app.diff_cursor].text(), "para two");
 
-    // An unscrolled round-trip restores the exact position, even off a block start.
-    app.diff_cursor = 1; // the blank line under the title
+    // Changes: a source cursor on a deletion row takes the nearest current line below it.
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("edit.md"));
+    app.focus = Focus::Diff;
     app.toggle_preview();
+    assert!(!app.rendered_active());
+    let del = app.visible.iter().position(|row| row.marker() == '-').expect("a deletion row");
+    let below = app.visible[del..].iter().find_map(Row::new_no).unwrap();
+    app.diff_cursor = del;
     app.toggle_preview();
-    assert_eq!(app.diff_cursor, 1, "no scroll input → exact restore");
+    assert!(app.rendered_active());
+    let (src, src_end, _) = block_of(&app);
+    assert!((src..=src_end).contains(&below), "the deletion maps to the line below it");
+    assert!(app.visible[app.diff_cursor].text().contains("gamma"));
 
-    // The predicate is the gesture, not the offset: scroll away and back still maps.
-    app.diff_cursor = 1;
+    // And back: the diff cursor lands on that block's first line.
     app.toggle_preview();
-    app.preview_scroll_by(1);
-    app.preview_scroll_by(-1);
-    app.toggle_preview();
-    assert_eq!(app.diff_cursor, 0, "a scroll gesture disables the exact restore");
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(src));
 }
 
 #[test]
-fn a_degraded_markdown_file_never_previews() {
+fn a_degraded_markdown_file_never_renders() {
     use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("empty.md", "");
@@ -4278,119 +4291,85 @@ fn a_degraded_markdown_file_never_previews() {
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("empty.md"));
+    assert!(!app.rendered_active(), "an empty file shows its notice, not a render");
     app.toggle_preview();
-    assert!(!app.preview_active(), "a file showing a notice or nothing never previews");
+    assert!(!app.rendered_active(), "a file showing a notice or nothing never renders");
 }
 
 #[test]
-fn the_diff_view_previews_and_returns_to_the_exact_position() {
-    let r = Repo::init();
-    r.write("doc.md", "# Doc\n\nalpha\nbeta\ngamma\n");
-    r.commit_all("init");
-    r.write("doc.md", "# Doc\n\nalpha\ngamma\n"); // delete "beta"
-    let mut app = app_on(&r);
-    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    app.note_diff_width(80);
-    app.focus = Focus::Diff;
-
-    // The cursor on the deletion row ("beta", no new side) aligns entry by the nearest
-    // row above with a current-content line ("alpha", new-side line 3).
-    let del = app
-        .visible
-        .iter()
-        .position(|r| r.new_no().is_none() && r.old_no().is_some())
-        .expect("a deletion row");
-    let theme = herdr_reviewr::theme::resolve(Some("catppuccin"));
-    let rendered = herdr_reviewr::markdown::render(
-        "# Doc\n\nalpha\ngamma\n",
-        80,
-        &herdr_reviewr::highlight::Highlighter::new(theme.syntax),
-        &theme.palette,
-    );
-    let block = rendered.meta.iter().position(|m| m.source_line == 3).expect("the block renders");
-    app.diff_cursor = del;
-    app.diff_scroll = 1; // a non-top scroll that a return must not disturb
-    app.toggle_preview();
-    assert!(app.preview_active(), "a markdown file previews from the Changes diff");
-    assert_eq!(app.preview_scroll, block, "entry aligns to the nearest current-content block");
-
-    // Scrolling the preview and returning leaves the diff cursor and scroll exactly where
-    // they were — the Diff view treats the preview as a peek.
-    app.preview_scroll_by(1);
-    app.toggle_preview();
-    assert!(!app.preview_active(), "the toggle returns to the diff");
-    assert_eq!(app.diff_cursor, del, "the diff cursor is untouched by a preview scroll");
-    assert_eq!(app.diff_scroll, 1, "the diff scroll is untouched by a preview scroll");
-}
-
-#[test]
-fn diff_preview_entry_falls_back_to_the_top_with_no_current_line_above() {
-    let body = "same\n".repeat(20);
+fn a_fold_under_the_source_cursor_flips_to_its_first_hidden_line() {
+    use herdr_reviewr::diff::Row;
+    let body = (1..=20).fold(String::new(), |mut s, i| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "para {i}\n\n");
+        s
+    });
     let r = Repo::init();
     r.write("doc.md", &body);
     r.commit_all("init");
     r.write("doc.md", &format!("{body}tail\n")); // append past the context margin
     let mut app = app_on(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    app.note_diff_width(80);
     app.focus = Focus::Diff;
+    app.toggle_preview();
 
-    // The first visible row is a leading fold, with no current-content line at or above
-    // the cursor, so entry opens the preview at its top.
-    assert!(app.visible[0].new_no().is_none(), "a leading fold has no current-content line");
+    // The first visible row is a leading fold: its first hidden line stands in, so the
+    // rendered cursor lands at the top block, not the fold's neighbor.
+    assert!(app.visible[0].fold_anchor().is_some(), "a leading fold");
     app.diff_cursor = 0;
     app.toggle_preview();
-    assert!(app.preview_active());
-    assert_eq!(app.preview_scroll, 0, "entry with nothing above opens at the top");
+    assert!(app.rendered_active());
+    assert!(matches!(app.visible[app.diff_cursor], Row::Rendered { src: 1, .. }));
 
-    // Expanding the fold, then a preview round-trip, leaves the fold expanded — a return
-    // in the Diff view never disturbs the folds.
+    // A rendered block hidden in a collapsed fold lands on the fold; an expanded fold
+    // survives the round-trip, since the folds are the source view's own state.
     app.toggle_preview();
+    assert_eq!(app.diff_cursor, 0, "the block inside the fold lands on the fold");
     expand_fold(&mut app);
     let expanded = app.visible.len();
-    assert!(expanded > 1, "the leading fold expanded into rows");
+    assert!(expanded > 2, "the leading fold expanded into rows");
     app.toggle_preview();
     app.toggle_preview();
-    assert_eq!(app.visible.len(), expanded, "the return kept the fold expanded");
+    assert_eq!(app.visible.len(), expanded, "the round-trip kept the fold expanded");
 }
 
 #[test]
-fn a_deleted_markdown_file_never_previews_in_the_diff() {
+fn a_deleted_markdown_file_never_renders_in_the_diff() {
     let r = Repo::init();
     r.write("gone.md", "# Doc\n\nbody\n");
     r.commit_all("init");
     r.remove("gone.md");
     let mut app = app_on(&r);
     assert_eq!(app.diff_path.as_deref(), Some("gone.md"));
+    assert!(!app.rendered_active(), "a deleted file has no current content to render");
     app.toggle_preview();
-    assert!(!app.preview_active(), "a deleted file has no current content to preview");
+    assert!(!app.rendered_active());
 }
 
 #[test]
-fn toggling_preview_after_the_changeset_empties_is_inert() {
+fn toggling_after_the_changeset_empties_is_inert() {
     let r = Repo::init();
     r.write("doc.md", "# Doc\n\nbody\n");
     r.commit_all("init");
     r.write("doc.md", "# Doc\n\nbody edited\n"); // an uncommitted change puts doc.md in scope
     let mut app = app_on(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    app.note_diff_width(80);
     app.focus = Focus::Diff;
+    assert!(app.rendered_active());
 
-    // Committing the change empties the uncommitted changeset. The poll clears `visible`
-    // without routing through `set_diff`, so the file's `preview_text` is left stale.
+    // Committing the change empties the uncommitted changeset: the poll clears the pane
+    // and its render input together, so nothing stale renders or toggles.
     r.commit_all("apply");
     app.reload().unwrap();
     assert!(app.visible.is_empty(), "the changeset is empty after the commit");
-
-    // The stale render input must not make the empty pane previewable — the toggle is
-    // inert and never indexes the empty row list.
+    assert!(!app.rendered_active());
     app.toggle_preview();
-    assert!(!app.preview_active(), "an empty changeset never previews");
+    assert!(!app.rendered_active(), "an empty changeset never renders");
+    assert!(app.visible.is_empty());
 }
 
 #[test]
-fn a_scope_switch_holds_the_diff_preview() {
+fn a_scope_switch_holds_the_rendered_choice() {
     let r = Repo::init();
     r.write("doc.md", "# Doc\n\nv1\n");
     r.commit_all("init"); // on main
@@ -4403,14 +4382,14 @@ fn a_scope_switch_holds_the_diff_preview() {
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
 
     app.toggle_preview();
-    assert!(app.preview_active(), "the diff previews the markdown file");
+    assert!(!app.rendered_active(), "the diff shows the markdown source");
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"), "the same file stays open");
-    assert!(app.preview_active(), "the preview holds across a scope switch");
+    assert!(!app.rendered_active(), "the source choice holds across a scope switch");
 }
 
 #[test]
-fn each_file_tab_holds_its_own_diff_preview_choice() {
+fn each_file_tab_holds_its_own_rendered_choice() {
     use herdr_reviewr::app::Tab;
     let r = Repo::init();
     r.write("doc.md", "# Doc\n\nbody\n");
@@ -4419,20 +4398,85 @@ fn each_file_tab_holds_its_own_diff_preview_choice() {
     let mut app = app_on(&r);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
 
-    // Preview in Changes.
+    // Source in Changes.
     app.toggle_preview();
-    assert!(app.preview_active(), "the Changes diff previews");
+    assert!(!app.rendered_active(), "the Changes diff flipped to source");
 
-    // All files opens the same file with its own choice, still source.
+    // All files opens the same file with its own choice, rendered.
     enter_tab(&mut app, Tab::AllFiles);
     assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
-    assert!(!app.preview_active(), "All files holds its own choice, still source");
+    assert!(app.rendered_active(), "All files holds its own choice, rendered");
 
-    // Toggling All files on and returning to Changes finds its preview intact.
+    // Flipping All files and returning to Changes finds its source intact.
     app.toggle_preview();
-    assert!(app.preview_active(), "All files previews");
+    assert!(!app.rendered_active(), "All files flipped to source");
+    app.toggle_preview();
     enter_tab(&mut app, Tab::Changes);
-    assert!(app.preview_active(), "Changes kept its own preview choice");
+    assert!(!app.rendered_active(), "Changes kept its own source choice");
+}
+
+#[test]
+fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::diff::Row;
+    let id = |app: &App| match app.visible[app.diff_cursor] {
+        Row::Rendered { src, offset, .. } => (src, offset),
+        _ => panic!("the cursor is on a rendered row"),
+    };
+    let long = "word ".repeat(40);
+    let doc = |intro: &str| {
+        format!(
+            "# Top\n\n{intro}\n\n<details>\n<summary>More</summary>\n\nhidden body\n\n\
+             </details>\n\n{long}\n\ntail\n"
+        )
+    };
+    let r = Repo::init();
+    r.write("doc.md", &doc("intro line"));
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+    app.focus = Focus::Diff;
+    app.sync_rendered_width(60);
+
+    // The cursor rests on the long paragraph's (source line 12) second rendered line.
+    app.diff_cursor = app
+        .visible
+        .iter()
+        .position(|row| matches!(row, Row::Rendered { src: 12, offset: 1, .. }))
+        .expect("the paragraph wraps at 60 columns");
+    app.diff_scroll = app.diff_cursor - 1;
+
+    // A poll that rewrites the text above the cursor keeps it on the same line.
+    r.write("doc.md", &doc("intro line, now rewritten at length to change its own wrapping"));
+    app.reload().unwrap();
+    assert_eq!(id(&app), (12, 1), "a poll edit above keeps the cursor's line");
+    assert!(matches!(app.visible[app.diff_scroll], Row::Rendered { src: 12, offset: 0, .. }));
+
+    // A narrower pane rewraps; the line holds. A wide one folds the paragraph to one line,
+    // so the cursor takes the block's nearest surviving line.
+    app.sync_rendered_width(40);
+    assert_eq!(id(&app), (12, 1), "a resize keeps the cursor's line");
+    app.sync_rendered_width(400);
+    assert_eq!(id(&app), (12, 0), "a vanished line falls back to its block");
+
+    // A modal freezes the view under it: a resize waits for its close, then lands.
+    let frozen = app.visible.clone();
+    app.mode = Mode::List;
+    app.sync_rendered_width(40);
+    assert_eq!(app.visible, frozen, "no rebuild under a modal");
+    app.mode = Mode::Normal;
+    app.sync_rendered_width(40);
+    assert_ne!(app.visible, frozen, "the held resize lands once the modal closes");
+    app.sync_rendered_width(400);
+    assert_eq!(id(&app), (12, 0));
+
+    // Opening the `<details>` above adds rows; the cursor stays on its line.
+    let rows = app.visible.len();
+    app.toggle_details("More#0");
+    assert!(app.visible.len() > rows, "the opened body adds rows");
+    assert!(app.visible.iter().any(|row| row.text().contains("hidden body")));
+    assert_eq!(id(&app), (12, 0), "a details toggle keeps the cursor's line");
 }
 
 // --- world completions ---------------------------------------------------------
@@ -6548,29 +6592,31 @@ fn a_settled_highlight_survives_an_unrelated_refresh_and_clears_when_its_text_ch
 }
 
 #[test]
-fn a_settled_preview_highlight_follows_its_source_text() {
+fn a_settled_rendered_highlight_follows_its_text() {
     let r = Repo::init();
     r.write("doc.md", "# Title\n\nplain body words\n");
     r.commit_all("init");
     r.write("doc.md", "# Title\n\nplain body words changed\n");
     let mut app = app_on(&r);
-    app.toggle_preview();
-    let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
-    // Settle the heading word by double-click on the painted surface.
-    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x, inner.y);
-    assert_eq!(last_copy().as_deref(), Some("Title"));
+    assert!(app.rendered_active());
+    // Settle the body's first word by double-click on its rendered row (row 2: the heading,
+    // the blank between, the paragraph).
+    let (col, row) = sel_cell(&app, 2, 0);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
+    assert_eq!(last_copy().as_deref(), Some("plain"));
     assert!(app.settled_selection().is_some());
 
-    // A refresh that leaves the previewed source alone keeps the highlight; one that
-    // rewrites it blanks it — the paint is a pure render of that source
+    // A refresh that leaves the spanned text alone keeps the highlight; one that rewrites
+    // it blanks it — stale never wrong.
+    r.write("doc.md", "# Retitled\n\nplain body words changed\n");
     app.reload().unwrap();
-    assert!(app.settled_selection().is_some(), "an unchanged preview keeps the highlight");
-    r.write("doc.md", "# Title\n\nrewritten body words here\n");
+    assert!(app.settled_selection().is_some(), "an untouched rendered line keeps the highlight");
+    r.write("doc.md", "# Retitled\n\nrewritten body words here\n");
     app.reload().unwrap();
-    assert!(app.settled_selection().is_none(), "a rewritten preview blanks the highlight");
+    assert!(app.settled_selection().is_none(), "a rewritten rendered line blanks the highlight");
 }
 
 #[test]
@@ -6925,39 +6971,39 @@ fn a_gutter_gesture_lands_right_with_the_find_band_open() {
 }
 
 #[test]
-fn a_preview_drag_selects_and_copies_the_painted_text() {
+fn a_rendered_drag_selects_and_copies_through_the_read_surface() {
     use herdr_reviewr::selection::Surface;
     let r = Repo::init();
     r.write("doc.md", "# Title\n\nplain body words\n");
     r.commit_all("init");
-    r.write("doc.md", "# Title\n\nplain body words changed\n");
+    r.write("doc.md", "# Title\n\nplain **body** words changed\n");
     let mut app = app_on(&r);
-    app.toggle_preview();
-    assert!(app.preview_active());
-    let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
+    assert!(app.rendered_active());
 
-    // The rendered heading is line 0; the drag selects its painted text and copies it.
-    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
-    assert_eq!(app.text_drag().map(|d| d.surface), Some(Surface::Painted));
-    sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), inner.x + 40, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x + 40, inner.y);
-    assert_eq!(app.status, "copied 5 chars");
-    assert!(
-        last_copy().is_some_and(|t| t.contains("Title")),
-        "the painted heading text copies: {:?}",
-        last_copy()
-    );
+    // The rendered heading is row 0; a drag from its first cell selects its text through
+    // the read pane's own surface and copies it.
+    let (c0, r0) = sel_cell(&app, 0, 0);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
+    assert_eq!(app.text_drag().map(|d| d.surface), Some(Surface::Read));
+    sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c0 + 40, r0);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c0 + 40, r0);
+    assert_eq!(last_copy().as_deref(), Some("Title"), "the rendered heading copies");
 
-    // A double on the painted surface copies the word under the cell; the preview never
-    // takes a comment.
-    app.status.clear();
-    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x, inner.y);
-    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x, inner.y);
-    assert!(!app.composing(), "the preview never takes a comment");
-    assert_eq!(app.status, "copied 5 chars");
-    assert_eq!(last_copy().as_deref(), Some("Title"), "the word under the cell copies");
+    // A drag across rows copies the rendered text, emphasis markers consumed.
+    let (c2, r2) = sel_cell(&app, 2, 30);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
+    sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c2, r2);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), c2, r2);
+    assert_eq!(last_copy().as_deref(), Some("Title\n\nplain body words changed"));
+
+    // A double copies the word under the cell; the rendered view never takes a comment.
+    let (cw, rw) = sel_cell(&app, 2, 7);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), cw, rw);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), cw, rw);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), cw, rw);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), cw, rw);
+    assert!(!app.composing(), "the rendered view never takes a comment");
+    assert_eq!(last_copy().as_deref(), Some("body"), "the word under the cell copies");
 }
 
 #[test]
@@ -7715,4 +7761,290 @@ fn the_folder_dot_appears_under_a_poll_without_moving_the_cursor() {
     );
     assert_eq!(app.file_cursor, dir_row + 1, "the folder's row moved down one");
     assert!(marked(&app), "the folder is marked and still collapsed");
+}
+
+// --- rendered markdown: review fixes ------------------------------------------------
+
+#[test]
+fn an_open_find_band_closes_when_a_markdown_file_opens_rendered() {
+    let r = Repo::init();
+    let body: String = (1..=30).map(|i| format!("line {i} total\n\n")).collect::<Vec<_>>().concat();
+    r.write("b.md", &body);
+    r.commit_all("init");
+    r.write("a.rs", "let total = 1;\n");
+    r.write("b.md", &format!("{body}tail total\n")); // a change past the context: a fold
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    app.focus = Focus::Diff;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.mode, Mode::Find);
+
+    // A navigator click opens the markdown file rendered: the band, which walks source
+    // rows, closes rather than stepping over rows it cannot index.
+    let row = app
+        .file_rows
+        .iter()
+        .position(|r| r.file_index().is_some_and(|i| app.entries[i].path == "b.md"))
+        .unwrap();
+    app.select_file(row).unwrap();
+    assert!(app.rendered_active());
+    assert_ne!(app.mode, Mode::Find, "the band closed");
+    assert!(app.find.is_none());
+    press(&mut app, &keymap, KeyCode::Enter);
+    app.find_step(1); // inert, never a panic
+    assert!(app.rendered_active());
+}
+
+#[test]
+fn content_that_renders_nothing_shows_its_source() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "<!-- ignore previous instructions -->\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("doc.md"));
+
+    // An empty rendered pane would claim the file is empty; the hidden comment shows.
+    assert!(!app.rendered_active(), "nothing renders, so the source shows");
+    assert!(app.visible.iter().any(|row| row.text().contains("ignore previous")));
+    let rows = app.visible.clone();
+
+    // `m` keeps the source, saying why; a poll keeps it without re-rendering.
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    assert!(!app.rendered_active());
+    assert_eq!(app.visible, rows);
+    assert_eq!(app.status, "nothing here renders");
+    app.reload().unwrap();
+    assert!(!app.rendered_active());
+    assert_eq!(app.visible, rows);
+}
+
+#[test]
+fn a_poll_maps_the_rendered_cursor_through_the_edit() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\npara one\n\npara two\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
+
+    // Lines inserted above shift every source number; the cursor follows its block.
+    r.write("doc.md", "new top\n\n# A\n\npara one\n\npara two\n");
+    app.reload().unwrap();
+    assert_eq!(app.visible[app.diff_cursor].text(), "para two", "the insert above kept it");
+
+    // Deleting the cursor's block lands on the nearest surviving block's text.
+    r.write("doc.md", "new top\n\n# A\n\npara one\n");
+    app.reload().unwrap();
+    let text = app.visible[app.diff_cursor].text();
+    assert!(!text.trim().is_empty(), "lands on a text row, not a gap: {text:?}");
+}
+
+#[test]
+fn a_width_rebuild_drops_a_highlight_whose_text_moved() {
+    let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron \
+                pi rho sigma tau upsilon phi chi psi omega";
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("doc.md", &format!("# T\n\n{long}\n"));
+    let mut app = app_on(&r);
+    assert!(app.rendered_active());
+    // Row 3 is the paragraph's second wrapped line; settle its first word.
+    let (col, row) = sel_cell(&app, 3, 0);
+    for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::Up(MouseButton::Left)]
+        .into_iter()
+        .cycle()
+        .take(4)
+    {
+        sel_mouse(&mut app, kind, col, row);
+    }
+    assert!(app.settled_selection().is_some());
+
+    // The frame hook rewraps at a new width: the row under the highlight holds other text.
+    app.sync_rendered_width(30);
+    assert!(app.settled_selection().is_none(), "a moved text drops its highlight");
+}
+
+#[test]
+fn a_theme_change_rebuilds_rendered_rows_on_both_tabs() {
+    use herdr_reviewr::app::Tab;
+    let colors = |app: &App| -> Vec<herdr_reviewr::diff::Rgb> {
+        app.visible.iter().flat_map(|row| row.spans().iter().map(|s| s.color)).collect()
+    };
+    let r = Repo::init();
+    r.write("doc.md", "# Heading\n\nbody\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Heading\n\nbody edited\n");
+    let mut app = app_on(&r);
+    assert!(app.rendered_active());
+    let changes_before = colors(&app);
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(app.rendered_active());
+    let files_before = colors(&app);
+
+    app.set_cli_theme(Some("dracula".to_string()));
+    app.sync_rendered_width(80); // the next frame
+    assert_ne!(colors(&app), files_before, "the active tab rebuilt in the new palette");
+    app.set_tab(Tab::Changes).unwrap();
+    app.sync_rendered_width(80);
+    assert_ne!(colors(&app), changes_before, "the stashed tab rebuilt on its first frame");
+}
+
+#[test]
+fn a_source_comment_on_markdown_survives_the_view_flips() {
+    let r = Repo::init();
+    r.write("doc.md", "# Doc\n\nbody\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Doc\n\nbody edited\n");
+    let mut app = app_on(&r);
+    app.toggle_preview(); // to source
+    comment_on(&mut app, '+', "note");
+    assert_eq!(app.store.len(), 1);
+    assert!(!app.card_rows().is_empty());
+
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    app.toggle_preview();
+    assert_eq!(app.store.len(), 1, "the comment survives the flips");
+    assert!(!app.card_rows().is_empty(), "its card shows again in source");
+    assert!(!app.commented_lines().is_empty());
+}
+
+#[test]
+fn a_transient_render_nothing_poll_returns_to_rendered() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\npara one\n\npara two\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
+
+    // Mid-edit the file holds only a comment: its source shows, the choice untouched.
+    r.write("doc.md", "<!-- wip -->\n");
+    app.reload().unwrap();
+    assert!(!app.rendered_active(), "nothing renders, so the source shows");
+    assert!(app.diff_cursor < app.visible.len());
+
+    // The content comes back: rendered again, the cursor in range on a text row.
+    r.write("doc.md", "# A\n\npara one\n\npara two\n");
+    app.reload().unwrap();
+    assert!(app.rendered_active(), "content that renders shows rendered again");
+    assert!(app.diff_cursor < app.visible.len());
+    assert!(!app.visible[app.diff_cursor].text().trim().is_empty());
+}
+
+#[test]
+fn a_theme_change_and_an_edit_land_in_one_rebuild_keeping_the_cursor() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\npara one\n\npara two\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "para two").unwrap();
+    let before: Vec<_> = app.visible.iter().flat_map(|r| r.spans().to_vec()).collect();
+
+    app.set_cli_theme(Some("dracula".to_string()));
+    r.write("doc.md", "new top\n\n# A\n\npara one\n\npara two\n");
+    app.reload().unwrap();
+    assert_eq!(app.visible[app.diff_cursor].text(), "para two", "the cursor kept its block");
+    let after: Vec<_> = app.visible.iter().flat_map(|r| r.spans().to_vec()).collect();
+    assert_ne!(before, after, "the rows repainted in the new theme");
+}
+
+#[test]
+fn a_tab_switch_closes_a_find_band_the_new_view_cannot_search() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("README.md", "# Title\n\ntotal\n");
+    r.commit_all("init");
+    r.write("a.rs", "let total = 1;\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    enter_tab(&mut app, Tab::AllFiles); // visit once: README.md opens rendered
+    assert!(app.rendered_active());
+    enter_tab(&mut app, Tab::Changes);
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    app.focus = Focus::Diff;
+    open_find(&mut app, &keymap);
+    find_type(&mut app, &keymap, "total");
+    assert_eq!(app.mode, Mode::Find);
+
+    // The stash swap paints All files' rendered README without a rebuild.
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(app.rendered_active());
+    assert_ne!(app.mode, Mode::Find, "the band closed with the switch");
+    assert!(app.find.is_none());
+}
+
+#[test]
+fn a_rebuild_that_moves_the_clicked_text_breaks_the_click_chain() {
+    let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron \
+                pi rho sigma tau upsilon phi chi psi omega";
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    r.write("doc.md", &format!("# T\n\n{long}\n"));
+    let mut app = app_on(&r);
+    let (col, row) = sel_cell(&app, 3, 0);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
+
+    // The rows rewrap between the two presses: the second is a fresh first click, not a
+    // double on text the first never aimed at.
+    app.sync_rendered_width(30);
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
+    assert!(app.settled_selection().is_none(), "no word copied: the chain broke");
+}
+
+#[test]
+fn a_line_prepended_inside_a_paragraph_keeps_the_cursor_row() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\nline a\\\nline b\\\nline c\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.iter().position(|row| row.text() == "line c").unwrap();
+
+    r.write("doc.md", "# A\n\nline z\\\nline a\\\nline b\\\nline c\n");
+    app.reload().unwrap();
+    assert_eq!(app.visible[app.diff_cursor].text(), "line c", "the cursor kept its row");
+}
+
+#[test]
+fn editing_a_stale_comment_leaves_the_open_markdown_rendered() {
+    let r = Repo::init();
+    r.write("README.md", "# Title\n");
+    r.commit_all("init");
+    r.write("README.md", "# Title\n\nmore\n");
+    let mut app = app_on(&r);
+    assert!(app.rendered_active());
+    // A comment on a file that left the changeset.
+    app.store.add(herdr_reviewr::model::Comment {
+        file: "gone.rs".into(),
+        side: Side::New,
+        start: 1,
+        end: 1,
+        lines: "+x".into(),
+        text: "note".into(),
+        diff_anchored: true,
+        rev: herdr_reviewr::model::Rev::Worktree,
+    });
+    app.open_list();
+    app.start_edit();
+    assert_eq!(app.diff_path.as_deref(), Some("README.md"));
+    assert!(app.rendered_active(), "an unrelated file keeps its rendered view");
 }

@@ -128,7 +128,7 @@ pub(crate) fn snippet_row_is_comment(row: &Row, start: u32, end: u32, side: Side
             Side::New => in_span(*new_no, start, end),
             Side::Old => in_span(*old_no, start, end),
         },
-        Row::Fold { .. } => false,
+        Row::Fold { .. } | Row::Rendered { .. } => false,
     }
 }
 

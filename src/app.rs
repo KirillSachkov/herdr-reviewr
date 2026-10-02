@@ -36,6 +36,9 @@ const BASE_PROBE_DELAY: Duration = Duration::from_millis(150);
 const DEFAULT_SEARCH_PCT: u16 = 50;
 const MIN_SEARCH_PCT: u16 = 10;
 const MAX_SEARCH_PCT: u16 = 90;
+/// The wrap width rendered markdown builds at before any frame has noted the pane's — the
+/// first frame rebuilds at the real width, carrying the place.
+const DEFAULT_RENDER_WIDTH: usize = 80;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum DividerDrag {
@@ -105,14 +108,36 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
-    preview: bool,
-    preview_scroll: usize,
-    preview_scrolled: bool,
-    preview_text: String,
-    preview_expanded_details: HashSet<String>,
+    rendered: bool,
+    rendered_text: String,
+    rendered_details: HashSet<String>,
+    rendered_doc: crate::markdown::Rendered,
+    rendered_built: Option<RenderedInput>,
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
     visited: bool,
+}
+
+/// The input a file tab's rendered rows were built from — the content, the open
+/// `<details>` keys (sorted), the wrap width, and the theme — and whether that content
+/// rendered no rows at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RenderedInput {
+    text: String,
+    details: Vec<String>,
+    width: usize,
+    theme: &'static str,
+    empty: bool,
+}
+
+impl RenderedInput {
+    /// Whether `other` would build exactly these rows.
+    fn same_input(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.theme == other.theme
+            && self.details == other.details
+            && self.text == other.text
+    }
 }
 
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
@@ -564,8 +589,8 @@ pub enum FooterAction {
     CloseFind,
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
-    /// Toggle the markdown preview; the label names the destination view (`m preview`
-    /// on source, `m source` in the preview).
+    /// Flip a markdown file between rendered and source; the label names the destination
+    /// view (`m preview` on source, `m source` rendered).
     Preview,
     NavigatorPosition,
     /// Hide the navigator or show it back; the label names the direction (`z hide` / `z show`).
@@ -707,25 +732,27 @@ pub struct App {
     pub h_scroll: usize,
     /// Whether long diff lines wrap (default) or are scrolled horizontally.
     pub wrap: bool,
-    /// Whether the markdown preview is open for the active file tab's file. Both file tabs
-    /// render it; the flag is per file tab and resets on a file change.
-    /// Only the armed toggle — `preview_active()` is the honest on-screen predicate.
-    preview: bool,
-    /// Top visible rendered line of the markdown preview, clamped to the rendered length.
-    pub preview_scroll: usize,
-    /// The open markdown file's current content — the preview's render input, refreshed by
+    /// Whether the open markdown file shows rendered rather than as source. Per file tab, and
+    /// every file open resets it to rendered, so `m` flips one file and never the next. Only
+    /// the armed toggle — `rendered_active()` is the honest on-screen predicate.
+    rendered: bool,
+    /// The open markdown file's current content — the rendered rows' input, refreshed by
     /// `set_diff` and `set_file_view` so no frame rebuilds it. Empty whenever the current
-    /// content does not render as a preview: a non-markdown file, a notice, or an empty new
-    /// side (a deleted or empty file). One half of the `previewable()` signal.
-    preview_text: String,
-    /// The preview's maximum useful scroll (rendered lines minus the viewport), noted
-    /// by the renderer each frame so [`Self::preview_scroll_by`] can clamp. `usize::MAX`
-    /// until the first paint.
-    preview_max_scroll: std::cell::Cell<usize>,
-    /// Whether a scroll input moved the preview since entry — the exact-restore
-    /// predicate; a refresh clamp never sets it.
-    preview_scrolled: bool,
-    /// The diff pane's inner width, noted each paint, so the toggle's position mapping
+    /// content does not render: a non-markdown file, a notice, or an empty new side (a
+    /// deleted or empty file), so such a file always shows its source.
+    rendered_text: String,
+    /// The render behind the rendered rows: the styled lines a `Row::Rendered` indexes, and
+    /// each line's links, `<details>`, and the heading anchors. Lives here, not in the rows,
+    /// so the row model stays terminal-free.
+    rendered_doc: crate::markdown::Rendered,
+    /// What the rendered rows were built from. An unchanged poll or frame keeps the rows it
+    /// has instead of rebuilding them, a frame compares the width alone, and a changed
+    /// content maps the place through its edits. `None` forces the next build.
+    rendered_built: Option<RenderedInput>,
+    /// The rendered rows' wrap width — the read pane's code column, noted each frame by
+    /// [`Self::sync_rendered_width`]. `0` until the first frame, which builds at a default.
+    rendered_width: usize,
+    /// The diff pane's inner width, noted each paint, so the PR tab's details expansion
     /// renders at the width the pane will paint with.
     pane_width: std::cell::Cell<usize>,
     /// The link regions painted this frame — a click resolves against the painted
@@ -742,8 +769,8 @@ pub struct App {
     painted_details: std::cell::RefCell<Vec<PaintedDetails>>,
     /// Open `<details>` on the selected PR description or thread.
     pr_expanded_details: HashSet<String>,
-    /// Open `<details>` in the file-tab markdown preview. Stashed per file tab.
-    preview_expanded_details: HashSet<String>,
+    /// Open `<details>` in the file tab's rendered markdown. Stashed per file tab.
+    rendered_details: HashSet<String>,
     /// The PR read pane's maximum useful scroll, noted the same way for
     /// [`Self::pr_scroll_read`].
     pr_read_max_scroll: std::cell::Cell<usize>,
@@ -770,7 +797,7 @@ pub struct App {
     pub hover: Option<(u16, u16)>,
     /// The multi-click chain: the last mouse-down's time, cell, mapped target row, and count
     /// within the window.
-    last_click: Option<(std::time::Instant, u16, u16, usize, u8)>,
+    last_click: Option<(std::time::Instant, u16, u16, usize, u8, crate::selection::Surface)>,
     /// Whether a view-anchored gesture held the open view's reload while snapshots landed
     /// beneath it, so the gesture's end reloads it once.
     view_reload_held: bool,
@@ -857,8 +884,8 @@ pub struct App {
     /// The last theme name requested, so re-resolving the same name skips work and logging.
     requested_theme_name: Option<String>,
     cache: DiffCache,
-    /// The one-slot markdown render memo behind the PR read pane and the file tabs'
-    /// preview. Interior-mutable so the renderer can fill it from
+    /// The markdown render memo behind the PR read pane and the file tabs' rendered
+    /// rows. Interior-mutable so the renderer can fill it from
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
@@ -945,18 +972,18 @@ impl App {
             diff_scroll: 0,
             h_scroll: 0,
             wrap: true,
-            preview: false,
-            preview_scroll: 0,
-            preview_text: String::new(),
-            preview_max_scroll: std::cell::Cell::new(usize::MAX),
-            preview_scrolled: false,
+            rendered: true,
+            rendered_text: String::new(),
+            rendered_doc: crate::markdown::Rendered::default(),
+            rendered_built: None,
+            rendered_width: 0,
             pane_width: std::cell::Cell::new(0),
             painted_links: std::cell::RefCell::new(Vec::new()),
             painted_slots: std::cell::RefCell::new(Vec::new()),
             painted_anchors: std::cell::RefCell::new(Vec::new()),
             painted_details: std::cell::RefCell::new(Vec::new()),
             pr_expanded_details: HashSet::new(),
-            preview_expanded_details: HashSet::new(),
+            rendered_details: HashSet::new(),
             pr_read_max_scroll: std::cell::Cell::new(usize::MAX),
             navigator_position: crate::config::NavigatorPosition::Right,
             navigator_side_pct: DEFAULT_SIDE_PCT,
@@ -1165,11 +1192,12 @@ impl App {
                 self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
                 self.stash = std::mem::take(&mut old.stash);
                 self.wrap = old.wrap;
-                self.preview = old.preview;
-                self.preview_scroll = old.preview_scroll;
-                self.preview_scrolled = old.preview_scrolled;
-                self.preview_text = std::mem::take(&mut old.preview_text);
-                self.preview_expanded_details = std::mem::take(&mut old.preview_expanded_details);
+                self.rendered = old.rendered;
+                self.rendered_text = std::mem::take(&mut old.rendered_text);
+                self.rendered_details = std::mem::take(&mut old.rendered_details);
+                self.rendered_doc = std::mem::take(&mut old.rendered_doc);
+                self.rendered_built = old.rendered_built.take();
+                self.rendered_width = old.rendered_width;
                 self.pr_expanded_details = std::mem::take(&mut old.pr_expanded_details);
                 self.mode = old.mode.clone();
                 self.input = std::mem::take(&mut old.input);
@@ -1302,7 +1330,9 @@ impl App {
             if !self.composing() {
                 self.diff = FileDiff::empty();
                 self.diff_path = None;
+                self.rendered_text.clear();
                 self.visible.clear(); // keep `visible` mirroring `diff` so no stale rows paint
+                self.drop_read_marks();
                 self.reset_diff_view();
             }
             return Ok(());
@@ -1359,15 +1389,6 @@ impl App {
         // A content change under the pointer resets the multi-click chain — the clicked
         // row's own text counts, so a same-length edit under the pointer breaks it too — while
         // a snapshot that changed nothing on screen leaves a double-click in flight alone
-        let view_before = (self.diff_path.clone(), self.visible.len(), self.clicked_target_text());
-        // The preview's paint is a pure render of `preview_text`, so that string is the
-        // settled highlight's staleness identity there; snapshot it only when a settled
-        // `Painted` span exists to compare for.
-        let preview_before = self
-            .settled_sel
-            .as_ref()
-            .filter(|(d, _)| matches!(d.surface, crate::selection::Surface::Painted))
-            .map(|_| self.preview_text.clone());
         // Keep the cursor on the same row target across the rebuild; fall back to the open
         // file, then the first file. The toggled-directory set survives untouched.
         let anchor = self.cursor_anchor();
@@ -1399,38 +1420,20 @@ impl App {
         // describe the worktree when their query ran.
         self.refresh_search_preview();
         // The find band closes if its file lost its searchable rows or changed identity under the
-        // poll — a forced return, like the markdown preview. The current
+        // poll — a forced return. The current
         // match otherwise follows the reconciled cursor, so nothing else to do.
         if self.mode == Mode::Find && (open != self.diff_path || !self.find_available()) {
             self.close_find();
         }
-        if view_before != (self.diff_path.clone(), self.visible.len(), self.clicked_target_text()) {
-            self.last_click = None;
-            // The open view's identity changed: whatever the settled highlight spanned is
-            // gone from the screen, whichever surface it was on.
-            self.settled_sel = None;
-        }
-        // The settled highlight follows Continuity: it survives a land that left its text
-        // alone and blanks when the text under it changed — stale never wrong
-        // The `PR` surfaces land through the PR paint, and a
-        // card's text is the in-memory comment's, which no poll moves.
-        if let Some((d, text)) = &self.settled_sel {
-            use crate::selection::Surface;
+        // The read pane's marks were revalidated by its own rebuild (`rebuild_visible`). The
+        // navigator's settled highlight follows Continuity the same way: it survives a land
+        // that left its text alone and blanks when the text under it changed — stale never
+        // wrong. The `PR` surfaces land through the PR paint.
+        if let Some((d, text)) = &self.settled_sel
+            && d.surface == crate::selection::Surface::Files
+        {
             let (a, b) = d.ordered();
-            let same = match d.surface {
-                Surface::Read => crate::selection::read_text(&self.visible, a, b) == *text,
-                Surface::Files => {
-                    crate::selection::files_text(&self.file_rows, &self.entries, a.row, b.row)
-                        == *text
-                }
-                // The preview repaints whenever its source changed; the span's own painted
-                // rows are layout-side, so the source string is the comparable identity.
-                Surface::Painted if self.tab != Tab::Pr => {
-                    preview_before.as_deref() == Some(self.preview_text.as_str())
-                }
-                Surface::Painted | Surface::Card { .. } | Surface::PrNav => true,
-            };
-            if !same {
+            if crate::selection::files_text(&self.file_rows, &self.entries, a.row, b.row) != *text {
                 self.settled_sel = None;
             }
         }
@@ -1440,11 +1443,13 @@ impl App {
         self.tab_visited = true;
     }
 
-    /// The text of the visible row the multi-click chain last targeted, for the reconcile
-    /// reset above. A navigator chain compares an unrelated row here, erring toward a reset,
-    /// which only costs a fresh first click.
+    /// The text of the read-pane row the multi-click chain last targeted, for the rebuild's
+    /// revalidation. `None` for a chain on another surface, which no rebuild moves.
     fn clicked_target_text(&self) -> Option<String> {
-        let (_, _, _, target, _) = self.last_click?;
+        let (_, _, _, target, _, surface) = self.last_click?;
+        if surface != crate::selection::Surface::Read {
+            return None;
+        }
         Some(self.visible.get(target)?.text())
     }
 
@@ -1465,7 +1470,9 @@ impl App {
         let Some(entry) = self.shown_entry() else {
             self.diff = FileDiff::empty();
             self.diff_path = None;
+            self.rendered_text.clear();
             self.visible.clear();
+            self.drop_read_marks();
             self.reset_diff_view();
             return;
         };
@@ -1486,16 +1493,14 @@ impl App {
     /// Build the diff for a specific `path` regardless of whether its row is visible in the
     /// tree — so editing a comment can surface its file even from a collapsed directory.
     fn set_diff(&mut self, path: String, previous_path: Option<String>) {
-        // A different file opens with all folds collapsed and in source. `expanded_folds` is
-        // keyed by line number, so without the clear a fold in the new file whose first hidden
-        // line matches an expanded one in the old file would render pre-expanded. A same-file
-        // poll or scope switch keeps both the folds and the preview choice.
+        // A different file opens with all folds collapsed, and rendered when it is markdown.
+        // `expanded_folds` is keyed by line number, so without the clear a fold in the new file
+        // whose first hidden line matches an expanded one in the old file would render
+        // pre-expanded. A same-file poll or scope switch keeps both the folds and the
+        // rendered/source choice.
         if self.diff_path.as_deref() != Some(path.as_str()) {
             self.expanded_folds.clear();
-            self.preview = false;
-            self.preview_scroll = 0;
-            self.preview_max_scroll.set(usize::MAX);
-            self.preview_expanded_details.clear();
+            self.open_fresh();
         }
         self.diff_path = Some(path.clone());
         // Git already reported no text diff for this change — binary content, or a path whose
@@ -1510,13 +1515,13 @@ impl App {
             self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
             new
         };
-        // Hold the new side as the preview's render input, the same current content the File
-        // view previews. A non-markdown file, a notice, or a deleted file (empty new side)
-        // holds nothing, so its toggle stays inert.
+        // Hold the new side as the render input, the same current content the File view
+        // renders. A non-markdown file, a notice, or a deleted file (empty new side) holds
+        // nothing, so it shows its source and its toggle stays inert.
         if self.markdown_file() && self.diff.state == crate::diff::FileState::Normal {
-            self.preview_text = new;
+            self.rendered_text = new;
         } else {
-            self.preview_text.clear();
+            self.rendered_text.clear();
         }
         self.rebuild_visible();
         self.settle_read();
@@ -1525,24 +1530,20 @@ impl App {
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
     /// folds. The `All files` read pane. Content is scope-independent.
     fn set_file_view(&mut self, path: &str) {
-        // Opening a different file starts in source; a same-file refresh keeps the
-        // preview choice and its scroll.
+        // Opening a different file starts rendered when it is markdown; a same-file refresh
+        // keeps the rendered/source choice.
         if self.diff_path.as_deref() != Some(path) {
-            self.preview = false;
-            self.preview_scroll = 0;
-            self.preview_max_scroll.set(usize::MAX);
-            self.preview_expanded_details.clear();
+            self.open_fresh();
         }
         self.diff_path = Some(path.to_string());
         self.expanded_folds.clear(); // the File view has no folds
         let (diff, content) = self.file_view(path);
-        // Keep the preview's render input current without a per-frame rebuild. A file the
-        // source view degrades to a notice never previews, so its
-        // content is not held either.
+        // Keep the render input current without a per-frame rebuild. A file the source view
+        // degrades to a notice never renders, so its content is not held either.
         if self.markdown_file() && diff.state == crate::diff::FileState::Normal {
-            self.preview_text = content;
+            self.rendered_text = content;
         } else {
-            self.preview_text.clear();
+            self.rendered_text.clear();
         }
         self.diff = diff;
         self.rebuild_visible();
@@ -1586,22 +1587,237 @@ impl App {
         self.select_anchor = self.select_anchor.map(|a| a.min(last));
     }
 
-    /// Flatten `diff.rows` into `visible`: an expanded fold becomes its lines, a
-    /// collapsed fold stays a single marker row.
+    /// Reset the per-file view choices for a newly opened file: it opens rendered when it is
+    /// markdown, with every `<details>` collapsed. The rows of the file being left are dropped
+    /// first, so no place or mark is carried from one file to another.
+    fn open_fresh(&mut self) {
+        self.rendered = true;
+        self.rendered_details.clear();
+        self.rendered_built = None;
+        self.visible.clear();
+        self.drop_read_marks();
+    }
+
+    /// Build `visible`: the rendered rows when the open markdown file shows rendered, else
+    /// `diff.rows` flattened — an expanded fold becomes its lines, a collapsed fold stays a
+    /// single marker row. Content that renders nothing at all (an HTML comment alone) shows
+    /// its source: an empty pane would claim there is nothing there. That is a property of
+    /// this build, never a write to the reviewer's choice, so content that renders again
+    /// shows rendered again.
+    ///
+    /// The one place rows are rebuilt, so the rules every rebuild owes live here: a change of
+    /// row kind carries the cursor and scroll top by source line, the find band lives only
+    /// while it can search, and the read pane's marks are revalidated against the new rows.
     fn rebuild_visible(&mut self) {
-        self.visible = self
-            .diff
-            .rows
-            .iter()
-            .flat_map(|row| match row {
-                Row::Fold { lines }
-                    if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
-                {
-                    lines.clone()
+        let clicked_before = self.clicked_target_text();
+        let was_rendered = matches!(self.visible.first(), Some(Row::Rendered { .. }));
+        let line_at = |i: usize| -> Option<u32> {
+            if was_rendered { self.rendered_line_of(i) } else { source_line_at(&self.visible, i) }
+        };
+        let place = (!self.visible.is_empty())
+            .then(|| (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll)));
+        let rendered = self.wants_rendered() && self.rebuild_rendered();
+        if !rendered {
+            if !self.wants_rendered() {
+                self.rendered_built = None;
+            }
+            self.visible = self
+                .diff
+                .rows
+                .iter()
+                .flat_map(|row| match row {
+                    Row::Fold { lines }
+                        if row.fold_anchor().is_some_and(|a| self.expanded_folds.contains(&a)) =>
+                    {
+                        lines.clone()
+                    }
+                    _ => vec![row.clone()],
+                })
+                .collect();
+        }
+        // Rows of the other kind: the place crosses by its source line. Same-kind rendered
+        // rows reconciled by identity inside the build; same-kind source rows keep indices.
+        if let Some((from_rendered, cursor, scroll)) = place
+            && from_rendered != rendered
+        {
+            let to = |line: Option<u32>| -> Option<usize> {
+                let line = line?;
+                if rendered {
+                    rendered_row_at_line(&self.visible, line)
+                } else {
+                    Some(source_row_of(&self.visible, line))
                 }
-                _ => vec![row.clone()],
-            })
-            .collect();
+            };
+            if let Some(i) = to(cursor) {
+                self.diff_cursor = i;
+            }
+            if let Some(i) = to(scroll) {
+                self.diff_scroll = i;
+            }
+        }
+        if self.mode == Mode::Find && !self.find_available() {
+            self.close_find();
+        }
+        self.revalidate_read_marks(clicked_before.as_deref());
+    }
+
+    /// The current-content source line of rendered row `i`: its block's first line, mapped
+    /// through any edit since the rows were built.
+    fn rendered_line_of(&self, i: usize) -> Option<u32> {
+        let (src, _) = self.visible.get(i).and_then(rendered_id)?;
+        match self.rendered_built.as_ref() {
+            Some(b) if b.text != self.rendered_text => {
+                Some(LineMap::new(&b.text, &self.rendered_text).line(src))
+            }
+            _ => Some(src),
+        }
+    }
+
+    /// The read pane's marks after its rows changed: the settled highlight survives only where
+    /// the text under it is unchanged, and the multi-click chain only where its row's text is
+    /// — stale never wrong (Continuity).
+    fn revalidate_read_marks(&mut self, clicked_before: Option<&str>) {
+        if self.clicked_target_text().as_deref() != clicked_before {
+            self.last_click = None;
+        }
+        if let Some((d, copied)) = &self.settled_sel
+            && d.surface == crate::selection::Surface::Read
+        {
+            let (a, b) = d.ordered();
+            if crate::selection::read_text(&self.visible, a, b) != *copied {
+                self.settled_sel = None;
+            }
+        }
+    }
+
+    /// Drop the read pane's marks wholesale: the rows they sat on belong to a view that is
+    /// gone. A navigator mark survives, being on rows the open file never touched.
+    fn drop_read_marks(&mut self) {
+        use crate::selection::Surface;
+        if self.last_click.is_some_and(|c| c.5 == Surface::Read) {
+            self.last_click = None;
+        }
+        if self
+            .settled_sel
+            .as_ref()
+            .is_some_and(|(d, _)| matches!(d.surface, Surface::Read | Surface::Card { .. }))
+        {
+            self.settled_sel = None;
+        }
+    }
+
+    /// The input the rendered rows build from right now.
+    fn rendered_input(&self) -> RenderedInput {
+        let mut details: Vec<String> = self.rendered_details.iter().cloned().collect();
+        details.sort();
+        RenderedInput {
+            text: self.rendered_text.clone(),
+            details,
+            width: if self.rendered_width == 0 {
+                DEFAULT_RENDER_WIDTH
+            } else {
+                self.rendered_width
+            },
+            theme: self.theme_name,
+            empty: false,
+        }
+    }
+
+    /// Build the rendered rows from `rendered_text` at the noted width, theme, and open
+    /// `<details>`, unless the rows on screen already came from exactly that input. A rebuild
+    /// over rendered rows carries the cursor and the scroll top by their `(src, offset)`
+    /// identity, never by row index, mapping the line through the content's own edits when it
+    /// changed (Continuity). Returns `false`, with the rows untouched, when the content renders
+    /// nothing; that verdict is kept, so a poll of the same content never renders it again.
+    fn rebuild_rendered(&mut self) -> bool {
+        let mut input = self.rendered_input();
+        let showing = matches!(self.visible.first(), Some(Row::Rendered { .. }));
+        if let Some(b) = self.rendered_built.as_ref()
+            && b.same_input(&input)
+            && (b.empty || showing)
+        {
+            return !b.empty;
+        }
+        let doc = self.markdown_render(&self.rendered_text, input.width);
+        if doc.lines.is_empty() {
+            input.empty = true;
+            self.rendered_built = Some(input);
+            return false;
+        }
+        // The place, re-expressed in the new content's line numbers.
+        let built = self.rendered_built.as_ref().filter(|b| showing && !b.empty);
+        let place = built.map(|b| {
+            let map = (b.text != input.text).then(|| LineMap::new(&b.text, &input.text));
+            let id = |i: usize| {
+                let (src, off) = self.visible.get(i).and_then(rendered_id)?;
+                Some(match &map {
+                    Some(m) => (m.line(src), off),
+                    None => (src, off),
+                })
+            };
+            (id(self.diff_cursor), id(self.diff_scroll))
+        });
+        let text = self.palette.text;
+        let mut rows = Vec::with_capacity(doc.lines.len());
+        let mut prev: Option<(usize, u32)> = None;
+        for (i, (line, meta)) in doc.lines.iter().zip(&doc.meta).enumerate() {
+            let offset = match prev {
+                Some((src, n)) if src == meta.source_line => n + 1,
+                _ => 0,
+            };
+            prev = Some((meta.source_line, offset));
+            let spans = line
+                .spans
+                .iter()
+                .map(|s| crate::diff::Span {
+                    text: s.content.to_string(),
+                    color: span_rgb(s.style.fg.unwrap_or(text), text),
+                })
+                .collect();
+            rows.push(Row::Rendered {
+                src: meta.source_line as u32,
+                src_end: meta.source_end as u32,
+                offset,
+                spans,
+                line: i as u32,
+            });
+        }
+        self.rendered_doc = doc;
+        self.rendered_built = Some(input);
+        self.visible = rows;
+        if let Some((cursor, scroll)) = place {
+            if let Some(i) = cursor.and_then(|id| rendered_row_of(&self.visible, id)) {
+                self.diff_cursor = i;
+            }
+            if let Some(i) = scroll.and_then(|id| rendered_row_of(&self.visible, id)) {
+                self.diff_scroll = i;
+            }
+        }
+        true
+    }
+
+    /// Rebuild the rendered rows when the frame's geometry or theme moved — the frame hook
+    /// calls this with this frame's code column, before measuring row heights. A modal
+    /// freezes the open view, so a draft's anchor holds still and the rebuild waits for its
+    /// close; a view-anchored gesture holds it the same way.
+    pub fn sync_rendered_width(&mut self, width: usize) {
+        if width == 0 || !self.tab.is_file_tab() {
+            return;
+        }
+        self.rendered_width = width;
+        // Content and `<details>` only move through their own rebuilds, so a frame compares
+        // the width and the theme alone.
+        if self
+            .rendered_built
+            .as_ref()
+            .is_some_and(|b| b.width == width && b.theme == self.theme_name)
+        {
+            return;
+        }
+        if self.renders_markdown() && !self.mode.is_modal() && !self.view_anchored_gesture() {
+            self.rebuild_visible();
+            self.settle_read();
+        }
     }
 
     /// Expand the fold under the cursor, revealing its hidden lines. Expansion is
@@ -1767,7 +1983,7 @@ impl App {
     /// while wrap is on, since the renderer ignores `h_scroll` when wrapping — so the offset
     /// never silently accumulates and then jumps the view when wrap is toggled off.
     pub fn scroll_h(&mut self, delta: isize) {
-        if self.wrap || self.preview_active() {
+        if self.wrap || self.rendered_active() {
             return;
         }
         self.h_scroll = if delta >= 0 {
@@ -1779,133 +1995,111 @@ impl App {
 
     /// Toggle line wrap; reset the horizontal scroll, which only applies with wrap off.
     pub fn toggle_wrap(&mut self) {
-        if self.preview_active() {
-            return; // the wrap toggle is inert in the preview
+        if self.rendered_active() {
+            return; // rendered rows come pre-wrapped by the renderer, so the toggle is inert
         }
         self.wrap = !self.wrap;
         self.h_scroll = 0;
     }
 
-    /// Whether the open file qualifies for the markdown preview: a `.md`/`.markdown`
+    /// Whether the open file qualifies for the rendered view: a `.md`/`.markdown`
     /// extension, case-insensitive.
     #[must_use]
     fn markdown_file(&self) -> bool {
         self.diff_path.as_deref().is_some_and(is_markdown_path)
     }
 
-    /// Whether the `m` toggle would open a preview here: a file tab holding current markdown
-    /// content over a rendered pane. `preview_text` is filled only for a markdown file whose
-    /// source rows render, so a notice, a deleted file (empty new side), or a rename away from
-    /// markdown empties it and makes the toggle inert. The `visible` guard is not redundant:
-    /// an emptied changeset clears `visible` through `load_read` without routing through
-    /// `set_diff`, so a stale `preview_text` must not preview over a pane with no rows. The
-    /// footer offers `m preview` exactly when this holds.
+    /// Whether the `m` toggle acts here: a file tab holding current markdown content.
+    /// `rendered_text` is filled only for a markdown file whose source rows render, so a
+    /// notice, a deleted file (empty new side), an emptied changeset, or a rename away from
+    /// markdown empties it and makes the toggle inert. The footer offers `m` exactly when
+    /// this holds.
     #[must_use]
     fn previewable(&self) -> bool {
-        self.tab.is_file_tab() && !self.preview_text.is_empty() && !self.visible.is_empty()
+        self.tab.is_file_tab() && !self.rendered_text.is_empty()
     }
 
-    /// Whether the markdown preview is on screen: previewable and the toggle armed. A file
-    /// renamed away from markdown or degraded mid-preview empties `preview_text` and drops
-    /// back to source without disarming the toggle.
+    /// Whether the open file asks for rendered rows: the toggle armed over current markdown
+    /// content.
     #[must_use]
-    pub fn preview_active(&self) -> bool {
-        self.previewable() && self.preview
+    fn wants_rendered(&self) -> bool {
+        self.rendered && !self.rendered_text.is_empty()
     }
 
-    /// Toggle source ↔ preview on a markdown file in a file tab; inert anywhere else.
-    /// Entering clears a live selection and opens at the cursor's block; returning in the
-    /// File view maps the top visible block back to a source cursor.
+    /// Whether the current content was found to render no rows at all — its source shows,
+    /// though the toggle stays armed.
+    #[must_use]
+    fn renders_nothing(&self) -> bool {
+        self.rendered_built.as_ref().is_some_and(|b| b.empty && b.text == self.rendered_text)
+    }
+
+    /// Whether `visible` holds the rendered rows. Tab-independent, since a file tab keeps its
+    /// rows while `PR` is in front.
+    #[must_use]
+    fn renders_markdown(&self) -> bool {
+        self.wants_rendered() && !self.renders_nothing()
+    }
+
+    /// Whether the read pane shows a markdown file rendered. A file renamed away from
+    /// markdown, degraded to a notice, or rendering nothing shows its source without
+    /// disarming the toggle.
+    #[must_use]
+    pub fn rendered_active(&self) -> bool {
+        self.tab.is_file_tab() && self.renders_markdown()
+    }
+
+    /// `m`: flip the open markdown file between rendered and source, at the same block;
+    /// inert anywhere else. A live line selection clears first, its rows are about to go.
     pub fn toggle_preview(&mut self) {
-        // A file whose source view shows a notice, or a deleted file with no current
-        // content, is not previewable, so the title can never claim a preview over a
-        // notice.
         if !self.previewable() {
             return;
         }
-        if self.preview {
-            self.return_from_preview();
+        self.clear_selection();
+        if self.renders_nothing() {
+            self.status = "nothing here renders".to_string();
+        } else if self.rendered {
+            self.flip(false);
         } else {
-            self.clear_selection();
-            self.preview = true;
-            self.preview_scrolled = false;
-            self.align_preview_to_cursor();
+            self.flip(true);
         }
     }
 
-    /// Scroll the preview to the block holding the cursor's current-content line, or the
-    /// nearest block above it. Meta source lines are non-decreasing, so both lookups bisect.
-    fn align_preview_to_cursor(&mut self) {
-        self.preview_scroll = 0;
-        let width = self.pane_width.get();
-        if width == 0 || self.preview_text.is_empty() {
-            return;
+    /// Show the open file as source, when it shows rendered — the cursor on the first line
+    /// of its rendered block.
+    fn show_source(&mut self) {
+        if self.renders_markdown() {
+            self.flip(false);
         }
-        // The preview renders the current content, so a row's new-side line is its render
-        // source line. A row without one — a deletion, a fold — aligns by the nearest row
-        // above with one; none above leaves the preview at its top. A
-        // File-view row is a context row numbered by its position, so this reduces to it.
-        let Some(target) = self.visible[..=self.diff_cursor]
-            .iter()
-            .rev()
-            .find_map(Row::new_no)
-            .map(|n| n as usize)
-        else {
-            return;
-        };
-        let rendered = self.markdown_render(&self.preview_text, width);
-        let after = rendered.meta.partition_point(|m| m.source_line <= target);
-        let Some(last) = after.checked_sub(1) else {
-            return;
-        };
-        let block_line = rendered.meta[last].source_line;
-        self.preview_scroll = rendered.meta.partition_point(|m| m.source_line < block_line);
     }
 
-    /// Leave the preview. In the Diff view the cursor, scroll, and folds stay exactly as
-    /// they were left. In the File view a scrolled preview maps its top visible block back
-    /// to a source cursor; an unscrolled one leaves the source position exactly as it was
-    fn return_from_preview(&mut self) {
-        let scrolled = self.preview_scrolled;
-        self.preview = false;
-        if self.tab != Tab::AllFiles {
+    /// Flip the open file's view to `rendered`, the cursor crossing by its source line
+    /// (`rebuild_visible`): rendered → source lands on the block's first line, source →
+    /// rendered on the block holding the cursor's current line. The cursor holds its distance
+    /// from the pane's top where the new rows allow; the old highlight goes with the old rows.
+    fn flip(&mut self, rendered: bool) {
+        let above = self.diff_cursor.saturating_sub(self.diff_scroll);
+        self.rendered = rendered;
+        self.rebuild_visible();
+        if rendered && self.renders_nothing() {
+            self.status = "nothing here renders".to_string();
             return;
         }
-        let width = self.pane_width.get();
-        if !scrolled || width == 0 || self.preview_text.is_empty() {
-            return;
-        }
-        let rendered = self.markdown_render(&self.preview_text, width);
-        if rendered.meta.is_empty() || self.visible.is_empty() {
-            return;
-        }
-        // Clamp to what the frame painted: a stale scroll past the max would map to a
-        // block below the one the reader actually saw at the top of the pane.
-        let top =
-            self.preview_scroll.min(self.preview_max_scroll.get()).min(rendered.meta.len() - 1);
-        let row = rendered.meta[top].source_line.saturating_sub(1);
-        self.diff_cursor = row.min(self.visible.len() - 1);
+        self.diff_scroll = self.diff_cursor.saturating_sub(above);
+        self.settled_sel = None;
+        self.settle_read();
         self.reveal_diff = true;
     }
 
-    /// Scroll the preview by `delta` rendered lines, stopping with the last line at the
-    /// pane's bottom edge — content that fits the pane does not scroll, and over-scroll
-    /// never builds a dead zone the reader must unwind.
-    pub fn preview_scroll_by(&mut self, delta: isize) {
-        self.preview_scrolled = true;
-        self.preview_scroll =
-            clamp_scroll(self.preview_scroll, delta, self.preview_max_scroll.get());
-    }
-
-    /// The open markdown file's current content — the preview's render input.
+    /// The styled lines the rendered rows paint, indexed by a `Row::Rendered`'s `line`.
     #[must_use]
-    pub(crate) fn preview_text(&self) -> &str {
-        &self.preview_text
+    pub(crate) fn rendered_lines(&self) -> &[ratatui::text::Line<'static>] {
+        &self.rendered_doc.lines
     }
 
-    /// Note the preview's maximum useful scroll; the renderer calls this each preview frame.
-    pub fn note_preview_max_scroll(&self, max: usize) {
-        self.preview_max_scroll.set(max);
+    /// The links and `<details>` of rendered line `line`, for the paint's hit regions.
+    #[must_use]
+    pub(crate) fn rendered_meta(&self, line: u32) -> Option<&crate::markdown::LineMeta> {
+        self.rendered_doc.meta.get(line as usize)
     }
 
     /// Note the PR read pane's maximum useful scroll; the renderer calls this each frame.
@@ -1934,8 +2128,8 @@ impl App {
         self.reveal_pr_nav.replace(false)
     }
 
-    /// Note the diff pane's inner width; the renderer calls this each paint, and the
-    /// toggle's position mapping renders at this width.
+    /// Note the diff pane's inner width; the renderer calls this each paint, and the PR
+    /// tab's details expansion renders its bodies at this width.
     pub fn note_diff_width(&self, width: usize) {
         self.pane_width.set(width);
     }
@@ -1957,7 +2151,7 @@ impl App {
     }
 
     /// The recorded display-line layout of the frame on screen — empty when the last frame
-    /// painted no read-pane rows (a notice, the preview, the `PR` tab).
+    /// painted no read-pane rows (a notice, the `PR` tab).
     #[must_use]
     pub(crate) fn painted_slots(&self) -> Vec<crate::ui::Slot> {
         self.painted_slots.borrow().clone()
@@ -2008,17 +2202,26 @@ impl App {
         }
     }
 
-    /// Scroll the painted markdown surface to `slug`'s heading; a missing anchor is inert.
+    /// Bring `slug`'s heading to the top of its markdown surface: the `PR` read pane scrolls
+    /// to it, and the rendered file view moves its cursor there too — a click is the reader's
+    /// own input, so the place may move. A missing anchor is inert.
     fn jump_to_anchor(&mut self, slug: &str) {
-        let target = self.painted_anchors.borrow().iter().find(|(s, _)| s == slug).map(|(_, i)| *i);
-        let Some(idx) = target else {
-            return;
-        };
         if self.tab == Tab::Pr {
-            self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
-        } else if self.preview_active() {
-            self.preview_scrolled = true;
-            self.preview_scroll = idx.min(self.preview_max_scroll.get());
+            let target =
+                self.painted_anchors.borrow().iter().find(|(s, _)| s == slug).map(|(_, i)| *i);
+            if let Some(idx) = target {
+                self.pr_read_scroll = idx.min(self.pr_read_max_scroll.get());
+            }
+        } else if self.rendered_active() {
+            let Some(&(_, line)) = self.rendered_doc.anchors.iter().find(|(s, _)| s == slug) else {
+                return;
+            };
+            let at = |r: &Row| matches!(r, Row::Rendered { line: l, .. } if *l as usize == line);
+            if let Some(row) = self.visible.iter().position(at) {
+                self.select_anchor = None;
+                self.diff_cursor = row;
+                self.diff_scroll = row;
+            }
         }
     }
 
@@ -2031,7 +2234,7 @@ impl App {
             width,
             &self.highlighter,
             &self.palette,
-            &self.preview_expanded_details,
+            &self.rendered_details,
         )
     }
 
@@ -2064,11 +2267,7 @@ impl App {
     }
 
     fn active_expanded_details_mut(&mut self) -> &mut HashSet<String> {
-        if self.tab == Tab::Pr {
-            &mut self.pr_expanded_details
-        } else {
-            &mut self.preview_expanded_details
-        }
+        if self.tab == Tab::Pr { &mut self.pr_expanded_details } else { &mut self.rendered_details }
     }
 
     pub(crate) fn note_painted_details(
@@ -2090,11 +2289,16 @@ impl App {
             .map(|d| d.key.clone())
     }
 
-    /// Open or close the `<details>` with this [`crate::markdown::DetailsHit::key`].
+    /// Open or close the `<details>` with this [`crate::markdown::DetailsHit::key`]. In a
+    /// file tab the rendered rows rebuild around it, keeping the place.
     pub fn toggle_details(&mut self, key: &str) {
         let set = self.active_expanded_details_mut();
         if !set.remove(key) {
             set.insert(key.to_string());
+        }
+        if self.rendered_active() {
+            self.rebuild_visible();
+            self.settle_read();
         }
     }
 
@@ -2458,6 +2662,10 @@ impl App {
             self.reload()?;
         }
         self.settle_tab_entry();
+        // A find band opened over the other tab's file does not search this one's.
+        if self.mode == Mode::Find && !self.find_available() {
+            self.close_find();
+        }
         self.reveal_files = true; // pull the restored cursor back into view
         Ok(())
     }
@@ -2703,14 +2911,11 @@ impl App {
         std::mem::swap(&mut self.diff_scroll, &mut self.stash.diff_scroll);
         std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
-        std::mem::swap(&mut self.preview, &mut self.stash.preview);
-        std::mem::swap(&mut self.preview_scroll, &mut self.stash.preview_scroll);
-        std::mem::swap(&mut self.preview_text, &mut self.stash.preview_text);
-        std::mem::swap(&mut self.preview_scrolled, &mut self.stash.preview_scrolled);
-        std::mem::swap(
-            &mut self.preview_expanded_details,
-            &mut self.stash.preview_expanded_details,
-        );
+        std::mem::swap(&mut self.rendered, &mut self.stash.rendered);
+        std::mem::swap(&mut self.rendered_text, &mut self.stash.rendered_text);
+        std::mem::swap(&mut self.rendered_details, &mut self.stash.rendered_details);
+        std::mem::swap(&mut self.rendered_doc, &mut self.stash.rendered_doc);
+        std::mem::swap(&mut self.rendered_built, &mut self.stash.rendered_built);
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -2746,11 +2951,7 @@ impl App {
                 }
             }
             Focus::Diff => {
-                // The preview has no cursor: vertical movement scrolls it, and the source
-                // view's cursor waits untouched for the toggle back.
-                if self.preview_active() {
-                    self.preview_scroll_by(delta);
-                } else if !self.visible.is_empty() {
+                if !self.visible.is_empty() {
                     let mut target = step(self.diff_cursor, delta, self.visible.len());
                     if let Some(a) = self.select_anchor {
                         target = self.fold_clamped(a, target);
@@ -2813,12 +3014,12 @@ impl App {
 
     /// Move the diff cursor to the nearest hunk's first changed row past it. With no hunk left
     /// this way, the first press arms the crossing and the second one takes it, so a held key
-    /// stops at each file. Only `Changes` paints change rows — `All files` is all context, and
-    /// the preview has no cursor — so a step anywhere else has no target.
+    /// stops at each file. Only `Changes` paints change rows — `All files` is all context — so
+    /// a step anywhere else has no target.
     fn step_hunk(&mut self, forward: bool) {
         // Any step drops the standing arm. A step the other way is not the repeat it waits for.
         let armed = self.armed_cross.take().filter(|a| a.forward == forward);
-        if !self.can_traverse() || self.tab != Tab::Changes || self.preview_active() {
+        if !self.can_traverse() || self.tab != Tab::Changes {
             return;
         }
         if let Some(row) = hunk_row(&self.visible, Some(self.diff_cursor), forward) {
@@ -3061,10 +3262,6 @@ impl App {
     /// so wheeling to read context never moves what a comment will attach to. The upper
     /// bound is applied each frame by `bound_diff_scroll`.
     pub fn wheel_diff(&mut self, delta: isize) {
-        if self.preview_active() {
-            self.preview_scroll_by(delta);
-            return;
-        }
         if self.visible.is_empty() {
             return;
         }
@@ -3149,10 +3346,9 @@ impl App {
         matches!(self.gesture, crate::selection::Gesture::Gutter)
             || self.text_drag().is_some_and(|d| match d.surface {
                 Surface::Read | Surface::Card { .. } => true,
-                // The preview anchors to the open view's content; the `PR` read pane holds
-                // through the gated PR drains instead.
-                Surface::Painted => self.tab != Tab::Pr,
-                Surface::Files | Surface::PrNav => false,
+                // The painted surface is the `PR` read pane, which holds through the gated
+                // PR drains instead.
+                Surface::Painted | Surface::Files | Surface::PrNav => false,
             })
     }
 
@@ -3213,10 +3409,8 @@ impl App {
         // Skip (and drop the bit) when the gesture ended into the composer: the composing
         // freeze owns the view from here, and its own exit catches up.
         if std::mem::take(&mut self.view_reload_held) && !self.mode.is_modal() {
+            // The held reload's rebuild revalidates a just-settled span against its text.
             self.reload_open_view();
-            // The held reload rebuilds the text a just-settled span sits on, so the
-            // highlight could paint over content that was never copied — blank it
-            self.settled_sel = None;
         }
     }
 
@@ -3225,18 +3419,28 @@ impl App {
     /// `target` is the row the cell maps to in its surface, so a scroll that slides new
     /// content under the pointer breaks the chain rather than double-clicking what the user
     /// never aimed at.
-    pub fn note_click(&mut self, col: u16, row: u16, target: usize) -> u8 {
+    pub fn note_click(
+        &mut self,
+        col: u16,
+        row: u16,
+        target: usize,
+        surface: crate::selection::Surface,
+    ) -> u8 {
         const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
         let now = std::time::Instant::now();
         let count = match self.last_click {
-            Some((t, c, r, tgt, n))
-                if c == col && r == row && tgt == target && now.duration_since(t) < WINDOW =>
+            Some((t, c, r, tgt, n, sf))
+                if c == col
+                    && r == row
+                    && tgt == target
+                    && sf == surface
+                    && now.duration_since(t) < WINDOW =>
             {
                 (n + 1).min(3)
             }
             _ => 1,
         };
-        self.last_click = Some((now, col, row, target, count));
+        self.last_click = Some((now, col, row, target, count, surface));
         count
     }
 
@@ -3285,8 +3489,8 @@ impl App {
 
     /// Toggle a range-selection anchor at the current diff line.
     pub fn toggle_select(&mut self) {
-        if self.preview_active() {
-            return; // the preview is read-only
+        if self.rendered_active() {
+            return; // the rendered view takes no comments yet
         }
         if self.focus == Focus::Diff && !self.visible.is_empty() {
             self.select_anchor = match self.select_anchor {
@@ -3314,8 +3518,8 @@ impl App {
     }
 
     pub fn start_comment(&mut self) {
-        if self.preview_active() {
-            return; // the preview is read-only
+        if self.rendered_active() {
+            return; // the rendered view takes no comments yet
         }
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
@@ -3345,7 +3549,7 @@ impl App {
     fn comment_claims_edit(&self) -> bool {
         let on_the_diff = self.tab.is_file_tab()
             && self.focus == Focus::Diff
-            && !self.preview_active()
+            && !self.rendered_active()
             && self.select_anchor.is_none();
         let claimed =
             if self.mode == Mode::List { self.list_comment_editable() } else { on_the_diff };
@@ -3392,11 +3596,11 @@ impl App {
                 return None;
             }
             // The open file, never the navigator's selection: the two diverge whenever a file
-            // was opened by path rather than by row. A preview paints no numbered rows, and
-            // in `commits` the numbers belong to the picked commit, not the worktree file
-            // the editor opens, so both open the file at its start.
+            // was opened by path rather than by row. A rendered row names its block's first
+            // source line. In `commits` the numbers belong to the picked commit, not the
+            // worktree file the editor opens, so it opens the file at its start.
             let commit_diff = self.scope == Scope::Commits && self.diff.view == View::Diff;
-            (self.diff_path.clone()?, !self.preview_active() && !commit_diff)
+            (self.diff_path.clone()?, !commit_diff)
         };
         // The nearest row at or above the cursor carrying a worktree line number. A deletion
         // and a fold carry none, and a notice diff paints no rows at all, so each falls back
@@ -3414,7 +3618,6 @@ impl App {
         let from_list = self.mode == Mode::List;
         let Some(i) = self.target_comment() else { return };
         let Some(c) = self.store.get(i) else { return };
-        self.preview = false;
         let (file, side, start, end, text) =
             (c.file.clone(), c.side, c.start, c.end, c.text.clone());
         let in_view = self.comment_in_view(c);
@@ -3433,6 +3636,11 @@ impl App {
             if let Some(fi) = self.file_row_of_path(&file) {
                 self.file_cursor = fi;
             }
+        }
+        // The edit box opens over the comment's card, which only the source view paints — on
+        // the comment's own file; a stale comment leaves the open file's view alone.
+        if in_view && self.diff_path.as_deref() == Some(file.as_str()) {
+            self.show_source();
         }
         // Only move the cursor when the open diff is actually the comment's file, so a
         // stale comment (file gone from the changeset) never jumps the cursor onto a
@@ -3815,9 +4023,10 @@ impl App {
         }
     }
 
-    /// Row indices on the open diff's file that a comment anchors to.
+    /// Row indices on the open diff's file that a comment anchors to. None in the rendered
+    /// view, which marks no comments yet.
     pub fn commented_lines(&self) -> HashSet<usize> {
-        let Some(file) = self.diff_path.clone() else {
+        let Some(file) = self.diff_path.clone().filter(|_| !self.renders_markdown()) else {
             return HashSet::new();
         };
         self.visible
@@ -3835,9 +4044,12 @@ impl App {
     /// The comment-card anchors as (row, store index) pairs, store-ordered. A comment's card
     /// sits under the last visible row its line range covers, so the renderer can splice it
     /// inline (always visible) and the geometry stays anchored to a real row. The one card
-    /// map: the layout walk, the row heights, and the hit tests all read it.
+    /// map: the layout walk, the row heights, and the hit tests all read it. Empty in the
+    /// rendered view, which splices no cards yet.
     pub fn card_rows(&self) -> Vec<(usize, usize)> {
-        let Some(file) = self.diff_path.as_deref() else { return Vec::new() };
+        let Some(file) = self.diff_path.as_deref().filter(|_| !self.renders_markdown()) else {
+            return Vec::new();
+        };
         self.store
             .iter()
             .enumerate()
@@ -3865,8 +4077,8 @@ impl App {
     }
 
     pub fn delete_comment(&mut self) {
-        // Cards don't show in the preview: `d` only acts through the comments-list overlay.
-        if self.preview_active() && self.mode != Mode::List {
+        // Cards don't show rendered: `d` only acts through the comments-list overlay.
+        if self.rendered_active() && self.mode != Mode::List {
             return;
         }
         if let Some(i) = self.target_comment() {
@@ -3883,8 +4095,8 @@ impl App {
 
     /// Move the diff cursor to the next (`dir >= 0`) or previous commented line.
     pub fn jump_comment(&mut self, dir: isize) {
-        if self.preview_active() {
-            return; // no cursor and no cards in the preview
+        if self.rendered_active() {
+            return; // no cards in the rendered view
         }
         let mut idxs: Vec<usize> = self.commented_lines().into_iter().collect();
         if idxs.is_empty() {
@@ -3936,10 +4148,12 @@ impl App {
     }
 
     /// Whether the find band opens: the read pane shows searchable content rows — a file tab, not
-    /// the markdown preview, at least one content row. A notice (binary, too large) and an empty
-    /// file carry no content rows, so `any(is_content)` excludes them.
+    /// not rendered markdown, at least one content row. A notice (binary, too large) and an
+    /// empty file carry no content rows, so `any(is_content)` excludes them.
     pub fn find_available(&self) -> bool {
-        self.tab.is_file_tab() && !self.preview && self.visible.iter().any(Row::is_content)
+        self.tab.is_file_tab()
+            && !self.rendered_active()
+            && self.visible.iter().any(Row::is_content)
     }
 
     /// `ctrl+f`: open the find band over the read pane, inert with nothing to search. Opening is a
@@ -4031,6 +4245,10 @@ impl App {
     /// row below or above it, wrapping. A match in a collapsed fold expands it first, then the
     /// cursor lands on the revealed row. Inert while nothing matches.
     pub fn find_step(&mut self, delta: i32) {
+        // The band lives only where it can search; the hits index source rows.
+        if !self.find_available() {
+            return;
+        }
         let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else { return };
         if query.is_empty() {
             return;
@@ -4232,9 +4450,6 @@ impl App {
             self.rebuild_file_rows();
         }
         self.reset_diff_view();
-        // A same-file pick must land on the hit line in source, not behind an open
-        // markdown preview (`set_file_view` keeps the choice for a same-path open).
-        self.preview = false;
         self.set_file_view(&path);
         if let Some(fi) = self.file_row_of_path(&path) {
             self.file_cursor = fi;
@@ -4242,6 +4457,8 @@ impl App {
         }
         self.focus = Focus::Diff;
         if let Some(line) = line {
+            // A code hit names a source line, so a markdown file lands on it in source.
+            self.show_source();
             let last = self.visible.len().saturating_sub(1);
             self.diff_cursor = (line.saturating_sub(1) as usize).min(last);
         }
@@ -4366,9 +4583,9 @@ impl App {
         // Whether the diff-jump is already the primary, so the `go` band doesn't repeat the toggle.
         let mut pane_is_primary = false;
 
-        if self.preview_active() && self.focus == Focus::Diff {
-            // The read-only preview: the way back to the commentable source leads, and
-            // no comment key is offered; the shared tail below adds the
+        if self.rendered_active() && self.focus == Focus::Diff {
+            // The rendered view: the way to the commentable source leads, and no comment
+            // key is offered; the shared tail below adds the
             // scope, send, and band actions. With the file list focused, the tree's own
             // actions apply instead.
             out.push((A::Preview, Primary));
@@ -4426,8 +4643,8 @@ impl App {
         } else {
             out.push((A::Comment, Primary));
             out.push((A::Select, Do));
-            // On a markdown file's source line that previews, surface the way in —
-            // otherwise the rendered view is undiscoverable. A deleted
+            // On a markdown file's source line, surface the way back to the rendered
+            // view. A deleted
             // file, holding no current content, offers nothing.
             if self.previewable() {
                 out.push((A::Preview, Do));
@@ -4503,12 +4720,11 @@ impl App {
         out.push((A::Quit, Go));
 
         // The `move` band: the cursor-movement pairs, shown only when there is a changeset to
-        // traverse. The hunk step follows `step_hunk`'s own reach — the `Changes` diff only, never a
-        // preview — and drops while a crossing is armed, since the armed primary already owns that
-        // key.
+        // traverse. The hunk step follows `step_hunk`'s own reach — the `Changes` diff only — and
+        // drops while a crossing is armed, since the armed primary already owns that key.
         if !self.file_rows.is_empty() {
             out.push((A::MoveLine, Move));
-            if self.tab == Tab::Changes && !self.preview_active() && self.armed_cross().is_none() {
+            if self.tab == Tab::Changes && self.armed_cross().is_none() {
                 out.push((A::MoveHunk, Move));
             }
             out.push((A::MoveFile, Move));
@@ -5099,6 +5315,152 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// A rendered row's identity across rebuilds: its block's first source line and its index
+/// within that block. `None` for every other row.
+fn rendered_id(row: &Row) -> Option<(u32, u32)> {
+    match row {
+        Row::Rendered { src, offset, .. } => Some((*src, *offset)),
+        _ => None,
+    }
+}
+
+/// The rendered row `id` reconciles onto (Continuity): the same `(src, offset)`, else the
+/// same block at its nearest line. A line inside a block (a line prepended to its paragraph)
+/// keeps its row there: the offset grows by the line's distance from the block start,
+/// clamped to the block. Else the lead row ([`block_lead`]) of the block starting nearest
+/// it. `None` only over no rows, which the caller's clamp settles.
+fn rendered_row_of(rows: &[Row], (src, offset): (u32, u32)) -> Option<usize> {
+    let block: Vec<(usize, u32)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| match r {
+            Row::Rendered { src: s, offset: o, .. } if *s == src => Some((i, *o)),
+            _ => None,
+        })
+        .collect();
+    if let Some(&(i, _)) = block.iter().find(|&&(_, o)| o == offset).or_else(|| block.last()) {
+        return Some(i);
+    }
+    let starts = rows.iter().enumerate().filter_map(|(i, r)| match r {
+        Row::Rendered { src: s, src_end, offset: 0, .. } => Some((i, *s, *src_end)),
+        _ => None,
+    });
+    let mut nearest: Option<(usize, u32)> = None;
+    for (i, s, end) in starts {
+        if (s..=end).contains(&src) {
+            let want = offset.saturating_add(src - s) as usize;
+            let len = rows[i..]
+                .iter()
+                .take_while(|r| rendered_id(r).is_some_and(|(b, _)| b == s))
+                .count();
+            return Some(i + want.min(len - 1));
+        }
+        let d = s.abs_diff(src);
+        if nearest.is_none_or(|(_, best)| d < best) {
+            nearest = Some((i, d));
+        }
+    }
+    nearest.map(|(i, _)| block_lead(rows, i))
+}
+
+/// The current-content line source row `i` stands for: its own, else — a deletion or a fold
+/// names none — a fold's first hidden line, the nearest line below, then the nearest above.
+fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
+    let line_of = |r: &Row| match r {
+        Row::Fold { lines } => lines.first().and_then(Row::new_no),
+        _ => r.new_no(),
+    };
+    let at = i.min(rows.len());
+    rows[at..].iter().find_map(line_of).or_else(|| rows[..at].iter().rev().find_map(line_of))
+}
+
+/// The rendered row source line `line` lands on: the lead row of the block whose source range
+/// holds it, else of the first block below it — a blank source line between blocks paints as
+/// the gap above the next one — else the last row.
+fn rendered_row_at_line(rows: &[Row], line: u32) -> Option<usize> {
+    let range = |r: &Row| match r {
+        Row::Rendered { src, src_end, .. } => Some((*src, *src_end)),
+        _ => None,
+    };
+    let start = rows
+        .iter()
+        .position(|r| range(r).is_some_and(|(s, e)| (s..=e).contains(&line)))
+        .or_else(|| rows.iter().position(|r| range(r).is_some_and(|(s, _)| s > line)))
+        .or_else(|| rows.len().checked_sub(1))?;
+    Some(block_lead(rows, start))
+}
+
+/// The lead row of the rendered block holding row `i`: its first line with text, else its
+/// first line. A block's leading rows are the blank gap the renderer sets above it, so the
+/// lead is where the block reads as starting — where a flip lands and the gutter numbers it.
+fn block_lead(rows: &[Row], i: usize) -> usize {
+    let Some((src, offset)) = rows.get(i).and_then(rendered_id) else { return i };
+    let start = i.saturating_sub(offset as usize);
+    let texted = rows[start..]
+        .iter()
+        .take_while(|r| rendered_id(r).is_some_and(|(s, _)| s == src))
+        .position(|r| !r.text().trim().is_empty());
+    start + texted.unwrap_or(0)
+}
+
+/// Whether row `i` is a rendered block's lead row ([`block_lead`]), the one whose gutter
+/// carries the block's source line number.
+pub(crate) fn is_rendered_lead(rows: &[Row], i: usize) -> bool {
+    matches!(rows.get(i), Some(Row::Rendered { .. })) && block_lead(rows, i) == i
+}
+
+/// The source row a rendered block starting on line `src` lands on: the row numbered `src`,
+/// else the collapsed fold hiding it, else the first row numbered past it, else the last row.
+fn source_row_of(rows: &[Row], src: u32) -> usize {
+    let holds = |r: &Row| match r {
+        Row::Fold { lines } => lines.iter().any(|l| l.new_no() == Some(src)),
+        _ => r.new_no() == Some(src),
+    };
+    rows.iter()
+        .position(holds)
+        .or_else(|| rows.iter().position(|r| r.new_no().is_some_and(|n| n > src)))
+        .unwrap_or(rows.len().saturating_sub(1))
+}
+
+/// Old → new source line numbers across one edit of a file's content: an unchanged line maps
+/// to where it moved, and a line inside a changed region to the nearest surviving line — its
+/// counterpart in a rewrite, the line after it in a deletion.
+struct LineMap {
+    ops: Vec<similar::DiffOp>,
+    new_len: usize,
+}
+
+impl LineMap {
+    fn new(old: &str, new: &str) -> Self {
+        let ops = similar::TextDiff::from_lines(old, new).ops().to_vec();
+        Self { ops, new_len: new.lines().count() }
+    }
+
+    /// Map 1-based old line `line` to its 1-based new line.
+    fn line(&self, line: u32) -> u32 {
+        let i = line.saturating_sub(1) as usize;
+        let mapped = self.ops.iter().find_map(|op| {
+            let (tag, old, new) = op.as_tag_tuple();
+            old.contains(&i).then(|| match tag {
+                similar::DiffTag::Equal => new.start + (i - old.start),
+                _ => new.start + (i - old.start).min(new.len().saturating_sub(1)),
+            })
+        });
+        let mapped = mapped.unwrap_or(self.new_len).min(self.new_len.saturating_sub(1));
+        mapped as u32 + 1
+    }
+}
+
+/// A rendered span's color as the row model's RGB: a true color passes through, and any
+/// other (a named or indexed color the theme never paints markdown with) reads as `text`.
+fn span_rgb(color: ratatui::style::Color, text: ratatui::style::Color) -> crate::diff::Rgb {
+    use ratatui::style::Color;
+    match (color, text) {
+        (Color::Rgb(r, g, b), _) | (_, Color::Rgb(r, g, b)) => (r, g, b),
+        _ => (0xff, 0xff, 0xff),
+    }
+}
+
 fn line_in(c: &Comment, row: &Row) -> bool {
     let no = match c.side {
         Side::New => row.new_no(),
@@ -5177,19 +5539,42 @@ mod tests {
     }
 
     #[test]
-    fn config_recovery_carries_an_open_preview() {
+    fn config_recovery_carries_the_rendered_choice_and_open_details() {
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
         old.mode = Mode::List;
-        old.preview = true;
-        old.preview_scroll = 7;
-        old.preview_text = "# doc".to_string();
+        old.rendered = false; // flipped to source, away from the default
+        old.rendered_text = "# doc".to_string();
+        old.rendered_details.insert("Details#0".to_string());
 
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
 
-        assert!(recovered.preview, "the preview choice survives config recovery");
-        assert_eq!(recovered.preview_scroll, 7);
-        assert_eq!(recovered.preview_text(), "# doc");
+        assert!(!recovered.rendered, "the source choice survives config recovery");
+        assert_eq!(recovered.rendered_text, "# doc");
+        assert!(recovered.rendered_details.contains("Details#0"), "open details survive");
+    }
+
+    #[test]
+    fn config_recovery_to_another_theme_repaints_rendered_rows() {
+        // A comments list open over a rendered file, then a broken config fixed with
+        // another theme: the carried rows were built in the old palette.
+        let colors = |a: &App| -> Vec<crate::diff::Rgb> {
+            a.visible.iter().flat_map(|r| r.spans().iter().map(|s| s.color)).collect()
+        };
+        let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
+        old.rendered_text = "# Heading\n\nbody\n".into();
+        old.rebuild_visible();
+        old.mode = Mode::List;
+        let before = colors(&old);
+
+        let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
+        recovered.set_cli_theme(Some("dracula".to_string()));
+        recovered.carry_authored_state_from(&mut old);
+        assert_eq!(colors(&recovered), before, "the list freezes the view under it");
+        recovered.mode = Mode::Normal;
+        recovered.sync_rendered_width(80); // the next frame
+        assert!(matches!(recovered.visible.first(), Some(crate::diff::Row::Rendered { .. })));
+        assert_ne!(colors(&recovered), before, "the rows repaint in the recovered theme");
     }
 
     #[test]
@@ -5528,12 +5913,15 @@ mod tests {
                 target("src/lib.rs", 1),
             ),
             (
-                "read pane, a markdown preview",
+                "read pane, rendered markdown",
                 Box::new(|a: &mut App| {
-                    a.preview_text = "# heading".into();
-                    a.preview = true;
+                    a.rendered_text = "intro\n\n# heading\n".into();
+                    a.rendered = true;
+                    a.rebuild_visible();
+                    a.diff_cursor = a.visible.len() - 1;
                 }),
-                target("src/lib.rs", 1),
+                // The rendered cursor names its block's first source line.
+                target("src/lib.rs", 3),
             ),
             ("read pane, no file open", Box::new(|a: &mut App| a.diff_path = None), None),
             (
@@ -5638,9 +6026,9 @@ mod tests {
     }
 
     #[test]
-    fn a_preview_over_a_commented_line_opens_the_file() {
-        // Cards are not painted in a preview, so nothing on screen claims the key and the
-        // previewed file wins it, even with the source cursor on a comment
+    fn rendered_markdown_over_a_commented_line_opens_the_file() {
+        // Cards are not painted rendered, so nothing on screen claims the key and the
+        // file wins it, even with the cursor on a commented line
         // The table above cannot assert this: its footer expectation
         // is derived from `comment_claims_edit`, so only an outcome catches a wrong predicate.
         use super::EditTarget;
@@ -5648,23 +6036,24 @@ mod tests {
         app.store.add(crate::model::Comment {
             file: "src/lib.rs".into(),
             side: Side::New,
-            start: 10,
-            end: 10,
+            start: 1,
+            end: 1,
             lines: "+x".into(),
             text: "note".into(),
             diff_anchored: true,
             rev: crate::model::Rev::Worktree,
         });
+        app.rendered_text = "# heading".into();
+        app.rendered = true;
+        app.rebuild_visible();
         app.diff_cursor = 0;
-        app.preview_text = "# heading".into();
-        app.preview = true;
 
         app.start_edit();
         assert!(!app.composing(), "an invisible card does not claim the key");
         assert_eq!(
             app.editor_request,
             Some(EditTarget { path: "src/lib.rs".into(), line: 1 }),
-            "the previewed file opens at its start"
+            "the file opens at the rendered cursor's line"
         );
     }
 
