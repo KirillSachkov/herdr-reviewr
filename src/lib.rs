@@ -243,11 +243,11 @@ fn run_editor(
         Ok(command) => command,
         // Two causes, and the second would otherwise be told to set what it set.
         Err(editor::NoEditor::Unset) => {
-            app.status = "set `editor` in the plugin config, or $EDITOR".into();
+            app.status = "no editor: set `editor` in the config, or $EDITOR".into();
             return Ok(());
         }
         Err(editor::NoEditor::NamesNoProgram) => {
-            app.status = "the editor setting names no program".into();
+            app.status = "`editor` names no program".into();
             return Ok(());
         }
     };

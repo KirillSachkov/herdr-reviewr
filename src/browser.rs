@@ -21,9 +21,9 @@ const OPENERS: &[&str] = &["open", "xdg-open"];
 pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
     let (tool, args, mut command) = if let Some(template) = configured {
         let (program, args) =
-            opener_argv(template, url).context("the `url_opener` setting names no program")?;
+            opener_argv(template, url).context("`url_opener` names no program")?;
         let command = crate::proc::user_command(&program)
-            .with_context(|| format!("URL opener {program:?} was not found"))?;
+            .with_context(|| format!("not found: {program} (`url_opener`)"))?;
         (program, args, command)
     } else {
         let tool = OPENERS

@@ -42,14 +42,18 @@ pub fn render(frame: &mut Frame, app: &App) {
         if app.confirming_quit {
             // The blocked screen reads the default bindings, as its key handling does.
             let key = crate::keymap::default_keymap().hint(crate::keymap::Action::QuitDiscard);
-            let n = app.store.len();
-            let (dropped, them) =
-                (crate::export::counted_comments(n), if n == 1 { "it" } else { "them" });
-            let _ = write!(
-                message,
-                "\n\nPress {} to quit and drop {dropped}. Fixing the file keeps {them}.",
-                key.label()
-            );
+            let (n, key) = (app.store.len(), key.label());
+            let _ = if n == 1 {
+                write!(
+                    message,
+                    "\n\n1 unsent comment comes back once the config is fixed. Press {key} to quit and lose it."
+                )
+            } else {
+                write!(
+                    message,
+                    "\n\n{n} unsent comments come back once the config is fixed. Press {key} to quit and lose them."
+                )
+            };
         }
         frame.render_widget(
             Paragraph::new(message).wrap(ratatui::widgets::Wrap { trim: false }),
@@ -1871,16 +1875,16 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         let gone = app.commits_gone_message();
         let msg = match app.tab {
             Tab::AllFiles => match app.diff.state {
-                FileState::Binary => "binary — no line comments",
-                FileState::TooLarge => "file too large",
+                FileState::Binary => "binary file · no line comments",
+                FileState::TooLarge => "file too large to show",
                 FileState::Normal if app.diff_path.is_some() => "empty file",
                 FileState::Normal => "select a file to read",
             },
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
             _ => match app.diff.state {
-                FileState::Binary => "binary — no line comments",
-                FileState::TooLarge => "file too large to diff",
+                FileState::Binary => "binary file · no line comments",
+                FileState::TooLarge => "file too large to show",
                 FileState::Normal => "no diff",
             },
         };
@@ -2141,7 +2145,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     }
     if let Row::Fold { .. } = row {
         let label = if cursor {
-            format!("  ⋯  {} unmodified lines — {expand_hint} expand", row.hidden())
+            format!("  ⋯  {} unmodified lines · {expand_hint} to expand", row.hidden())
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };
@@ -2549,7 +2553,7 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     // The query slice is bounded to `query_w` cells, so a long tail never pushes the count off
     // the right edge.
     let query_w = width.saturating_sub(label.width() + count_w + 1).max(1);
-    let (query_spans, caret_cell_col) = input_line(&f.query, f.caret, query_w, "find in file…", p);
+    let (query_spans, caret_cell_col) = input_line(&f.query, f.caret, query_w, "Find in file…", p);
 
     let mut spans = vec![Span::styled(label, Style::default().fg(p.dim0))];
     spans.extend(query_spans);
@@ -3400,7 +3404,7 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
     // One cell of right margin keeps the scrolled query off the popup's border.
     let avail = (inner.width as usize).saturating_sub(prefix.width() + 1);
     let (filter_spans, caret_cell_col) =
-        input_line(&bp.query, bp.caret, avail, "filter or type a revision", p);
+        input_line(&bp.query, bp.caret, avail, "Filter or type a revision…", p);
     let mut filter = Line::from(filter_spans);
     filter.spans.insert(0, Span::styled(prefix, text_style(p)));
     frame.render_widget(Paragraph::new(filter), Rect { height: 1, ..inner });
@@ -3961,8 +3965,8 @@ fn render_search_preview(
         return;
     };
     let notice = match pv.diff.state {
-        FileState::Binary => Some("binary — no line comments"),
-        FileState::TooLarge => Some("file too large"),
+        FileState::Binary => Some("binary file · no line comments"),
+        FileState::TooLarge => Some("file too large to show"),
         FileState::Normal if pv.diff.rows.is_empty() => Some("no preview"),
         FileState::Normal => None,
     };

@@ -1336,7 +1336,7 @@ fn a_binary_file_shows_the_no_line_comments_message() {
     app.select_file(idx).unwrap();
 
     let out = render(&app);
-    assert!(out.contains("binary — no line comments"), "binary diff message shown:\n{out}");
+    assert!(out.contains("binary file · no line comments"), "binary diff message shown:\n{out}");
 }
 
 #[test]
@@ -4638,5 +4638,11 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
 
     app.set_config_error("config: invalid value for `theme`".to_string());
     let out = render(&app);
-    assert!(out.contains("Press Q to quit and drop 1 comment. Fixing the file keeps it."), "{out}");
+    let flat = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains(
+            "1 unsent comment comes back once the config is fixed. Press Q to quit and lose it."
+        ),
+        "{out}"
+    );
 }
