@@ -161,32 +161,25 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "added 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
-    // An agent mid-turn or at a prompt takes no send: a paste there lands on whatever is on
-    // screen and never becomes its next message. The state is read at the send, so a picker
-    // row that went stale is caught too, and every comment stays.
+    // An agent at a prompt takes no send: the prompt owns the screen, so the paste would land in
+    // it. The state is read at the send, so a picker row that went stale is caught too, and every
+    // comment stays.
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
     write_comment(&mut app, "two");
-    for (status, line) in [
-        ("working", "codex is working — comments kept"),
-        ("blocked", "codex is blocked — comments kept"),
-    ] {
-        press(&mut app, KeyCode::Char('s'), area, &keymap);
-        press(&mut app, KeyCode::Char('2'), area, &keymap);
-        fs::write(
-            fake_dir.join("agents.json"),
-            TWO_AGENTS.replace("\"working\"", &format!("\"{status}\"")),
-        )
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    press(&mut app, KeyCode::Char('2'), area, &keymap);
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS.replace("\"working\"", "\"blocked\""))
         .unwrap();
-        let sends = log(&fake_dir).matches("pane send-text w8:p2").count();
-        press(&mut app, KeyCode::Enter, area, &keymap);
-        assert_eq!(app.mode, Mode::Normal, "{status}");
-        assert_eq!(app.store.len(), 1, "a busy agent keeps every comment: {status}");
-        assert_eq!(app.status, line);
-        assert_eq!(log(&fake_dir).matches("pane send-text w8:p2").count(), sends, "{status}");
-    }
+    let sends = log(&fake_dir).matches("pane send-text w8:p2").count();
+    press(&mut app, KeyCode::Enter, area, &keymap);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.store.len(), 1, "an agent at a prompt keeps every comment");
+    assert_eq!(app.status, "codex is blocked — comments kept");
+    assert_eq!(log(&fake_dir).matches("pane send-text w8:p2").count(), sends);
 
-    // `enter` sends to the digit-selected agent once it waits for input, and consumes the set.
-    fs::write(fake_dir.join("agents.json"), TWO_AGENTS.replace("\"working\"", "\"idle\"")).unwrap();
+    // `enter` sends to the digit-selected agent mid-turn, as a review into a running agent
+    // always has: the paste waits in its input. It consumes the set.
+    fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     press(&mut app, KeyCode::Char('2'), area, &keymap);
     press(&mut app, KeyCode::Enter, area, &keymap);
@@ -261,13 +254,13 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     // to the log, so the sentence still fits a 40-column footer.
     assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
 
-    // The sole agent is refused the same way while it works: `send_target` and the send each
-    // read the list, and the send's read decides.
+    // The sole agent is refused the same way at a prompt: `send_target` and the send each read
+    // the list, and the send's read decides.
     fail_on_nothing(&fake_dir);
-    fs::write(fake_dir.join("agents.json"), ONE_AGENT.replace("\"idle\"", "\"working\"")).unwrap();
+    fs::write(fake_dir.join("agents.json"), ONE_AGENT.replace("\"idle\"", "\"blocked\"")).unwrap();
     press(&mut app, KeyCode::Char('s'), area, &keymap);
-    assert_eq!(app.store.len(), 1, "a busy sole agent keeps every comment");
-    assert_eq!(app.status, "claude is working — comments kept");
+    assert_eq!(app.store.len(), 1, "a sole agent at a prompt keeps every comment");
+    assert_eq!(app.status, "claude is blocked — comments kept");
 
     // A chosen agent gone from the list by the time `enter` lands takes nothing.
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();

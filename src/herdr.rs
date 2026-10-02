@@ -405,7 +405,7 @@ fn candidates<'a>(
 /// the cause.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The agent is mid-turn or at a prompt, by herdr's label for the state.
+    /// The agent is at a prompt, by herdr's label for the state.
     Busy(String),
     /// herdr could not say what the agent is doing.
     Unanswered,
@@ -425,18 +425,17 @@ impl std::error::Error for Refusal {}
 /// Whether an agent pane can take a send right now.
 #[derive(Debug, PartialEq, Eq)]
 enum Readiness {
-    /// The agent waits for input.
+    /// The agent's input takes the paste.
     Ready,
-    /// The agent is mid-turn or at a prompt. Holds herdr's label for the state, so the
+    /// The agent is at a prompt. Holds herdr's label for the state, so the
     /// refusal names it the way the picker row does.
     Busy(String),
     /// The pane is no longer an agent herdr lists.
     Gone,
 }
 
-/// Refuse a send unless the pane's agent waits for input, read from a fresh `agent list` at
-/// the moment of sending: a paste into an agent mid-turn or at a prompt lands on whatever is on
-/// screen and never becomes its next message. The read and the send are two herdr calls, so an
+/// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of
+/// sending: the prompt owns the screen, so the paste would land in it and never reach the input. The read and the send are two herdr calls, so an
 /// agent can still start a turn in between. herdr offers no atomic send-if-idle.
 pub fn ensure_ready(pane: &str) -> Result<()> {
     let agents = match agent_list() {
@@ -453,13 +452,15 @@ pub fn ensure_ready(pane: &str) -> Result<()> {
     }
 }
 
-/// Only an agent that rests waits for input: `idle` and `done`. Every other state is mid-turn,
-/// at a prompt, or one herdr cannot read, and turn tracking already treats it as not resting.
+/// Only an agent at a prompt refuses: a permission or confirm prompt owns the screen, so the
+/// paste lands in it rather than in the input. A working agent takes typing mid-turn, and the
+/// paste waits in its input for the reviewer to submit, which is how a review reaches a running
+/// agent.
 fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
     match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
         None => Readiness::Gone,
-        Some(agent) if matches!(agent.status(), Status::Idle | Status::Done) => Readiness::Ready,
-        Some(agent) => Readiness::Busy(agent.row_state()),
+        Some(agent) if agent.status() == Status::Blocked => Readiness::Busy(agent.row_state()),
+        Some(_) => Readiness::Ready,
     }
 }
 
@@ -540,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn a_send_goes_only_to_an_agent_waiting_for_input() {
+    fn a_send_refuses_only_an_agent_at_a_prompt() {
         use super::Readiness::{Busy, Gone, Ready};
         let at = |status: &str| AgentPane {
             agent_status: status.into(),
@@ -550,12 +551,12 @@ mod tests {
         for (status, want) in [
             ("idle", Ready),
             ("done", Ready),
-            // `unknown` is mid-turn to turn tracking, so it takes no send either.
-            ("unknown", Busy("unknown".into())),
-            ("working", Busy("working".into())),
+            // A working agent takes typing mid-turn: the paste waits in its input.
+            ("working", Ready),
+            ("unknown", Ready),
+            ("compacting", Ready),
+            // A prompt owns the screen, so the paste would land in it.
             ("blocked", Busy("blocked".into())),
-            // A state herdr adds later is busy, named by herdr's own label.
-            ("compacting", Busy("Compacting".into())),
         ] {
             assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");
         }

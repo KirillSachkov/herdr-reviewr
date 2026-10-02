@@ -148,7 +148,7 @@ impl ExportTarget for Agent {
         }
     }
 
-    /// Only an agent waiting for input takes the send ([`herdr::ensure_ready`]). The state is
+    /// An agent at a prompt refuses the send ([`herdr::ensure_ready`]). The state is
     /// read here, at the moment of sending, because the picker's rows can be minutes old.
     fn export(&self, text: &str) -> Result<()> {
         herdr::ensure_ready(&self.pane)?;
