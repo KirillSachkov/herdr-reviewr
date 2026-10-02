@@ -21,7 +21,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
-use crate::diff::{FileDiff, FileState, RenderedKind, Row};
+use crate::diff::{FileDiff, FileState, MarkerKind, RenderedKind, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
 use crate::git;
@@ -294,12 +294,16 @@ pub fn hit_diff(
 /// The comment whose card the painted frame shows at `(col, row)`, if any.
 #[must_use]
 pub fn card_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    let inner = read_inner_rect(area, app);
-    if !contains(inner, col, row) {
+    card_slot_at(&read_pane(area, app), app, col, row).map(|(comment, _)| comment)
+}
+
+/// The painted card line under `(col, row)` in `pane`: its comment and body line.
+fn card_slot_at(pane: &ReadPane, app: &App, col: u16, row: u16) -> Option<(usize, usize)> {
+    if !contains(pane.inner, col, row) {
         return None;
     }
-    match app.painted_slots().get((row - inner.y) as usize)? {
-        Slot::Card { comment, .. } => Some(*comment),
+    match *app.painted_slots().get((row - pane.inner.y) as usize)? {
+        Slot::Card { comment, line } => Some((comment, line)),
         _ => None,
     }
 }
@@ -839,13 +843,7 @@ pub fn card_point_at(
     row: u16,
 ) -> Option<(usize, crate::selection::Point)> {
     let pane = read_pane(area, app);
-    if !contains(pane.inner, col, row) {
-        return None;
-    }
-    let slots = app.painted_slots();
-    let Slot::Card { comment, line } = *slots.get((row - pane.inner.y) as usize)? else {
-        return None;
-    };
+    let (comment, line) = card_slot_at(&pane, app, col, row)?;
     let point = card_point(app, &pane, comment, line, col)?;
     Some((comment, point))
 }
@@ -1691,7 +1689,7 @@ fn file_row_item(
         // Dim the parent directories the same way, under the match highlight on the runs the
         // engine reported.
         let basename_at = shown.rfind('/').map_or(0, |i| i + 1);
-        spans.extend(emphasized_spans(&shown, &shown_spans, p.match_hl, |byte| {
+        spans.extend(emphasized_spans(&shown, &shown_spans, search_hl(p), |byte| {
             if byte < basename_at { Style::default().fg(p.dim2) } else { base_style }
         }));
     }
@@ -1853,7 +1851,6 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.note_diff_width(inner.width as usize);
 
     if app.visible.is_empty() {
         // `All files` is a content browser, not a diff, so its empty/notice copy avoids diff
@@ -1886,6 +1883,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
 
     let gutter_w = gutter_for(&app.diff);
     let expand_hint = app.keymap().hint(crate::keymap::Action::Expand).label();
+    let see = app.keymap().hint(crate::keymap::Action::Rendered).label();
     let layout = RowLayout {
         gutter_w,
         width,
@@ -1899,6 +1897,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             .map(|f| (f.query.as_str(), crate::app::find_case_sensitive(&f.query))),
         expand_hint: &expand_hint,
         rendered: app.rendered_lines(),
+        see: &see,
     };
     // One comment→row walk feeds both the marks and the card splice.
     let (cards, commented) = app.comment_marks();
@@ -2044,8 +2043,10 @@ struct RowLayout<'a> {
     find: Option<(&'a str, bool)>,
     /// The `expand` hint the cursor's fold row advertises, following a rebind.
     expand_hint: &'a str,
-    /// The styled lines a `Row::Rendered` paints, indexed by its `line`.
+    /// The styled lines a rendered block's line paints, indexed by its `line`.
     rendered: &'a [Line<'static>],
+    /// The `rendered` key's label a don't-render marker names, following a rebind.
+    see: &'a str,
 }
 
 /// A row's per-row highlight state.
@@ -2068,56 +2069,62 @@ struct RowState {
 /// into `code_width`-wide rows; a continuation row carries a blank gutter so numbers
 /// stay aligned. With wrap off, the line is one row scrolled by `h_scroll`.
 fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'static>> {
-    let RowLayout { gutter_w, width, h_scroll, wrap, focused, pal, find, expand_hint, rendered } =
-        layout;
+    let RowLayout {
+        gutter_w,
+        width,
+        h_scroll,
+        wrap,
+        focused,
+        pal,
+        find,
+        expand_hint,
+        rendered,
+        see,
+    } = layout;
     let RowState { commented, cursor, selected, hovered, lead } = state;
-    if let Row::Rendered { src, line, kind, .. } = row {
-        // The block's lead line carries its source number, in the comment accent when a
-        // comment covers the block; its other lines a blank one, like a wrapped row's
-        // continuation. A marker row stands between lines, so it carries none. The hover's
-        // `[+]` covers the field on any line, as on source. A marked line's bar cell shows its
-        // change mark the way a source row's shows `+`/`-`.
+    // A commented line's number takes the orange comment accent; others sit a step brighter
+    // than the dim chrome so they stay legible while read.
+    let num_color = if commented { pal.orange } else { pal.dim1 };
+    if let Row::Rendered { src, kind, .. } = row {
+        // The block's lead line carries its source number; its other lines a blank one, like
+        // a wrapped row's continuation, and a marker row, standing between lines, none. A
+        // marked line's bar cell shows its change mark the way a source row's shows `+`/`-`.
         let num = if lead { src.to_string() } else { String::new() };
-        let num_color = if commented { pal.orange } else { pal.dim1 };
         let (bar, bar_color) = match kind {
             RenderedKind::Block { bar: None, .. } => (" ", pal.dim2),
             RenderedKind::Block { bar: Some(b), .. } => ("▌", pal.bar_color(*b)),
-            RenderedKind::Marker(k) => ("▌", pal.marker_color(*k)),
+            RenderedKind::Marker { kind, .. } => ("▌", pal.marker_color(*kind)),
         };
-        let mut spans = vec![Span::styled(bar, Style::default().fg(bar_color))];
-        if hovered {
-            spans.push(Span::raw(" ".repeat(gutter_w - 3)));
-            spans.push(Span::styled(
-                "[+]",
-                Style::default().fg(pal.orange).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" "));
-        } else {
-            spans.push(Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(num_color)));
+        let mut spans = gutter_spans(bar, bar_color, &num, num_color, hovered, gutter_w, pal);
+        let code_width = width.saturating_sub(gutter_prefix_width(gutter_w));
+        match kind {
+            RenderedKind::Block { line, hides, bar, .. } => {
+                let body =
+                    rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default();
+                let hits = find
+                    .map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs))
+                    .unwrap_or_default();
+                let body =
+                    light_ranges(body, &hits, Style::default().bg(pal.yellow).fg(pal.surface0));
+                let used: usize = body.iter().map(Span::width).sum();
+                spans.extend(body);
+                // A collapsed summary names the changed lines its body hides.
+                if let (Some(n), Some(b)) = (hides, bar) {
+                    let note = format!("  · {n} changed {}", plural(*n, "line"));
+                    let note = truncate_width(&note, code_width.saturating_sub(used));
+                    spans.push(Span::styled(note, Style::default().fg(pal.bar_color(*b))));
+                }
+            }
+            RenderedKind::Marker { kind, lines, .. } => {
+                let text = truncate_width(&marker_text(*kind, *lines, see), code_width);
+                spans.push(Span::styled(text, Style::default().fg(pal.marker_color(*kind))));
+            }
         }
-        let body = rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default();
-        // The find lights its matches in the row's own text, which the styled line opens with;
-        // a synthetic note after it never matches.
-        let hits = find
-            .map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs))
-            .unwrap_or_default();
-        spans.extend(light_ranges(body, &hits, Style::default().bg(pal.yellow).fg(pal.surface0)));
         let mut out = Line::from(spans);
         if let Some(pad) = width.checked_sub(out.width()).filter(|p| *p > 0) {
             out.push_span(Span::raw(" ".repeat(pad)));
         }
-        // A line-level fill under span styles: a span's own background (none today) wins.
-        let bg = if cursor {
-            Some(pal.cursor_bg(focused))
-        } else if selected {
-            Some(pal.surface1)
-        } else {
-            None
-        };
-        return vec![match bg {
-            Some(bg) => out.style(Style::default().bg(bg)),
-            None => out,
-        }];
+        return vec![fill(out, row_fill(cursor, selected, focused, None, pal))];
     }
     if let Row::Fold { .. } = row {
         let label = if cursor {
@@ -2138,25 +2145,12 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         .or_else(|| row.old_no())
         .filter(|&n| n > 0)
         .map_or(String::new(), |n| n.to_string());
-    // A commented line's number takes the orange comment accent; others sit a step brighter
-    // than the dim chrome so they stay legible while read.
-    let num_color = if commented { pal.orange } else { pal.dim1 };
-    let (bar, bar_color) = match row.marker() {
-        '-' => ("▌", pal.red),
-        '+' => ("▌", pal.green),
-        _ => (" ", pal.dim2),
+    let (bar, bar_color, tint) = match row.marker() {
+        '-' => ("▌", pal.red, Some(pal.del_bg)),
+        '+' => ("▌", pal.green, Some(pal.ins_bg)),
+        _ => (" ", pal.dim2, None),
     };
-    let row_bg = if cursor {
-        Some(pal.cursor_bg(focused))
-    } else if selected {
-        Some(pal.surface1)
-    } else {
-        match row.marker() {
-            '-' => Some(pal.del_bg),
-            '+' => Some(pal.ins_bg),
-            _ => None,
-        }
-    };
+    let row_bg = row_fill(cursor, selected, focused, tint, pal);
 
     // Word emphasis brightens the changed words, unless the row's fill is a cursor or
     // selection bg, which wins for readability.
@@ -2204,28 +2198,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         .enumerate()
         .map(|(k, chunk)| {
             let gutter = if k == 0 {
-                if hovered {
-                    // The hover affordance is a `[+]` button covering the line-number
-                    // field, whole in the composer's accent (`render_composer`), so the
-                    // button and the box it opens read as one gesture.
-                    // The field is at least 3 columns (`gutter_width`), so `[+]` always
-                    // fits, right-aligned like the numbers it covers.
-                    let left = gutter_w - 3;
-                    vec![
-                        Span::styled(bar, Style::default().fg(bar_color)),
-                        Span::raw(" ".repeat(left)),
-                        Span::styled(
-                            "[+]",
-                            Style::default().fg(pal.orange).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(" "),
-                    ]
-                } else {
-                    vec![
-                        Span::styled(bar, Style::default().fg(bar_color)),
-                        Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(num_color)),
-                    ]
-                }
+                gutter_spans(bar, bar_color, &num, num_color, hovered, gutter_w, pal)
             } else {
                 // A continuation row keeps the change bar but blanks the number column.
                 vec![
@@ -2243,16 +2216,84 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
             if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
                 line.push_span(Span::raw(" ".repeat(pad)));
             }
-            match row_bg {
-                Some(bg) => line.style(Style::default().bg(bg)),
-                None => line,
-            }
+            fill(line, row_bg)
         })
         .collect()
 }
 
+/// A row's first gutter: the change bar cell, then the line-number field — or, under the
+/// pointer, the `[+]` button covering it, whole in the composer's accent
+/// (`render_composer`), so the button and the box it opens read as one gesture. The field is
+/// at least 3 columns (`gutter_width`), so `[+]` always fits, right-aligned like the numbers
+/// it covers.
+fn gutter_spans(
+    bar: &'static str,
+    bar_color: Color,
+    num: &str,
+    num_color: Color,
+    hovered: bool,
+    gutter_w: usize,
+    pal: &Palette,
+) -> Vec<Span<'static>> {
+    let bar = Span::styled(bar, Style::default().fg(bar_color));
+    if hovered {
+        vec![
+            bar,
+            Span::raw(" ".repeat(gutter_w - 3)),
+            Span::styled("[+]", Style::default().fg(pal.orange).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]
+    } else {
+        vec![bar, Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(num_color))]
+    }
+}
+
+/// A row's line-level fill: the cursor's, else the selection's, else the row's own `tint`.
+/// Span styles paint over it.
+fn row_fill(
+    cursor: bool,
+    selected: bool,
+    focused: bool,
+    tint: Option<Color>,
+    pal: &Palette,
+) -> Option<Color> {
+    if cursor {
+        Some(pal.cursor_bg(focused))
+    } else if selected {
+        Some(pal.surface1)
+    } else {
+        tint
+    }
+}
+
+/// `line` under the fill `bg`, when there is one.
+fn fill(line: Line<'static>, bg: Option<Color>) -> Line<'static> {
+    match bg {
+        Some(bg) => line.style(Style::default().bg(bg)),
+        None => line,
+    }
+}
+
+/// A don't-render or removed marker's words: `− N lines removed`, or `⚠ N changed lines
+/// don't render · m to see`, `see` naming the key that flips to source.
+#[must_use]
+pub fn marker_text(kind: MarkerKind, lines: u32, see: &str) -> String {
+    match kind {
+        MarkerKind::Removed => format!("− {lines} {} removed", plural(lines, "line")),
+        MarkerKind::Unrendered if lines == 1 => {
+            format!("⚠ 1 changed line doesn't render · {see} to see")
+        }
+        MarkerKind::Unrendered => format!("⚠ {lines} changed lines don't render · {see} to see"),
+    }
+}
+
+/// `n` `word`s, plural past one.
+fn plural(n: u32, word: &str) -> String {
+    if n == 1 { word.to_string() } else { format!("{word}s") }
+}
+
 /// `spans` with the chars in `ranges` (char indices over their joined text) restyled by `hl`,
-/// split where a range starts or ends.
+/// split where a range starts or ends — [`emphasized_spans`] over the spans' own styles.
 fn light_ranges(
     spans: Vec<Span<'static>>,
     ranges: &[crate::diff::CharRange],
@@ -2261,27 +2302,29 @@ fn light_ranges(
     if ranges.is_empty() {
         return spans;
     }
-    let mut out = Vec::new();
-    let mut at = 0u32;
-    for span in spans {
-        let mut run = String::new();
-        let mut lit = None;
-        for ch in span.content.chars() {
-            let on = ranges.iter().any(|&(a, b)| a <= at && at < b);
-            if lit.is_some_and(|l| l != on) {
-                let style = if lit == Some(true) { span.style.patch(hl) } else { span.style };
-                out.push(Span::styled(std::mem::take(&mut run), style));
+    let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    let byte_at: Vec<usize> = text.char_indices().map(|(b, _)| b).chain([text.len()]).collect();
+    let at = |c: u32| byte_at.get(c as usize).copied().unwrap_or(text.len()) as u32;
+    let bytes: Vec<(u32, u32)> = ranges.iter().map(|&(a, b)| (at(a), at(b))).collect();
+    let ends: Vec<(usize, Style)> = spans
+        .iter()
+        .scan(0, |end, s| {
+            *end += s.content.len();
+            Some((*end, s.style))
+        })
+        .collect();
+    let mut k = 0;
+    emphasized_spans(
+        &text,
+        &bytes,
+        |style| style.patch(hl),
+        |byte| {
+            while ends.get(k).is_some_and(|&(end, _)| end <= byte) {
+                k += 1;
             }
-            lit = Some(on);
-            run.push(ch);
-            at += 1;
-        }
-        if !run.is_empty() {
-            let style = if lit == Some(true) { span.style.patch(hl) } else { span.style };
-            out.push(Span::styled(run, style));
-        }
-    }
-    out
+            ends.get(k).map_or_else(Style::default, |&(_, style)| style)
+        },
+    )
 }
 
 pub(crate) fn rgb(c: crate::diff::Rgb) -> Color {
@@ -2394,9 +2437,13 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
     let mut cells = Vec::new();
     let mut idx = 0u32;
     let mut col = 0usize; // display column, so tab stops land right after wide glyphs too
-    for s in row.spans() {
-        let fg = rgb(s.color);
-        for ch in s.text.chars() {
+    // A rendered row's text carries no color of its own: its paint styles it from the render.
+    let runs: Vec<(Color, &str)> = match row {
+        Row::Rendered { text, .. } => vec![(Color::Reset, text.as_str())],
+        _ => row.spans().iter().map(|s| (rgb(s.color), s.text.as_str())).collect(),
+    };
+    for (fg, text) in runs {
+        for ch in text.chars() {
             let emph = in_emph(idx);
             let hl = in_hl(idx);
             let src = idx as usize;
@@ -3980,7 +4027,7 @@ fn search_preview_line(
                 }
                 Style::default().fg(colors.get(ci).map_or(p.text, |&(_, c)| c))
             };
-            let emphasized = emphasized_spans(&text, &ranges, p.match_hl, base);
+            let emphasized = emphasized_spans(&text, &ranges, search_hl(p), base);
             spans.extend(
                 emphasized
                     .into_iter()
@@ -4047,7 +4094,7 @@ fn search_code_row(
     if !prefix.is_empty() {
         spans.push(Span::styled(prefix.to_string(), Style::default().fg(p.dim2)));
     }
-    spans.extend(emphasized_spans(shown, &shifted, p.match_hl, |_| text_style(p)));
+    spans.extend(emphasized_spans(shown, &shifted, search_hl(p), |_| text_style(p)));
     selectable_row(p, spans, width, fill)
 }
 
@@ -4076,17 +4123,23 @@ fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
     (out, spans)
 }
 
-/// Split `text` into spans, laying the match highlight `hl` behind the engine's matched
-/// byte ranges on top of the position-dependent base style — a calm find-highlight that
-/// reads over plain text, syntax color, and the preview's banded hit line alike.
+/// Split `text` into spans, restyling the matched byte ranges by `hl` on top of the
+/// position-dependent base style — the search's calm highlight ([`search_hl`]) reads over
+/// plain text, syntax color, and the preview's banded hit line alike.
 ///
 /// `base` is called once per character with the byte index, in strictly increasing order, so
 /// a caller that resolves a position-dependent color may advance a forward cursor instead of
 /// re-scanning per byte.
+/// The search screen's match highlight: `match_hl` behind the matched text, bold.
+fn search_hl(p: &Palette) -> impl Fn(Style) -> Style {
+    let bg = p.match_hl;
+    move |style| style.bg(bg).add_modifier(Modifier::BOLD)
+}
+
 fn emphasized_spans(
     text: &str,
     ranges: &[(u32, u32)],
-    hl: Color,
+    hl: impl Fn(Style) -> Style,
     mut base: impl FnMut(usize) -> Style,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
@@ -4095,7 +4148,7 @@ fn emphasized_spans(
     for (i, c) in text.char_indices() {
         let mut style = base(i);
         if ranges.iter().any(|&(s, e)| (s as usize) <= i && i < (e as usize)) {
-            style = style.bg(hl).add_modifier(Modifier::BOLD);
+            style = hl(style);
         }
         if run.is_empty() {
             run_style = style;
@@ -4464,23 +4517,33 @@ fn pr_comment_row(
 fn note_rendered_regions(app: &App, slots: &[Slot], inner: Rect, prefix_w: usize) {
     let code_w = (inner.width as usize).saturating_sub(prefix_w);
     let x0 = inner.x + prefix_w as u16;
-    let clip = |c: usize| x0 + c.min(code_w) as u16;
     for (off, slot) in slots.iter().enumerate() {
         let Slot::Code { row, .. } = *slot else { continue };
-        let Some(Row::Rendered { line, .. }) = app.visible.get(row) else { continue };
+        let Some(Row::Rendered { kind: RenderedKind::Block { line, .. }, .. }) =
+            app.visible.get(row)
+        else {
+            continue;
+        };
         let Some(meta) = app.rendered_meta(*line) else { continue };
-        let y = inner.y + off as u16;
-        for link in &meta.links {
-            let (x1, x2) = (clip(link.start), clip(link.end));
-            if x1 < x2 {
-                app.note_painted_link(x1, x2, y, link.url.clone());
-            }
+        note_line_regions(app, meta, x0, code_w, inner.y + off as u16);
+    }
+}
+
+/// Note one painted line's link and `<details>` regions at row `y`: `meta`'s columns
+/// shifted right to `x0` and clipped at `width` columns, so a click resolves against exactly
+/// what is on screen.
+fn note_line_regions(app: &App, meta: &crate::markdown::LineMeta, x0: u16, width: usize, y: u16) {
+    let clip = |c: usize| x0 + c.min(width) as u16;
+    for link in &meta.links {
+        let (x1, x2) = (clip(link.start), clip(link.end));
+        if x1 < x2 {
+            app.note_painted_link(x1, x2, y, link.url.clone());
         }
-        if let Some(d) = &meta.details {
-            let (x1, x2) = (clip(d.start), clip(d.end));
-            if x1 < x2 {
-                app.note_painted_details(x1, x2, y, d.key.clone());
-            }
+    }
+    if let Some(d) = &meta.details {
+        let (x1, x2) = (clip(d.start), clip(d.end));
+        if x1 < x2 {
+            app.note_painted_details(x1, x2, y, d.key.clone());
         }
     }
 }
@@ -4508,20 +4571,7 @@ fn note_markdown_regions(
         }
     });
     for (display, m) in visible {
-        for link in &m.links {
-            let x1 = inner.x + link.start.min(inner.width as usize) as u16;
-            let x2 = inner.x + link.end.min(inner.width as usize) as u16;
-            if x1 < x2 {
-                app.note_painted_link(x1, x2, inner.y + display as u16, link.url.clone());
-            }
-        }
-        if let Some(d) = &m.details {
-            let x1 = inner.x + d.start.min(inner.width as usize) as u16;
-            let x2 = inner.x + d.end.min(inner.width as usize) as u16;
-            if x1 < x2 {
-                app.note_painted_details(x1, x2, inner.y + display as u16, d.key.clone());
-            }
-        }
+        note_line_regions(app, m, inner.x, inner.width as usize, inner.y + display as u16);
     }
 }
 
@@ -4531,10 +4581,9 @@ fn saturating_row(scroll: usize) -> u16 {
     u16::try_from(scroll).unwrap_or(u16::MAX)
 }
 
-/// A scrollbar in `track` when the content overflows the pane —
-/// rendered markdown has no line numbers, so this is its position feedback
-/// `max` is the maximum useful scroll; zero
-/// (content fits) paints nothing.
+/// A scrollbar in `track` when the `PR` read pane's content overflows it: its painted lines
+/// carry no line numbers, so this is their position feedback. `max` is the maximum useful
+/// scroll; zero (content fits) paints nothing.
 fn render_overflow_scrollbar(
     frame: &mut Frame,
     track: Rect,
@@ -4595,6 +4644,7 @@ fn push_finding_quote(
             // Snippet rows never carry the cursor, so no fold ever shows the hint here.
             expand_hint: "",
             rendered: &[],
+            see: "",
         };
         let from = lines.len();
         for row in &rows {

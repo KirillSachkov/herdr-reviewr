@@ -6,7 +6,7 @@ mod common;
 use common::{Repo, app_on, enter_tab};
 use herdr_reviewr::app::{App, BaseChoice, BasePicker, BaseProbe, Focus, Mode, Tab};
 use herdr_reviewr::config::NavigatorPosition;
-use herdr_reviewr::diff::{Bar, MarkerKind, RenderedKind, Row};
+use herdr_reviewr::diff::{Bar, MarkerKind};
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
@@ -17,7 +17,6 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
-use unicode_width::UnicodeWidthStr;
 
 fn dump(buffer: &Buffer) -> String {
     let area = buffer.area;
@@ -1576,6 +1575,23 @@ fn a_markdown_file_paints_rendered_rows_numbered_by_block() {
     assert!(source.contains("# Install"), "source shows raw markdown:\n{source}");
     let footer = source.lines().last().unwrap();
     assert!(footer.contains("m rendered"), "source leads back to the rendered view:\n{footer}");
+}
+
+#[test]
+fn a_block_is_numbered_on_its_content_never_on_the_gap_above_it() {
+    let r = Repo::init();
+    r.write("README.md", "> a\n>\n> b\n\n```rust\nlet x = 1;\n```\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    let out = render(&app);
+    // A quote's second paragraph: its `▎` gap row is no content, so the number sits on `b`.
+    assert!(out.contains("  3 ▎ b"), "the quote's block numbers its text:\n{out}");
+    assert!(!out.lines().any(|l| l.contains("  3 ▎ ") && !l.contains('b')), "{out}");
+    // A fenced block owns its fences: the blank gap above it is no unit of its own, and the
+    // block numbers its first code line with the fence's line.
+    assert!(out.contains("  5   let x = 1;"), "the code block numbers its code:\n{out}");
 }
 
 #[test]
@@ -4556,12 +4572,10 @@ fn rendered_change_marks_paint_bars_and_marker_rows() {
     assert!(words < removed && removed < keep, "{}", dump(&buf));
 
     // A narrow pane cuts a marker to its width with `…`, never past the pane's edge.
-    app.sync_rendered_width(20);
-    let i = app.visible.iter().position(|r| {
-        matches!(r, Row::Rendered { kind: RenderedKind::Marker(MarkerKind::Unrendered), .. })
-    });
-    let text = app.painted_text(i.expect("the marker row")).unwrap();
-    assert!(text.ends_with('…') && text.width() <= 20, "{text:?}");
+    let narrow = render_size(&app, 50, 40);
+    let marker = dump(&narrow).lines().find(|l| l.contains("⚠")).map(str::to_string);
+    let marker = marker.unwrap_or_else(|| panic!("the marker paints:\n{}", dump(&narrow)));
+    assert!(marker.contains('…'), "{marker:?}");
 }
 
 #[test]
@@ -4588,4 +4602,20 @@ fn find_lights_its_matches_on_rendered_rows() {
         })
         .collect();
     assert_eq!(lit, "needle", "only the match lights:\n{}", dump(&buf));
+}
+
+#[test]
+fn a_collapsed_summary_paints_the_changes_its_body_hides() {
+    let r = Repo::init();
+    let doc = |body: &str| {
+        format!("Intro\n\n<details>\n<summary>More</summary>\n\n{body}\n\n</details>\n")
+    };
+    r.write("doc.md", &doc("body one"));
+    r.commit_all("init");
+    r.write("doc.md", &doc("body two"));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.toggle_details("More#0");
+    let out = render(&app);
+    assert!(out.contains("▸ More  · 2 changed lines"), "the summary names what it hides:\n{out}");
 }

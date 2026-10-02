@@ -37,9 +37,9 @@ pub struct Rendered {
     /// Each heading's GitHub slug and the rendered line it starts on.
     pub anchors: Vec<(String, usize)>,
     /// The 1-based source lines whose content does not render, wholly or in part: HTML
-    /// comments (block or inline, single or multi-line), link reference definitions, a
-    /// collapsed `<details>` body. A change there is invisible rendered, so review
-    /// surfaces it by these.
+    /// comments (block or inline, single or multi-line), link reference definitions, lone
+    /// tags. A change there is invisible rendered, so review surfaces it by these. A
+    /// collapsed `<details>` is not among them: its summary's block spans the element.
     pub silent: Vec<usize>,
     /// Every `<details>` that has a summary, open or not, in close order: its key and source
     /// lines. The same for any open set, so the open state can be derived from it.
@@ -70,6 +70,8 @@ pub struct LineMeta {
     pub links: Vec<LinkSpan>,
     /// A `<details>` summary on this line, when the line is that disclosure.
     pub details: Option<DetailsHit>,
+    /// Whether the line is the blank gap set above its block, not its content.
+    pub gap: bool,
 }
 
 /// Click target for a `<details>` summary: display columns, and the key the expand state
@@ -255,8 +257,9 @@ struct Renderer<'a> {
     /// The source ranges of blocks that rendered at least one line: their structural lines —
     /// fences, delimiter rows, wrapper tags, item markers — show as part of them.
     covered: Vec<(usize, usize)>,
-    /// The blocks open now: each one's source lines and the rendered line count at its start.
-    open_blocks: Vec<(usize, usize, usize)>,
+    /// The blocks open now: each one's closing tag, source lines, and the rendered line count
+    /// at its start.
+    open_blocks: Vec<(TagEnd, usize, usize, usize)>,
     /// Lines holding HTML comment text: hidden even inside a block that renders.
     comment_lines: Vec<(usize, usize)>,
     /// An HTML comment opened on an earlier line of the same HTML block, not yet closed.
@@ -358,22 +361,16 @@ impl Renderer<'_> {
             if matches!(tag, Tag::HtmlBlock) && self.emitting() && !self.collecting_summary() {
                 self.flush_block(true);
             }
-            self.open_blocks.push((self.event_lines.0, self.event_lines.1, self.out.lines.len()));
+            let (start, end) = self.event_lines;
+            self.open_blocks.push((tag.to_end(), start, end, self.out.lines.len()));
         }
-        let closes = matches!(
-            &event,
-            Event::End(
-                TagEnd::Paragraph
-                    | TagEnd::Heading(_)
-                    | TagEnd::Item
-                    | TagEnd::CodeBlock
-                    | TagEnd::Table
-                    | TagEnd::HtmlBlock
-            )
-        );
+        let closes = match &event {
+            Event::End(end) => self.open_blocks.last().is_some_and(|b| b.0 == *end),
+            _ => false,
+        };
         self.dispatch(event, range);
         if closes
-            && let Some((start, end, before)) = self.open_blocks.pop()
+            && let Some((_, start, end, before)) = self.open_blocks.pop()
             && self.out.lines.len() > before
         {
             self.covered.push((start, end));
@@ -901,17 +898,27 @@ impl Renderer<'_> {
             }
             m.source_end = end;
         }
+        // A collapsed disclosure's summary stands for its whole element: its block spans it, so
+        // a change or a comment inside lands on the summary, and its body counts as shown —
+        // hidden by the reviewer's choice, not because it renders nothing.
+        let mut folded: Vec<(usize, usize)> = Vec::new();
+        for d in self.out.disclosures.iter().filter(|d| !self.expanded.contains(&d.key)) {
+            let summary = |m: &LineMeta| m.details.as_ref().is_some_and(|h| *h.key == d.key);
+            let Some(src) = meta.iter().find(|m| summary(m)).map(|m| m.source_line) else {
+                continue;
+            };
+            let end = meta.iter().filter(|m| m.source_line == src).map(|m| m.source_end);
+            let end = end.max().unwrap_or(src).max(d.end);
+            for m in meta.iter_mut().filter(|m| m.source_line == src) {
+                m.source_end = end;
+            }
+            folded.push((src, end));
+        }
         let mut shown = vec![false; text.lines().count() + 2];
         let spans = meta.iter().map(|m| (m.source_line, m.source_end)).chain(self.covered);
         for (start, end) in spans {
             for line in start..=end.min(shown.len() - 1) {
                 shown[line] = true;
-            }
-        }
-        // A collapsed body shows nothing, even inside an HTML block that rendered a summary.
-        for d in self.out.disclosures.iter().filter(|d| !self.expanded.contains(&d.key)) {
-            for line in d.body..d.end.min(shown.len()) {
-                shown[line] = false;
             }
         }
         let mut hidden = vec![false; shown.len()];
@@ -920,7 +927,9 @@ impl Renderer<'_> {
                 hidden[line] = true;
             }
         }
+        let in_fold = |line: usize| folded.iter().any(|&(s, e)| (s..=e).contains(&line));
         self.out.silent = (1..=blank.len())
+            .filter(|&line| !in_fold(line))
             .filter(|&line| hidden[line] || (!is_blank(line) && !shown[line]))
             .collect();
         self.out
@@ -937,6 +946,7 @@ impl Renderer<'_> {
             source_end: self.block_end.max(self.block_src),
             links,
             details: self.pending_details.take(),
+            gap: false,
         });
         self.out.lines.push(line);
     }
@@ -956,6 +966,7 @@ impl Renderer<'_> {
                 source_end: self.block_end.max(self.block_src),
                 links: Vec::new(),
                 details: None,
+                gap: true,
             });
             self.out.lines.push(if bars.is_empty() {
                 Line::default()
@@ -1070,11 +1081,15 @@ impl Renderer<'_> {
         }
         let content = content.replace('\t', "    ");
         let highlighted = self.hl.highlight(&content, lang.as_deref());
-        // Code maps line-accurately: a fence line precedes fenced content in the source.
-        let block_start = self.block_src + usize::from(fenced);
+        // Code maps line-accurately: a fence line precedes fenced content in the source. The
+        // fences belong to the block: the opening one to its first line, the closing one to
+        // its last, so a fence edit marks the code it frames.
+        let (fence, close) = (self.block_src, self.block_end);
+        let block_start = fence + usize::from(fenced);
+        let last = highlighted.len().saturating_sub(1);
         for (i, line) in highlighted.into_iter().enumerate() {
-            self.block_src = block_start + i;
-            self.block_end = self.block_src;
+            self.block_src = if i == 0 { fence } else { block_start + i };
+            self.block_end = if fenced && i == last { close } else { block_start + i };
             let fragments: Vec<(String, Style)> = line
                 .into_iter()
                 .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
@@ -1936,7 +1951,9 @@ mod tests {
     #[test]
     fn meta_maps_rendered_lines_to_their_source_blocks() {
         let (hl, p) = setup();
-        // Source lines: 1 heading, 2 blank, 3 para, 4 blank, 5 fence, 6-7 code, 8 fence.
+        // Source lines: 1 heading, 2 blank, 3 para, 4 blank, 5 fence, 6-7 code, 8 fence. Each
+        // code line is its own range, the first one taking the opening fence, the last the
+        // closing one.
         let md = "# Title\n\nprose here\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n";
         let r = render(md, 80, &hl, &p);
         let t = texts(&r.lines);
@@ -1944,8 +1961,8 @@ mod tests {
             |needle: &str| r.meta[t.iter().position(|l| l.contains(needle)).unwrap()].source_line;
         assert_eq!(src("Title"), 1);
         assert_eq!(src("prose here"), 3);
-        assert_eq!(src("let a = 1;"), 6, "fenced code maps line-accurately");
-        assert_eq!(src("let b = 2;"), 7);
+        assert_eq!(src("let a = 1;"), 5, "the first code line holds its fence");
+        assert_eq!(src("let b = 2;"), 7, "a later one its own line");
         let sorted = r.meta.iter().map(|m| m.source_line).collect::<Vec<_>>();
         let mut expect = sorted.clone();
         expect.sort_unstable();
@@ -1969,7 +1986,7 @@ mod tests {
         assert_eq!(span_of(&r, "item a"), (4, 5), "an item ends where the next begins");
         assert_eq!(span_of(&r, "item b"), (6, 6), "a parent item never claims its nested list");
         assert_eq!(span_of(&r, "nested"), (7, 7));
-        assert_eq!(span_of(&r, "x = 1"), (10, 10), "a code line is its own range");
+        assert_eq!(span_of(&r, "x = 1"), (9, 11), "a lone code line holds both its fences");
         for m in &r.meta {
             assert!(m.source_line <= m.source_end, "{m:?}");
         }
@@ -1994,11 +2011,14 @@ mod tests {
     #[test]
     fn lines_that_render_nothing_are_silent() {
         let (hl, p) = setup();
-        // 1 para, 3 comment, 5 ref def, 7-10 collapsed details (9 hidden body), 12 tail.
+        // 1 para, 3 comment, 5 ref def, 7-10 collapsed details (its summary stands for its
+        // body), 12 tail.
         let md = "shown\n\n<!-- hidden note -->\n\n[ref]: https://x.dev\n\n<details>\n<summary>More</summary>\n\
                   inside\n</details>\n\ntail\n";
         let r = render(md, 80, &hl, &p);
-        assert_eq!(r.silent, [3, 5, 9], "only what nothing shows");
+        assert_eq!(r.silent, [3, 5], "only what nothing shows");
+        let summary = r.meta.iter().find(|m| m.details.is_some()).expect("the summary");
+        assert_eq!((summary.source_line, summary.source_end), (8, 10), "it spans its element");
     }
 
     #[test]
@@ -2019,11 +2039,15 @@ mod tests {
         assert!(
             silent("<p align=\"center\">\n<img alt=\"logo\" src=\"x.png\">\n</p>\n").is_empty()
         );
-        // The collapsed body, and the closing tag alone on its line: nothing renders it.
-        assert_eq!(
-            silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n"),
-            [6, 8]
+        // A collapsed disclosure's summary stands for its whole element, closing tag and all.
+        assert!(
+            silent("<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n")
+                .is_empty()
         );
+        // Open, its closing tag alone on its line renders nothing.
+        let open: HashSet<String> = HashSet::from(["More info#0".to_string()]);
+        let md = "<details>\n<summary>\nMore info\n</summary>\n\nbody\n\n</details>\n";
+        assert_eq!(render_expanded(md, 80, &hl, &p, &open).silent, [8]);
         assert_eq!(silent("```\n```\n"), [1, 2], "an empty fence renders no line");
         // Lone tags and a lone `>` line render nothing either, in any line ending.
         assert_eq!(silent("<p>\n<summary>\n"), [1, 2]);
@@ -2078,7 +2102,7 @@ mod tests {
         let silent = |md: &str| render(md, 80, &hl, &p).silent;
         let r = render("- a\n  ```\n  c\n  ```\n- b\n", 80, &hl, &p);
         assert_eq!(span_of(&r, "• a"), (1, 1));
-        assert_eq!(span_of(&r, "c"), (3, 3), "the code line, not its fence");
+        assert_eq!(span_of(&r, "c"), (2, 4), "the code line, with the fences framing it");
         let r = render("- a\n  | x | y |\n  |---|---|\n  | 1 | 2 |\n", 80, &hl, &p);
         assert_eq!(span_of(&r, "• a"), (1, 1), "{:?}", texts(&r.lines));
         assert_eq!(span_of(&r, "1"), (4, 4), "{:?}", texts(&r.lines));

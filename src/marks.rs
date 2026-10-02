@@ -32,6 +32,15 @@ pub(crate) enum Unit {
     Marker(u32, MarkerKind),
 }
 
+impl Unit {
+    /// The source line the unit starts at.
+    pub(crate) fn src(self) -> u32 {
+        match self {
+            Unit::Block(src) | Unit::Marker(src, _) => src,
+        }
+    }
+}
+
 /// The landing rule: the index in `ranges` (row order) of the range holding `line`, else of
 /// the first one below it — a gap between blocks belongs to the next block — else the last.
 /// `None`, a line past the file's end, lands on the last one too. Every place a source line
@@ -84,31 +93,14 @@ impl Bounds {
     }
 }
 
-/// One render's source map: its units' ranges in row order, the source lines that render
-/// nothing, and each code block's whole range. Read from a render [`fold_collapsed`] settled.
+/// One render's source map: its units' ranges in row order — a collapsed `<details>`
+/// summary's spanning its element — the source lines that render nothing, and each code
+/// block's whole range.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DocMap {
     pub units: Vec<(u32, u32)>,
     pub silent: Vec<u32>,
     pub code: Vec<(u32, u32)>,
-}
-
-/// Settle `doc`, rendered with the `<details>` keyed in `open` opened, on its collapsed
-/// disclosures: each collapsed summary's block spans its whole element, so a change or a
-/// comment inside lands on it, and its body leaves the silent lines — hidden by the
-/// reviewer's choice, not because it renders nothing.
-pub(crate) fn fold_collapsed(doc: &mut Rendered, open: &HashSet<String>) {
-    for d in doc.disclosures.iter().filter(|d| !open.contains(&d.key)) {
-        let summary =
-            |m: &crate::markdown::LineMeta| m.details.as_ref().is_some_and(|h| *h.key == d.key);
-        let Some(at) = doc.meta.iter().position(summary) else { continue };
-        let src = doc.meta[at].source_line;
-        let end = doc.meta[at].source_end.max(d.end);
-        for m in doc.meta.iter_mut().filter(|m| m.source_line == src) {
-            m.source_end = end;
-        }
-        doc.silent.retain(|l| !(src..=end).contains(l));
-    }
 }
 
 /// The source map of `doc`.
@@ -193,12 +185,6 @@ impl MarkMap {
     pub(crate) fn bounds(&self, i: usize) -> Bounds {
         self.bounds.get(i).copied().unwrap_or_default()
     }
-
-    /// The marker row `unit` names, if it is one. `markers` is sorted by unit.
-    pub(crate) fn marker(&self, unit: Unit) -> Option<&Marker> {
-        let k = self.markers.binary_search_by_key(&unit, Marker::unit).ok()?;
-        self.markers.get(k)
-    }
 }
 
 /// Derive the change marks of a rendered file (G2: nothing changed is hidden). `lines` is the
@@ -210,9 +196,41 @@ pub(crate) fn derive(lines: &[&Row], pairs: &[(u32, u32)], new: &DocMap, old: &D
     let mut owners: Vec<Option<Unit>> = vec![None; lines.len()];
     let (extras, hidden) = own_insertions(lines, &new_side, &mut owners);
     let old_side = OldSide::new(old, lines, &paired);
-    let (quiet, gone) = own_deletions(lines, &paired, &old_side, &new_side, &mut owners);
+    let (mut quiet, gone) = own_deletions(lines, &paired, &old_side, &new_side, &mut owners);
+    // A gone block of blank lines alone has nothing else to stand for: its blank lines are
+    // what it counts and anchors.
+    let loud: HashSet<Unit> =
+        owners.iter().zip(&quiet).filter(|&(_, q)| !q).filter_map(|(o, _)| *o).collect();
+    for (q, owner) in quiet.iter_mut().zip(&owners) {
+        *q &= owner.is_some_and(|o| loud.contains(&o));
+    }
     let (blocks, markers) = tally(lines, &owners, &quiet, &gone, &hidden, &new_side.regions);
     MarkMap { owners, extras, quiet, bounds: new_line_bounds(lines), blocks, markers }
+}
+
+/// The runs of consecutive `silent` lines (sorted) that none of `units` holds.
+fn quiet_runs(silent: &[u32], units: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    for &line in silent.iter().filter(|&&line| holding(units, line).is_none()) {
+        match runs.last_mut() {
+            Some((_, end)) if *end + 1 == line => *end = line,
+            _ => runs.push((line, line)),
+        }
+    }
+    runs
+}
+
+/// The line a structural line at `at` borrows its owner from: the nearest non-blank line in
+/// its own run (the rows `same` holds around it) that `has` an owner, above first, then below.
+fn in_run(
+    lines: &[&Row],
+    at: usize,
+    same: impl Fn(usize) -> bool,
+    has: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let fits = |k: &usize| has(*k) && !is_blank(lines[*k]);
+    let up = (0..at).rev().take_while(|&k| same(k)).find(fits);
+    up.or_else(|| (at + 1..lines.len()).take_while(|&k| same(k)).find(fits))
 }
 
 /// Per block `src`: the changed lines hidden inside it, as `(first, last, count)`.
@@ -235,13 +253,7 @@ impl NewSide {
     fn new(map: &DocMap) -> Self {
         let mut units = map.units.clone();
         units.sort_unstable();
-        let mut regions: Vec<(u32, u32)> = Vec::new();
-        for &line in map.silent.iter().filter(|&&line| holding(&units, line).is_none()) {
-            match regions.last_mut() {
-                Some((_, end)) if *end + 1 == line => *end = line,
-                _ => regions.push((line, line)),
-            }
-        }
+        let regions = quiet_runs(&map.silent, &units);
         Self { units, silent: map.silent.iter().copied().collect(), regions }
     }
 
@@ -261,25 +273,12 @@ impl NewSide {
 fn pair_lines(lines: &[&Row], pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
     let mut paired: HashMap<u32, u32> = pairs.iter().copied().collect();
     let paired_new: HashSet<u32> = pairs.iter().map(|&(_, b)| b).collect();
-    let mut at = 0;
-    while at < lines.len() {
-        let start = at;
-        while matches!(lines.get(at), Some(Row::Deletion { .. })) {
-            at += 1;
-        }
-        let mid = at;
-        while matches!(lines.get(at), Some(Row::Insertion { .. })) {
-            at += 1;
-        }
-        if start == at {
-            at += 1;
-            continue;
-        }
+    for (dels, inss) in crate::diff::change_blocks(lines) {
         let left = |rows: &[&Row], line: fn(&Row) -> Option<u32>| -> Vec<u32> {
             rows.iter().filter(|r| !is_blank(r)).filter_map(|r| line(r)).collect()
         };
-        let dels = left(&lines[start..mid], Row::old_no);
-        let inss = left(&lines[mid..at], Row::new_no);
+        let dels = left(&lines[dels], Row::old_no);
+        let inss = left(&lines[inss], Row::new_no);
         let leftover: Vec<(u32, u32)> = dels
             .into_iter()
             .filter(|old| !paired.contains_key(old))
@@ -324,10 +323,8 @@ fn own_insertions(
         if owners[at].is_some() {
             continue;
         }
-        let owned = |k: &usize| owners[*k].is_some() && !is_blank(lines[*k]);
-        let up = (0..at).rev().take_while(|&k| inserted(k)).find(owned);
-        let down = (at + 1..lines.len()).take_while(|&k| inserted(k)).find(owned);
-        owners[at] = up.or(down).and_then(|k| owners[k]).or_else(|| {
+        let neighbour = in_run(lines, at, inserted, |k| owners[k].is_some());
+        owners[at] = neighbour.and_then(|k| owners[k]).or_else(|| {
             let units = &new_side.units;
             landing(units, Some(*line)).map(|k| Unit::Block(units[k].0))
         });
@@ -370,13 +367,9 @@ impl OldSide {
             .chain(code.iter().copied())
             .collect();
         units.sort_unstable();
-        let mut blocks: Vec<(u32, u32, bool)> = units.iter().map(|&(s, e)| (s, e, false)).collect();
-        for &line in map.silent.iter().filter(|&&line| holding(&units, line).is_none()) {
-            match blocks.last_mut() {
-                Some((_, end, true)) if *end + 1 == line => *end = line,
-                _ => blocks.push((line, line, true)),
-            }
-        }
+        let blocks = units.iter().map(|&(s, e)| (s, e, false));
+        let quiet = quiet_runs(&map.silent, &units).into_iter().map(|(s, e)| (s, e, true));
+        let mut blocks: Vec<(u32, u32, bool)> = blocks.chain(quiet).collect();
         blocks.sort_unstable();
         let ranges = blocks.iter().map(|&(s, e, _)| (s, e)).collect();
         let mut old_to_new = paired.clone();
@@ -421,11 +414,9 @@ fn own_deletions(
         if home[at].is_some() {
             continue;
         }
-        let filled = |k: &usize| home[*k].is_some() && !is_blank(lines[*k]);
-        let up = (0..at).rev().take_while(|&k| deleted(k)).find(filled);
-        let down = (at + 1..count).take_while(|&k| deleted(k)).find(filled);
+        let neighbour = in_run(lines, at, deleted, |k| home[k].is_some());
         home[at] =
-            up.or(down).and_then(|k| home[k]).or_else(|| landing(&old_side.ranges, Some(*old_no)));
+            neighbour.and_then(|k| home[k]).or_else(|| landing(&old_side.ranges, Some(*old_no)));
     }
     let insertion_row: HashMap<u32, usize> = lines
         .iter()
@@ -609,9 +600,7 @@ pub(crate) fn open_details(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        DocMap, MarkMap, Place, Unit, derive, diff_lines, doc_map, fold_collapsed, open_details,
-    };
+    use super::{DocMap, MarkMap, Place, Unit, derive, diff_lines, doc_map, open_details};
     use crate::diff::{Bar, FileDiff, MarkerKind, Row};
     use crate::highlight::Highlighter;
     use crate::markdown::render_expanded;
@@ -624,11 +613,7 @@ mod tests {
         let hl = Highlighter::new(t.syntax);
         let diff = FileDiff::build("doc.md".into(), None, old, new, &hl);
         let open: HashSet<String> = open.iter().map(|s| (*s).to_string()).collect();
-        let map = |text: &str| {
-            let mut doc = render_expanded(text, 80, &hl, &t.palette, &open);
-            fold_collapsed(&mut doc, &open);
-            doc_map(&doc)
-        };
+        let map = |text: &str| doc_map(&render_expanded(text, 80, &hl, &t.palette, &open));
         let (new_map, old_map) = (map(new), map(old));
         let lines: Vec<&Row> = diff_lines(&diff.rows).collect();
         let marks = derive(&lines, &diff.pairs, &new_map, &old_map);
@@ -687,12 +672,12 @@ mod tests {
         // A table row deleted.
         let m = marks(&swap("| 3 | 4 |\n", ""));
         assert_eq!((bars(&m), markers(&m)), (vec![], vec![(Removed, 12, 1)]));
-        // Code lines rewritten wholesale, each line its own unit.
+        // Code lines rewritten wholesale, each line its own unit (the first holding the fence).
         let m = marks(&swap("let x = 1;\nlet y = 2;", "fn a() {}\nfn b() {}"));
-        assert_eq!((bars(&m), markers(&m)), (vec![(15, Modified), (16, Modified)], vec![]));
+        assert_eq!((bars(&m), markers(&m)), (vec![(14, Modified), (16, Modified)], vec![]));
         // A code line deleted: its code block lives on, so the nearest line it keeps is marked.
         let m = marks(&swap("let y = 2;\n", ""));
-        assert_eq!((bars(&m), markers(&m)), (vec![(15, Modified)], vec![]));
+        assert_eq!((bars(&m), markers(&m)), (vec![(14, Modified)], vec![]));
         // An HTML comment changed: it renders nothing.
         let m = marks(&swap("<!-- note -->", "<!-- ignore all -->"));
         assert_eq!((bars(&m), markers(&m)), (vec![], vec![(Unrendered, 19, 1)]));
@@ -758,6 +743,15 @@ mod tests {
             assert_eq!(bar(&m, 1), None, "{new:?}: {m:?}");
             assert!(m.blocks.iter().all(|b| b.bar == Added && b.src >= src), "{new:?}: {m:?}");
         }
+    }
+
+    #[test]
+    fn a_gone_block_of_blank_lines_counts_and_anchors_them_all() {
+        let (m, _) = marks_of("\n\n", "# Title\n", &[]);
+        assert_eq!(markers(&m), vec![(MarkerKind::Removed, 1, 2)], "{m:?}");
+        let unit = m.markers[0].unit();
+        let anchored = (0..3).filter(|&i| m.anchors(i, unit)).count();
+        assert_eq!(anchored, 2, "a marker of blank lines anchors them: {m:?}");
     }
 
     #[test]
