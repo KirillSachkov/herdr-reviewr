@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.42.0] — 2026-10-02
+
 ### Changed
 - **Clearer messages**: a refused send says why and how to get the comments out, and errors name what to fix.
 
