@@ -110,6 +110,7 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
+    comment_target: Option<u64>,
     rendered: RenderedView,
     /// Whether this tab has ever completed a reload. A never-visited tab has nothing worth
     /// painting, so its first entry loads before the frame instead of deferring.
@@ -756,9 +757,9 @@ pub struct App {
     pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
-    /// The comment a card step or a card click picked — which of the comments under the
-    /// cursor the reviewer chose, by its store id — so `e`/`d` reach it where several cover
-    /// the cursor's row. Live while the store holds it and it covers the cursor's row
+    /// The comment the reviewer picked ([`Self::target_comment_card`]) — which of the comments
+    /// under the cursor they chose, by its store id — so `e`/`d` reach it where several cover
+    /// the cursor's row. Place state of the tab, stashed with its cursor. Live while the store holds it and it covers the cursor's row
     /// ([`Self::live_target`]); the reviewer's input that leaves it not live clears it
     /// ([`Self::settle_pick`]), and a poll never does.
     comment_target: Option<u64>,
@@ -1159,6 +1160,7 @@ impl App {
                 self.diff_scroll = old.diff_scroll;
                 self.h_scroll = old.h_scroll;
                 self.select_anchor = old.select_anchor;
+                self.comment_target = old.comment_target;
                 self.resume_list = old.resume_list;
                 self.toggled_dirs = std::mem::take(&mut old.toggled_dirs);
                 self.stash = std::mem::take(&mut old.stash);
@@ -2963,6 +2965,7 @@ impl App {
         std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
         std::mem::swap(&mut self.rendered, &mut self.stash.rendered);
+        std::mem::swap(&mut self.comment_target, &mut self.stash.comment_target);
         std::mem::swap(&mut self.tab_visited, &mut self.stash.visited);
     }
 
@@ -3712,6 +3715,7 @@ impl App {
         self.input = text;
         self.resume_list = from_list;
         self.mode = Mode::Composing { editing: Some(i) };
+        self.target_comment_card(i);
     }
 
     // --- text editing: a character caret into the active field ----------------------------
@@ -3976,7 +3980,8 @@ impl App {
             None => {
                 if let Some(c) = self.build_comment(text) {
                     logln!("comment add {} :: {}", c.location(), c.text);
-                    self.store.add(c);
+                    let i = self.store.add(c);
+                    self.target_comment_card(i);
                     self.status = "comment added".to_string();
                 }
             }
@@ -4239,7 +4244,10 @@ impl App {
         self.live_target(&rows).or_else(|| covering.into_iter().next())
     }
 
-    /// Pick comment `index` at the cursor's row: the card a step landed on, or a clicked card.
+    /// Pick comment `index`. The one rule: any action that lands on or creates a specific
+    /// comment picks it — a step (`n`/`N`), a card click, an edit (from the list too), a new
+    /// comment's submit — so the next `e`/`d` acts on that comment wherever several cover the
+    /// cursor's row.
     pub fn target_comment_card(&mut self, index: usize) {
         self.comment_target = self.store.id(index);
     }

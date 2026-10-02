@@ -9204,19 +9204,56 @@ fn a_pick_is_the_comment_chosen_under_the_cursor() {
             assert_eq!(edit_target_text(&mut app, &keymap), "second");
         }
 
-        // (c) An export empties the store: new comments on the same rows never inherit the
-        // pick through a recycled index.
+        // (c) An export empties the store: the pick on "second" (index 1) never lands on
+        // whatever takes index 1 next. The newest comment, created last, is the pick.
         let (_r, mut app) = two_comments_app(rendered);
         n(&mut app);
         let cursor = app.diff_cursor;
         assert!(app.export(&FakeTarget::ok()));
-        for text in ["third", "fourth"] {
+        for text in ["third", "fourth", "fifth"] {
             app.diff_cursor = cursor;
             app.start_comment();
             write_comment(&mut app, text);
         }
         app.diff_cursor = cursor;
+        assert_eq!(edit_target_text(&mut app, &keymap), "fifth", "rendered {rendered}");
+
+        // (e) The list's `e` lands on the comment it edits, and picks it: `d` after it
+        // deletes that one.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        press(&mut app, &keymap, KeyCode::Char('l'));
+        assert_eq!(app.mode, Mode::List);
+        app.list_cursor = 0;
+        press(&mut app, &keymap, KeyCode::Char('e'));
+        assert_eq!(app.input, "first");
+        press(&mut app, &keymap, KeyCode::Esc);
+        press(&mut app, &keymap, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, &keymap, KeyCode::Char('d'));
+        let left: Vec<_> = app.store.iter().map(|c| c.text.clone()).collect();
+        assert_eq!(left, ["second"], "rendered {rendered}");
+
+        // (f) A new comment on the same rows picks itself.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        press(&mut app, &keymap, KeyCode::Char('c'));
+        for ch in "third".chars() {
+            press(&mut app, &keymap, KeyCode::Char(ch));
+        }
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(app.store.len(), 3);
         assert_eq!(edit_target_text(&mut app, &keymap), "third", "rendered {rendered}");
+
+        // (g) The pick is the tab's place: away to another tab and back keeps it.
+        let (_r, mut app) = two_comments_app(rendered);
+        n(&mut app);
+        press(&mut app, &keymap, KeyCode::Char('1'));
+        press(&mut app, &keymap, KeyCode::Char('2'));
+        if app.focus != Focus::Diff {
+            press(&mut app, &keymap, KeyCode::Tab);
+        }
+        assert_eq!(edit_target_text(&mut app, &keymap), "second", "rendered {rendered}");
 
         // (d) Away to another file and back: the cursor reopens at the top, off the
         // comment, so the pick is gone and `e` there opens nothing.

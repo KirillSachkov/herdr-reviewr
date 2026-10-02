@@ -606,31 +606,42 @@ impl Renderer<'_> {
     }
 
     /// Push an inline code span's text, each piece on the source line it came from: a span
-    /// crossing a line break reads as one run with a space where the break was.
+    /// crossing a line break reads as one run with a space where the break was. The text
+    /// aligns against the raw source: each of its characters consumes raw ones until one
+    /// matches; a raw line break matches the separator space and moves to the next line, and
+    /// what the parser dropped — a container's `>` or indent, a stripped space — goes
+    /// unmatched.
     fn push_code_span(&mut self, text: &str, range: &Range<usize>, style: Style) {
         let raw = self.source.get(range.clone()).unwrap_or_default();
         let inner = raw.trim_matches('`');
-        let pieces: Vec<&str> = inner.split('\n').collect();
-        if pieces.len() < 2 {
+        if !inner.contains('\n') {
             self.push_text(text, style);
             return;
         }
         let first = self.event_lines.0;
-        let chars: Vec<char> = text.chars().collect();
-        let mut at = 0;
-        for (i, piece) in pieces.iter().enumerate() {
-            let piece = if i == 0 { piece.trim_end() } else { piece.trim() };
-            let end = if i + 1 == pieces.len() {
-                chars.len()
-            } else {
-                (at + piece.trim_start_matches(' ').chars().count().max(1)).min(chars.len())
-            };
-            let part: String = chars[at.min(chars.len())..end].iter().collect();
-            self.event_lines.0 = first + i;
-            if !part.is_empty() {
-                self.push_text(&part, style);
+        let mut line = first;
+        let mut piece = String::new();
+        let mut raw_chars = inner.chars();
+        for ch in text.chars() {
+            for r in raw_chars.by_ref() {
+                if r == '\n' {
+                    if !piece.is_empty() {
+                        self.event_lines.0 = line;
+                        self.push_text(&std::mem::take(&mut piece), style);
+                    }
+                    line += 1;
+                    if ch == ' ' {
+                        break;
+                    }
+                } else if r == ch {
+                    break;
+                }
             }
-            at = end;
+            piece.push(ch);
+        }
+        if !piece.is_empty() {
+            self.event_lines.0 = line;
+            self.push_text(&piece, style);
         }
         self.event_lines.0 = first;
     }
@@ -2083,6 +2094,18 @@ mod tests {
         assert_eq!(at("://example.com/a"), (2, 2), "the url follows line 2's text: {t:?}");
         assert_eq!(at("x code one code"), (4, 5), "`code` and `one` from line 4: {t:?}");
         assert_eq!(at("two y"), (5, 5), "{t:?}");
+        // A span over three lines inside a list item, and inside a quoted one: the container
+        // prefixes never shift a piece onto the wrong line.
+        for (md, width, needle, want) in [
+            ("- x `aa\n  bb\n  cc` y\n", 4, "bb", (2, 2)),
+            ("- x `aa\n  bb\n  cc` y\n", 6, "bb", (2, 2)),
+            ("> - x `aa\n>   bb\n>   cc` y\n", 6, "cc", (3, 3)),
+        ] {
+            let r = render(md, width, &hl, &p);
+            let t = texts(&r.lines);
+            let row = t.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{t:?}"));
+            assert_eq!(r.meta[row].lines, want, "{md:?} at {width}: {t:?}");
+        }
     }
 
     #[test]
