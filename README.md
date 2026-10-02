@@ -459,8 +459,8 @@ The known constraints:
 **herdr coupling**
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and
   several open a picker so you choose. With no agent, Send says so and keeps your comments.
-- **Send waits out a permission prompt** — an agent at one drops a paste, so Send keeps your
-  comments until you answer it. A working agent takes them as usual.
+- **Send refuses an agent at a permission prompt** — the prompt would drop the paste. Your
+  comments stay, so answer it and send again. A working agent takes them as usual.
 - **last turn relies on polling** (2 s default) — a turn that starts and finishes inside one
   poll is missed, and the scope shows everything since the last *observed* turn start, your
   own edits included.

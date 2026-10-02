@@ -1049,7 +1049,7 @@ fn remote_identity(
     let out = run_git(repo, &args)?;
     if out.status.success() {
         let url = std::str::from_utf8(&out.stdout)
-            .map_err(|_| GitFail(format!("git remote get-url {remote}: invalid UTF-8")))?;
+            .map_err(|e| GitFail(git_error(&args, "returned invalid UTF-8", e)))?;
         return Ok(classify_remote(url.trim(), hosts));
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1302,13 +1302,13 @@ pub fn ahead_behind_oids(
     if git_tristate(repo, &["cat-file", "-e", other])?.is_none() {
         return Ok(None);
     }
-    let out =
-        git_strict(repo, &["rev-list", "--left-right", "--count", &format!("{local}...{other}")])?;
+    let range = format!("{local}...{other}");
+    let args = ["rev-list", "--left-right", "--count", range.as_str()];
+    let out = git_strict(repo, &args)?;
     let mut it = out.split_whitespace();
     let parse = |s: Option<&str>| {
-        s.and_then(|v| v.parse().ok()).ok_or_else(|| {
-            GitFail(git_error(&["rev-list"], "returned unexpected output", out.trim()))
-        })
+        s.and_then(|v| v.parse().ok())
+            .ok_or_else(|| GitFail(git_error(&args, "returned unexpected output", out.trim())))
     };
     let ahead = parse(it.next())?;
     let behind = parse(it.next())?;

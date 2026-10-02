@@ -247,7 +247,7 @@ fn run_editor(
             return Ok(());
         }
         Err(editor::NoEditor::NamesNoProgram) => {
-            app.status = "`editor` names no program".into();
+            app.status = "the editor command names no program".into();
             return Ok(());
         }
     };
@@ -266,7 +266,7 @@ fn run_editor(
     // Asked before the pane changes hands: an editor that is not there would otherwise flip
     // the screen down to the shell and back for a spawn that never happened, on every press
     let Some(mut cmd) = proc::user_command(&command.program) else {
-        app.status = format!("`editor` not found: {}", command.program);
+        app.status = format!("editor not found: {}", command.program);
         return Ok(());
     };
     cmd.args(&command.args).current_dir(&app.repo);

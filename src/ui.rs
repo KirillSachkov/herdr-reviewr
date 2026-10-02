@@ -3001,9 +3001,15 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
     // spill to the `do` band.
     let mut overflow = Vec::new();
     let mut trimming = false;
-    for a in do_acts {
-        let ew = entry_width(app, a);
-        if trimming || used + ew + send_w + status_w + reserve > w {
+    let widths: Vec<usize> = do_acts.iter().map(|&a| entry_width(app, a)).collect();
+    for (i, a) in do_acts.into_iter().enumerate() {
+        let ew = widths[i];
+        // A modal has no `?`, so a trim shows a trailing `…` instead. An entry that leaves the
+        // rest to be trimmed must leave room for it, or the `…` falls off the edge.
+        let rest: usize = widths[i + 1..].iter().sum();
+        let fits_all = used + ew + rest + send_w + status_w + reserve <= w;
+        let ellipsis = if show_more || fits_all { 0 } else { MORE_ELLIPSIS };
+        if trimming || used + ew + send_w + status_w + reserve + ellipsis > w {
             trimming = true;
             overflow.push(a);
             continue;
@@ -4389,7 +4395,7 @@ fn pr_state_line(_app: &App, s: &forge::PrSnapshot) -> String {
         }
     }
     parts.push(checks_summary(s));
-    parts.push(format!("{} comments", s.comments.len()));
+    parts.push(crate::export::counted_comments(s.comments.len()));
     if s.comments_truncated {
         parts.push("newest 100 comments".into());
     }
@@ -4400,7 +4406,7 @@ fn pr_state_line(_app: &App, s: &forge::PrSnapshot) -> String {
 }
 
 /// The checks rollup in one token, worded the same in the footer and the navigator header:
-/// `✗ 1 check failing`, `● checks running`, `✓ 3 checks passed`, `✓ checks skipped`, or
+/// `✗ 1 check failing`, `● checks running`, `✓ 3 checks passed`, `⊘ checks skipped`, or
 /// `no checks`. A skipped check counts toward neither side.
 fn checks_summary(s: &forge::PrSnapshot) -> String {
     let checks = |n: usize| if n == 1 { "1 check".to_string() } else { format!("{n} checks") };
@@ -4409,7 +4415,7 @@ fn checks_summary(s: &forge::PrSnapshot) -> String {
         Some(forge::CheckStatus::Failure) => format!("✗ {} failing", checks(s.failing_checks())),
         Some(forge::CheckStatus::Running) => "● checks running".into(),
         Some(_) => match s.passed_checks() {
-            0 => "✓ checks skipped".into(),
+            0 => "⊘ checks skipped".into(),
             n => format!("✓ {} passed", checks(n)),
         },
     }

@@ -4670,7 +4670,7 @@ fn the_pr_tab_names_the_forge_and_words_checks_one_way() {
         (CheckStatus::Failure, "✗ 2 checks failing"),
         (CheckStatus::Running, "● checks running"),
         // A skipped check never reads as passed.
-        (CheckStatus::Skipped, "✓ checks skipped"),
+        (CheckStatus::Skipped, "⊘ checks skipped"),
     ] {
         let check = |name: &str| Check { name: name.into(), status };
         app.pr = PrView::Pr(Box::new(PrSnapshot {
@@ -4684,5 +4684,29 @@ fn the_pr_tab_names_the_forge_and_words_checks_one_way() {
             2,
             "the footer and the navigator say {rollup}:\n{out}"
         );
+    }
+}
+
+#[test]
+fn a_trimmed_modal_row_always_shows_its_ellipsis() {
+    let mut app = edited_app();
+    on_changed_line(&mut app);
+    for n in 1..=100 {
+        app.start_comment();
+        app.input_push('n');
+        app.submit_comment();
+        if ![1, 9, 10, 99, 100].contains(&n) {
+            continue;
+        }
+        app.request_quit();
+        for w in 30..=80u16 {
+            let row = footer_line(&render_at(&app, w));
+            let row = row.trim_end();
+            assert!(row.chars().count() <= usize::from(w), "{n} at {w} overflows:\n{row}");
+            if !row.contains("y copy") {
+                assert!(row.ends_with('…'), "{n} at {w} trims without its `…`:\n{row}");
+            }
+        }
+        app.confirming_quit = false;
     }
 }

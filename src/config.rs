@@ -382,10 +382,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     if let Some(value) = table.get("theme") {
         let theme = string_value(path, "theme", value, "a built-in theme name")?;
         if !crate::theme::is_known(theme) {
-            return Err(PluginConfigError::new(
-                path,
-                format!("invalid value for `theme`: expected a built-in theme name, not `{theme}`"),
-            ));
+            return Err(value_error(path, value, "theme", "a built-in theme name"));
         }
         theme.clone_into(&mut config.theme);
     }
@@ -652,10 +649,8 @@ fn string_value<'a>(
 /// The one invalid-value grammar: the key, what it takes, and what it was given, so the line
 /// says what to fix without opening the file.
 fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> PluginConfigError {
-    let given = match value {
-        toml::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    };
+    // TOML's own spelling, so a string given where an array belongs reads as the string it is.
+    let given = value.to_string();
     PluginConfigError::new(
         path,
         format!("invalid value for `{key}`: expected {expected}, not `{given}`"),

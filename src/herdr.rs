@@ -408,7 +408,7 @@ fn candidates<'a>(
 pub enum Refusal {
     /// The named agent waits on a permission or confirm prompt.
     AtPrompt(String),
-    /// herdr could not list the agents.
+    /// herdr did not answer a call: it could not run, or could not list the agents.
     Unanswered,
     /// The workspace holds no agent to send to.
     NoAgent,
