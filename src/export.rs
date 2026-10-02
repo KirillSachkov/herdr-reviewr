@@ -62,6 +62,18 @@ const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
     ("xsel", &["--clipboard", "--input"]),
 ];
 
+/// No clipboard tool on `PATH`: the one copy failure the reviewer can fix, so its line says how.
+#[derive(Debug)]
+struct NoClipboardTool;
+
+impl std::fmt::Display for NoClipboardTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no clipboard tool found (wl-clipboard, xclip, or xsel)")
+    }
+}
+
+impl std::error::Error for NoClipboardTool {}
+
 /// The system clipboard, via the first available platform clipboard tool.
 #[derive(Debug)]
 pub struct Clipboard;
@@ -75,15 +87,17 @@ impl ExportTarget for Clipboard {
         format!("copied {}", counted_comments(count))
     }
 
-    fn failure_message(&self, _error: &anyhow::Error) -> String {
-        "clipboard failed".to_string()
+    fn failure_message(&self, error: &anyhow::Error) -> String {
+        if error.is::<NoClipboardTool>() {
+            "copy failed: install wl-clipboard, xclip, or xsel".to_string()
+        } else {
+            "copy failed".to_string()
+        }
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) = select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).context(
-            "no clipboard tool found (install wl-clipboard, xclip, or xsel) — \
-             use Send instead",
-        )?;
+        let (cmd, args) =
+            select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).ok_or(NoClipboardTool)?;
         let mut child = crate::proc::command(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -129,23 +143,14 @@ impl ExportTarget for Agent {
     /// Names the agent it addressed. The send is irreversible and consumes the whole set, so
     /// this line is the reviewer's only record of where the review went.
     fn success_message(&self, count: usize) -> String {
-        format!("added {} to {}", counted_comments(count), self.name)
+        format!("sent {} to {}", counted_comments(count), self.name)
     }
 
-    /// A refused send names its cause: the agent's state, or a herdr that did not answer. Any
-    /// other failure means the pane closed after it was resolved. herdr's own wording is a JSON
-    /// envelope around a pane id, so the reviewer gets a sentence instead and the payload goes
-    /// to the log.
-    fn failure_message(&self, error: &anyhow::Error) -> String {
-        match error.downcast_ref::<herdr::Refusal>() {
-            Some(herdr::Refusal::Busy(state)) => {
-                format!("{} is {state} — comments kept", self.name)
-            }
-            Some(herdr::Refusal::Unanswered) => {
-                "herdr did not answer — copy to the clipboard instead".to_string()
-            }
-            None => "agent not found".to_string(),
-        }
+    /// A send that failed past the readiness check means the pane closed after it was resolved.
+    /// herdr's own wording is a JSON envelope around a pane id, so the reviewer gets a sentence
+    /// and the payload goes to the log. A [`herdr::Refusal`] never reaches here: the app words it.
+    fn failure_message(&self, _error: &anyhow::Error) -> String {
+        format!("{} closed", self.name)
     }
 
     /// An agent at a prompt refuses the send ([`herdr::ensure_ready`]). The state is
@@ -188,24 +193,25 @@ mod tests {
         // The agent line names the pane it addressed, so a mis-send is visible the moment it
         // lands.
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        assert_eq!(agent.success_message(1), "added 1 comment to release-bot");
-        assert_eq!(agent.success_message(2), "added 2 comments to release-bot");
+        assert_eq!(agent.success_message(1), "sent 1 comment to release-bot");
+        assert_eq!(agent.success_message(2), "sent 2 comments to release-bot");
         assert_eq!(Clipboard.success_message(1), "copied 1 comment");
         assert_eq!(Clipboard.success_message(2), "copied 2 comments");
     }
 
     #[test]
-    fn a_busy_agent_is_named_with_its_state_and_the_comments_kept() {
+    fn a_failed_send_or_copy_says_what_to_do() {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        let busy = anyhow::Error::from(crate::herdr::Refusal::Busy("working".into()));
-        assert_eq!(agent.failure_message(&busy), "release-bot is working — comments kept");
-        let silent = anyhow::Error::from(crate::herdr::Refusal::Unanswered);
+        assert_eq!(agent.failure_message(&anyhow::anyhow!("herdr refused")), "release-bot closed");
+        let missing = anyhow::Error::from(super::NoClipboardTool);
         assert_eq!(
-            agent.failure_message(&silent),
-            "herdr did not answer — copy to the clipboard instead"
+            Clipboard.failure_message(&missing),
+            "copy failed: install wl-clipboard, xclip, or xsel"
         );
-        let gone = anyhow::anyhow!("herdr refused");
-        assert_eq!(agent.failure_message(&gone), "agent not found");
+        assert_eq!(
+            Clipboard.failure_message(&anyhow::anyhow!("pbcopy exited non-zero")),
+            "copy failed"
+        );
     }
 
     fn comment(file: &str, side: Side, start: u32, end: u32, lines: &str, text: &str) -> Comment {

@@ -148,7 +148,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     // One short sentence a reviewer can read. herdr's own wording is a JSON envelope around a
     // pane id, and the argv it came from carries the whole review in its last argument — both
     // would fill a 40-column footer without naming anything.
-    assert_eq!(app.status, "agent not found");
+    assert_eq!(app.status, "claude closed");
     assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
     fail_on_nothing(&fake_dir);
 
@@ -158,7 +158,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "one agent sends directly");
     assert!(app.store.is_empty(), "a successful send consumes the whole set");
-    assert_eq!(app.status, "added 1 comment to claude");
+    assert_eq!(app.status, "sent 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
     // An agent at a prompt takes no send: the prompt owns the screen, so the paste would land in
@@ -174,7 +174,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.store.len(), 1, "an agent at a prompt keeps every comment");
-    assert_eq!(app.status, "codex is blocked — comments kept");
+    assert_eq!(app.status, "answer codex's prompt first");
     assert_eq!(log(&fake_dir).matches("pane send-text w8:p2").count(), sends);
 
     // `enter` sends to the digit-selected agent mid-turn, as a review into a running agent
@@ -185,7 +185,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.store.is_empty(), "a successful send consumes the whole set");
-    assert_eq!(app.status, "added 1 comment to codex");
+    assert_eq!(app.status, "sent 1 comment to codex");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p2"));
     assert!(log(&fake_dir).contains("pane send-text w8:p2"), "log: {}", log(&fake_dir));
     // The start marker opens the payload at the CLI boundary; `pasted()` owns the rationale.
@@ -244,7 +244,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "an empty workspace opens no picker");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
-    assert_eq!(app.status, "no agent here — copy to the clipboard instead");
+    assert_eq!(app.status, "no agent in this workspace, press y to copy");
 
     fail_on(&fake_dir, "agent list");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
@@ -252,7 +252,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
     // A failed enumeration says so rather than claiming a count. The argv and herdr's stderr go
     // to the log, so the sentence still fits a 40-column footer.
-    assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
+    assert_eq!(app.status, "herdr didn't answer, press y to copy");
 
     // The sole agent is refused the same way at a prompt: `send_target` and the send each read
     // the list, and the send's read decides.
@@ -260,7 +260,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     fs::write(fake_dir.join("agents.json"), ONE_AGENT.replace("\"idle\"", "\"blocked\"")).unwrap();
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.store.len(), 1, "a sole agent at a prompt keeps every comment");
-    assert_eq!(app.status, "claude is blocked — comments kept");
+    assert_eq!(app.status, "answer claude's prompt first");
 
     // A chosen agent gone from the list by the time `enter` lands takes nothing.
     fs::write(fake_dir.join("agents.json"), TWO_AGENTS).unwrap();
@@ -270,7 +270,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     let sends = log(&fake_dir).matches("pane send-text").count();
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.store.len(), 1, "a gone agent keeps every comment");
-    assert_eq!(app.status, "agent not found");
+    assert_eq!(app.status, "codex closed");
     assert_eq!(log(&fake_dir).matches("pane send-text").count(), sends, "nothing was pasted");
 
     // A herdr that stops answering by then says so, rather than claiming the agent is gone.
@@ -279,7 +279,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     fail_on(&fake_dir, "agent list");
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.store.len(), 1);
-    assert_eq!(app.status, "herdr did not answer — copy to the clipboard instead");
+    assert_eq!(app.status, "herdr didn't answer, press y to copy");
     fail_on_nothing(&fake_dir);
 
     // The quit question hands `s` to the send itself, on any tab: the comments go out and the
@@ -297,6 +297,6 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
         press(&mut app, KeyCode::Char('s'), area, &keymap);
         assert!(!app.confirming_quit && !app.should_quit, "{tab}");
         assert!(app.store.is_empty(), "the answer sent them: {tab}");
-        assert_eq!(app.status, "added 1 comment to claude", "{tab}");
+        assert_eq!(app.status, "sent 1 comment to claude", "{tab}");
     }
 }

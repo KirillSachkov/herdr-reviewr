@@ -247,7 +247,7 @@ pub fn send_target() -> Result<SendTarget> {
             // A refusal is the whole status line, so it says the clipboard rather than herdr's
             // own wording. The cause is already in the log, with the argv `herdr` kept out of it.
             logln!("agent list failed: {e:#}");
-            bail!("herdr did not answer — copy to the clipboard instead")
+            return Err(Refusal::Unanswered.into());
         }
     };
     // Candidacy is decided once, here: an `agent` field, our workspace, not our own pane.
@@ -255,7 +255,7 @@ pub fn send_target() -> Result<SendTarget> {
     // tracking does not come through here: it asks where each agent works instead.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
-        0 => bail!("no agent here — copy to the clipboard instead"),
+        0 => Err(Refusal::NoAgent.into()),
         // The sole-agent send shows no row, so only the picker pays for the tab-label call.
         1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new()))),
         _ => {
@@ -401,21 +401,25 @@ fn candidates<'a>(
         .collect()
 }
 
-/// Why [`ensure_ready`] refused a send. Every comment stays, and the reviewer's line names
-/// the cause.
+/// Why a send went nowhere. Every comment stays. The app words the reviewer's line, since it
+/// knows the copy key to offer instead.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The agent is at a prompt, by herdr's label for the state.
-    Busy(String),
-    /// herdr could not say what the agent is doing.
+    /// The named agent waits on a permission or confirm prompt.
+    AtPrompt(String),
+    /// herdr could not list the agents.
     Unanswered,
+    /// The workspace holds no agent to send to.
+    NoAgent,
 }
 
+/// The log's wording. The reviewer's line is the app's (`App::refusal_line`).
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Busy(state) => write!(f, "agent is {state}"),
+            Refusal::AtPrompt(name) => write!(f, "{name} is at a prompt"),
             Refusal::Unanswered => write!(f, "herdr did not answer"),
+            Refusal::NoAgent => write!(f, "no agent in the workspace"),
         }
     }
 }
@@ -427,8 +431,7 @@ impl std::error::Error for Refusal {}
 enum Readiness {
     /// The agent's input takes the paste.
     Ready,
-    /// The agent is at a prompt. Holds herdr's label for the state, so the
-    /// refusal names it the way the picker row does.
+    /// The agent is at a prompt. Holds its name, as the picker row shows it.
     Busy(String),
     /// The pane is no longer an agent herdr lists.
     Gone,
@@ -447,7 +450,7 @@ pub fn ensure_ready(pane: &str) -> Result<()> {
     };
     match readiness_in(&agents, pane) {
         Readiness::Ready => Ok(()),
-        Readiness::Busy(state) => Err(Refusal::Busy(state).into()),
+        Readiness::Busy(name) => Err(Refusal::AtPrompt(name).into()),
         Readiness::Gone => bail!("agent pane {pane} is gone"),
     }
 }
@@ -459,7 +462,7 @@ pub fn ensure_ready(pane: &str) -> Result<()> {
 fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
     match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
         None => Readiness::Gone,
-        Some(agent) if agent.status() == Status::Blocked => Readiness::Busy(agent.row_state()),
+        Some(agent) if agent.status() == Status::Blocked => Readiness::Busy(agent.row_name()),
         Some(_) => Readiness::Ready,
     }
 }
@@ -556,7 +559,7 @@ mod tests {
             ("unknown", Ready),
             ("compacting", Ready),
             // A prompt owns the screen, so the paste would land in it.
-            ("blocked", Busy("blocked".into())),
+            ("blocked", Busy("claude".into())),
         ] {
             assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");
         }

@@ -747,9 +747,9 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     // The status is the only answer `s` gives, and a reviewr pane is around 40 columns wide, so
     // the cursor's actions yield to it: the `?` panel repeats every action and nothing repeats the
     // status.
-    app.status = "no agent here — copy to the clipboard instead".to_string();
+    app.status = "no agent in this workspace, press y to copy".to_string();
     let narrow = footer_line(&render_at(&app, 40));
-    assert!(narrow.contains("no agent here"), "the refusal shows at 40 columns:\n{narrow}");
+    assert!(narrow.contains("no agent in"), "the refusal shows at 40 columns:\n{narrow}");
     assert!(narrow.contains("s send 1"), "send never drops:\n{narrow}");
     assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
     assert!(!narrow.contains("d delete"), "the cursor's actions yield to the status:\n{narrow}");
@@ -757,7 +757,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     // With room for both, nothing yields.
     let wide = footer_line(&render_at(&app, 120));
     assert!(
-        wide.contains("no agent here — copy to the clipboard instead"),
+        wide.contains("no agent in this workspace, press y to copy"),
         "a wide row shows the whole refusal:\n{wide}"
     );
     assert!(wide.contains("d delete"), "and keeps the cursor's actions:\n{wide}");
@@ -780,7 +780,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     // the status leaves room for it.
     app.open_list();
     let listed = footer_line(&render_at(&app, 40));
-    assert!(listed.contains("no agent here"), "the refusal shows in the list at 40:\n{listed}");
+    assert!(listed.contains("no agent in"), "the refusal shows in the list at 40:\n{listed}");
     assert!(listed.contains("s send 1"), "send never drops in the list either:\n{listed}");
     assert!(listed.trim_end().ends_with('…'), "the trimmed actions keep their `…`:\n{listed}");
 }

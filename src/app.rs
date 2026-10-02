@@ -4980,15 +4980,42 @@ impl App {
     /// and opens no picker.
     pub fn send_to_agent(&mut self) {
         if self.store.is_empty() {
-            self.status = "no comments to send".to_string();
+            self.status = "no comments yet".to_string();
             return;
         }
         match herdr::send_target() {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
-            // The refusal is already a whole sentence naming the cause and the clipboard, so a
-            // prefix would only spend the width the footer needs to show it.
-            Err(e) => self.status = e.to_string(),
+            Err(e) => self.status = self.failure_line(&e, |e| e.to_string()),
+        }
+    }
+
+    /// The status for a failed send or copy: a [`herdr::Refusal`] in the app's words, else the
+    /// target's own line.
+    fn failure_line(
+        &self,
+        error: &anyhow::Error,
+        other: impl Fn(&anyhow::Error) -> String,
+    ) -> String {
+        match error.downcast_ref::<herdr::Refusal>() {
+            Some(refusal) => self.refusal_line(refusal),
+            None => other(error),
+        }
+    }
+
+    /// A refused send's line: the cause, then the way out. It leads with the cause, because a
+    /// narrow pane keeps only the start of the line, and the cause already says nothing went.
+    /// The comments stay, and the footer's send count shows them.
+    fn refusal_line(&self, refusal: &herdr::Refusal) -> String {
+        let copy = self.keymap().hint(crate::keymap::Action::Copy).label();
+        match refusal {
+            herdr::Refusal::AtPrompt(name) => format!("answer {name}'s prompt first"),
+            herdr::Refusal::Unanswered => {
+                format!("herdr didn't answer, press {copy} to copy")
+            }
+            herdr::Refusal::NoAgent => {
+                format!("no agent in this workspace, press {copy} to copy")
+            }
         }
     }
 
@@ -5357,7 +5384,7 @@ impl App {
     /// Reports whether the comments were delivered.
     pub fn export(&mut self, target: &dyn ExportTarget) -> bool {
         if self.store.is_empty() {
-            self.status = "no comments to send".to_string();
+            self.status = "no comments yet".to_string();
             return false;
         }
         let refs: Vec<&Comment> = self.store.iter().collect();
@@ -5372,7 +5399,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.status = target.failure_message(&e);
+                self.status = self.failure_line(&e, |e| target.failure_message(e));
                 logln!("export ERR: {e:#}");
                 false
             }
