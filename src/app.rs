@@ -140,6 +140,16 @@ impl RenderedInput {
     }
 }
 
+/// A picked comment ([`App::comment_target`]): its store index, the anchor it had when picked
+/// — a store change can shift indices, so the anchor must still match — and the cursor row
+/// the pick put it on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CommentTarget {
+    index: usize,
+    row: usize,
+    anchor: (String, Side, u32, u32),
+}
+
 /// A file crossing offered by the footer, waiting for the hunk step that armed it to repeat: the
 /// direction it crosses in, and the file it resolved to open. Holding the file spares the second
 /// press the walk the first one already paid for.
@@ -786,6 +796,9 @@ pub struct App {
     pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
+    /// The comment a card step or a card click picked, so `e`/`d` reach it where several
+    /// comments cover the cursor's row. It holds only while the cursor rests where it put it.
+    comment_target: Option<CommentTarget>,
     /// The one live mouse gesture — born at mouse-down, ended on release or an interrupting event.
     pub gesture: crate::selection::Gesture,
     /// The settled selection: the last copy's span and its copied text, kept highlighted as
@@ -997,6 +1010,7 @@ impl App {
             last_click: None,
             view_reload_held: false,
             select_anchor: None,
+            comment_target: None,
             store: CommentStore::new(),
             list_cursor: 0,
             picker_rows: Vec::new(),
@@ -1614,8 +1628,10 @@ impl App {
         let line_at = |i: usize| -> Option<u32> {
             if was_rendered { self.rendered_line_of(i) } else { source_line_at(&self.visible, i) }
         };
-        let place = (!self.visible.is_empty())
-            .then(|| (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll)));
+        let place = (!self.visible.is_empty()).then(|| {
+            let anchor = self.select_anchor.map(line_at);
+            (was_rendered, line_at(self.diff_cursor), line_at(self.diff_scroll), anchor)
+        });
         let rendered = self.wants_rendered() && self.rebuild_rendered();
         if !rendered {
             if !self.wants_rendered() {
@@ -1637,7 +1653,7 @@ impl App {
         }
         // Rows of the other kind: the place crosses by its source line. Same-kind rendered
         // rows reconciled by identity inside the build; same-kind source rows keep indices.
-        if let Some((from_rendered, cursor, scroll)) = place
+        if let Some((from_rendered, cursor, scroll, anchor)) = place
             && from_rendered != rendered
         {
             let to = |line: Option<u32>| -> Option<usize> {
@@ -1653,6 +1669,9 @@ impl App {
             }
             if let Some(i) = to(scroll) {
                 self.diff_scroll = i;
+            }
+            if let Some(Some(i)) = anchor.map(to) {
+                self.select_anchor = Some(i);
             }
         }
         if self.mode == Mode::Find && !self.find_available() {
@@ -1755,7 +1774,7 @@ impl App {
                     None => (src, off),
                 })
             };
-            (id(self.diff_cursor), id(self.diff_scroll))
+            (id(self.diff_cursor), id(self.diff_scroll), self.select_anchor.map(id))
         });
         let text = self.palette.text;
         let mut rows = Vec::with_capacity(doc.lines.len());
@@ -1785,7 +1804,11 @@ impl App {
         self.rendered_doc = doc;
         self.rendered_built = Some(input);
         self.visible = rows;
-        if let Some((cursor, scroll)) = place {
+        if let Some((cursor, scroll, anchor)) = place {
+            // A live range's anchor reconciles by the same identity as the cursor.
+            if let Some(i) = anchor.flatten().and_then(|id| rendered_row_of(&self.visible, id)) {
+                self.select_anchor = Some(i);
+            }
             if let Some(i) = cursor.and_then(|id| rendered_row_of(&self.visible, id)) {
                 self.diff_cursor = i;
             }
@@ -2518,7 +2541,7 @@ impl App {
     /// per frame when a navigation requested a reveal, not on a wheel scroll.
     ///
     /// The target is the cursor, except while composing: the box opens under the selection's
-    /// last line, so that line is what has to stay in view. A selection built
+    /// last line ([`Self::compose_row`]), so that line is what has to stay in view. A selection built
     /// upward has its cursor at the top, and following the cursor there would leave the box
     /// off the bottom — the selection covers the same rows either way.
     pub fn reveal_diff_cursor(&mut self, heights: &[usize], viewport: usize) {
@@ -2526,7 +2549,7 @@ impl App {
             self.diff_scroll = 0;
             return;
         }
-        let target = if self.composing() { self.selection_range().1 } else { self.diff_cursor };
+        let target = if self.composing() { self.compose_row() } else { self.diff_cursor };
         let target = target.min(self.visible.len() - 1);
         self.diff_scroll = keep_in_view(target, self.diff_scroll, heights, viewport);
     }
@@ -2957,6 +2980,7 @@ impl App {
                         target = self.fold_clamped(a, target);
                     }
                     self.diff_cursor = target;
+                    self.comment_target = None;
                     self.reveal_diff = true;
                 }
             }
@@ -3489,9 +3513,6 @@ impl App {
 
     /// Toggle a range-selection anchor at the current diff line.
     pub fn toggle_select(&mut self) {
-        if self.rendered_active() {
-            return; // the rendered view takes no comments yet
-        }
         if self.focus == Focus::Diff && !self.visible.is_empty() {
             self.select_anchor = match self.select_anchor {
                 Some(_) => None,
@@ -3518,9 +3539,6 @@ impl App {
     }
 
     pub fn start_comment(&mut self) {
-        if self.rendered_active() {
-            return; // the rendered view takes no comments yet
-        }
         if self.focus == Focus::Diff && self.has_anchorable_selection() {
             self.reveal_diff = true; // scroll the anchored line into view before the box opens
             self.input.clear();
@@ -3547,10 +3565,8 @@ impl App {
     /// a gesture in progress on the diff, so nothing on the diff claims the key and the range
     /// survives — the comments list, which owns the screen instead, still claims it
     fn comment_claims_edit(&self) -> bool {
-        let on_the_diff = self.tab.is_file_tab()
-            && self.focus == Focus::Diff
-            && !self.rendered_active()
-            && self.select_anchor.is_none();
+        let on_the_diff =
+            self.tab.is_file_tab() && self.focus == Focus::Diff && self.select_anchor.is_none();
         let claimed =
             if self.mode == Mode::List { self.list_comment_editable() } else { on_the_diff };
         claimed && self.target_comment().is_some()
@@ -3618,8 +3634,7 @@ impl App {
         let from_list = self.mode == Mode::List;
         let Some(i) = self.target_comment() else { return };
         let Some(c) = self.store.get(i) else { return };
-        let (file, side, start, end, text) =
-            (c.file.clone(), c.side, c.start, c.end, c.text.clone());
+        let (file, text) = (c.file.clone(), c.text.clone());
         let in_view = self.comment_in_view(c);
 
         // Bring the comment's file into the diff and land the cursor on its line, so the
@@ -3637,27 +3652,16 @@ impl App {
                 self.file_cursor = fi;
             }
         }
-        // The edit box opens over the comment's card, which only the source view paints — on
-        // the comment's own file; a stale comment leaves the open file's view alone.
-        if in_view && self.diff_path.as_deref() == Some(file.as_str()) {
-            self.show_source();
-        }
         // Only move the cursor when the open diff is actually the comment's file, so a
         // stale comment (file gone from the changeset) never jumps the cursor onto a
         // same-numbered line in a different file, and a comment from another view (a commit
         // comment under a worktree scope) never lands on the same-numbered worktree line
-        // Land on the range's LAST row — the row the card splices
-        // under (`card_rows`) — so the edit box opens in the card's place instead of jumping
-        // to the range's first line.
+        // Land on the row the card splices under (`card_rows`) — the range's last row, or
+        // rendered its block's last row — so the edit box opens in the card's place, in
+        // whichever view shows the file.
         if in_view
             && self.diff_path.as_deref() == Some(file.as_str())
-            && let Some(idx) = self.visible.iter().rposition(|row| {
-                let no = match side {
-                    Side::New => row.new_no(),
-                    Side::Old => row.old_no(),
-                };
-                no.is_some_and(|n| start <= n && n <= end)
-            })
+            && let Some(&(idx, _)) = self.card_rows().iter().find(|&&(_, ci)| ci == i)
         {
             self.diff_cursor = idx;
             self.select_anchor = None;
@@ -3944,14 +3948,70 @@ impl App {
     /// Whether the selection has at least one content row a comment can attach to —
     /// a fold marker does not qualify.
     fn has_anchorable_selection(&self) -> bool {
+        if self.renders_markdown() {
+            return self.selection_anchor().is_some();
+        }
         let (lo, hi) = self.selection_range();
         self.visible.get(lo..=hi).is_some_and(|s| s.iter().any(Row::is_content))
     }
 
-    /// The `(side, start, end, snippet)` the current selection anchors to.
+    /// The `(side, start, end, snippet)` the current selection anchors to. A rendered
+    /// selection anchors through the source diff rows it stands for, so the same `anchor()`
+    /// makes both views' comments (G1).
     fn selection_anchor(&self) -> Option<(Side, u32, u32, String)> {
+        if self.renders_markdown() {
+            return anchor(&self.rendered_anchor_rows());
+        }
         let (lo, hi) = self.selection_range();
         anchor(self.visible.get(lo..=hi)?)
+    }
+
+    /// The source diff rows a rendered selection stands for, in diff order: every new-side
+    /// line from its first block's start to its last block's end — the blank and unrendered
+    /// lines between blocks included, so the agent sees what the comment spans — the
+    /// deletions inside that span, and the deletions its blocks own ([`deletion_owner`]). A
+    /// comment anchored on them equals the source comment on the same rows, export included.
+    fn rendered_anchor_rows(&self) -> Vec<Row> {
+        let (lo, hi) = self.selection_range();
+        let Some(selected) = self.visible.get(lo..=hi) else { return Vec::new() };
+        let picked = rendered_blocks(selected);
+        let (Some(first), Some(last)) =
+            (picked.iter().map(|&(s, _)| s).min(), picked.iter().map(|&(_, e)| e).max())
+        else {
+            return Vec::new();
+        };
+        let blocks = rendered_blocks(&self.visible);
+        let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
+        let bounds = new_line_bounds(&lines);
+        lines
+            .iter()
+            .zip(bounds)
+            .filter(|(row, at)| {
+                if let Some(n) = row.new_no() {
+                    return (first..=last).contains(&n);
+                }
+                // A deletion: inside the span, or owned by a selected block.
+                let inside =
+                    at.before.is_some_and(|a| a >= first) && at.after.is_some_and(|b| b <= last);
+                let owner = deletion_owner(&blocks, *at);
+                inside || owner.is_some_and(|o| picked.iter().any(|&(s, _)| s == o))
+            })
+            .map(|(row, _)| (*row).clone())
+            .collect()
+    }
+
+    /// The row the composer splices under: the selection's last row, and in the rendered
+    /// view that row's block's last row — where the comment's card will sit.
+    #[must_use]
+    pub fn compose_row(&self) -> usize {
+        let (_, hi) = self.selection_range();
+        match self.visible.get(hi) {
+            Some(Row::Rendered { src, .. }) => {
+                let same = |r: &&Row| matches!(r, Row::Rendered { src: s, .. } if s == src);
+                hi + self.visible[hi + 1..].iter().take_while(same).count()
+            }
+            _ => hi,
+        }
     }
 
     fn build_comment(&self, text: String) -> Option<Comment> {
@@ -4023,40 +4083,111 @@ impl App {
         }
     }
 
-    /// Row indices on the open diff's file that a comment anchors to. None in the rendered
-    /// view, which marks no comments yet.
-    pub fn commented_lines(&self) -> HashSet<usize> {
-        let Some(file) = self.diff_path.clone().filter(|_| !self.renders_markdown()) else {
-            return HashSet::new();
-        };
-        self.visible
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                self.store
+    /// Each comment shown on the open file, by store index, with the visible rows it covers:
+    /// a source row by its line number on the comment's side, a rendered row by its block
+    /// ([`Self::rendered_cover`]). The one comment→row map the marks, the cards, and the
+    /// cursor's comment all read, so the views cannot disagree about where a comment sits.
+    fn comment_rows(&self) -> Vec<(usize, Vec<usize>)> {
+        let Some(file) = self.diff_path.as_deref() else { return Vec::new() };
+        let blocks = rendered_blocks(&self.visible);
+        // The diff's lines and their bounds, built once, and only for an old-side comment
+        // shown rendered.
+        let mut lines = None;
+        let mut out = Vec::new();
+        for (ci, c) in self.store.iter().enumerate() {
+            if c.file != file || !self.comment_in_view(c) {
+                continue;
+            }
+            let mut cover = self.rendered_cover(c, &blocks, &mut lines);
+            cover.sort_unstable();
+            let rows = self
+                .visible
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| match row {
+                    Row::Rendered { src, .. } => cover.binary_search(src).is_ok(),
+                    _ => line_in(c, row),
+                })
+                .map(|(i, _)| i)
+                .collect();
+            out.push((ci, rows));
+        }
+        out
+    }
+
+    /// The rendered blocks (by `src`) comment `c` covers: those its new-side range overlaps,
+    /// else the block holding its first line; an old-side comment the block owning its last
+    /// deleted row ([`deletion_owner`]), the same owner its anchor reads — or, once that line
+    /// is back as context, the block holding it. Never empty over rendered rows, so the
+    /// rendered view never hides a comment (G3). `lines` memoizes the diff walk across calls.
+    fn rendered_cover<'a>(
+        &'a self,
+        c: &Comment,
+        blocks: &[(u32, u32)],
+        lines: &mut Option<(Vec<&'a Row>, Vec<Bounds>)>,
+    ) -> Vec<u32> {
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+        match c.side {
+            Side::New => {
+                let overlap: Vec<u32> = blocks
                     .iter()
-                    .any(|c| c.file == file && self.comment_in_view(c) && line_in(c, row))
-            })
-            .map(|(i, _)| i)
-            .collect()
+                    .filter(|&&(s, e)| s <= c.end && c.start <= e)
+                    .map(|&(s, _)| s)
+                    .collect();
+                if overlap.is_empty() {
+                    holding_block(blocks, Some(c.start)).into_iter().collect()
+                } else {
+                    overlap
+                }
+            }
+            Side::Old => {
+                let (lines, bounds) = lines.get_or_insert_with(|| {
+                    let lines: Vec<&Row> = diff_lines(&self.diff.rows).collect();
+                    let bounds = new_line_bounds(&lines);
+                    (lines, bounds)
+                });
+                let last = lines
+                    .iter()
+                    .rposition(|r| r.old_no().is_some_and(|n| c.start <= n && n <= c.end));
+                // A line restored as context sits in its block; a comment whose line left the
+                // diff still shows, under the last block.
+                let owner = match last {
+                    Some(i) if lines[i].new_no().is_some() => {
+                        holding_block(blocks, lines[i].new_no())
+                    }
+                    Some(i) => deletion_owner(blocks, bounds[i]),
+                    None => holding_block(blocks, None),
+                };
+                owner.into_iter().collect()
+            }
+        }
+    }
+
+    /// The card anchors ([`Self::card_rows`]) and the commented rows
+    /// ([`Self::commented_lines`]) from one walk, for the paint that needs both.
+    #[must_use]
+    pub fn comment_marks(&self) -> (Vec<(usize, usize)>, HashSet<usize>) {
+        let rows = self.comment_rows();
+        let cards = rows.iter().filter_map(|(ci, r)| r.last().map(|&last| (last, *ci))).collect();
+        (cards, rows.into_iter().flat_map(|(_, r)| r).collect())
+    }
+
+    /// Row indices on the open diff's file that a comment anchors to.
+    pub fn commented_lines(&self) -> HashSet<usize> {
+        self.comment_rows().into_iter().flat_map(|(_, rows)| rows).collect()
     }
 
     /// The comment-card anchors as (row, store index) pairs, store-ordered. A comment's card
-    /// sits under the last visible row its line range covers, so the renderer can splice it
-    /// inline (always visible) and the geometry stays anchored to a real row. The one card
-    /// map: the layout walk, the row heights, and the hit tests all read it. Empty in the
-    /// rendered view, which splices no cards yet.
+    /// sits under the last visible row it covers — rendered, the last row of the last block
+    /// it covers — so the renderer can splice it inline (always visible) and the geometry
+    /// stays anchored to a real row. The one card map: the layout walk, the row heights, and
+    /// the hit tests all read it.
     pub fn card_rows(&self) -> Vec<(usize, usize)> {
-        let Some(file) = self.diff_path.as_deref().filter(|_| !self.renders_markdown()) else {
-            return Vec::new();
-        };
-        self.store
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.file == file && self.comment_in_view(c))
-            .filter_map(|(ci, c)| {
-                self.visible.iter().rposition(|row| line_in(c, row)).map(|last| (last, ci))
-            })
+        self.comment_rows()
+            .into_iter()
+            .filter_map(|(ci, rows)| rows.last().map(|&last| (last, ci)))
             .collect()
     }
 
@@ -4070,20 +4201,40 @@ impl App {
     }
 
     /// The store index of a comment whose range covers the current diff row, if any.
+    /// The picked comment comes first when it still covers that row.
     fn comment_under_cursor(&self) -> Option<usize> {
-        let file = self.diff_path.as_deref()?;
-        let row = self.visible.get(self.diff_cursor)?;
-        self.store.iter().position(|c| c.file == file && self.comment_in_view(c) && line_in(c, row))
+        let covering: Vec<usize> = self
+            .comment_rows()
+            .into_iter()
+            .filter(|(_, rows)| rows.contains(&self.diff_cursor))
+            .map(|(ci, _)| ci)
+            .collect();
+        self.live_target().filter(|t| covering.contains(t)).or(covering.first().copied())
+    }
+
+    /// Pick comment `index` at the cursor's row: the card a step landed on, or a clicked card.
+    pub fn target_comment_card(&mut self, index: usize) {
+        self.comment_target = self.store.get(index).map(|c| CommentTarget {
+            index,
+            row: self.diff_cursor,
+            anchor: (c.file.clone(), c.side, c.start, c.end),
+        });
+    }
+
+    /// The picked comment's store index, while the cursor rests where the pick put it and
+    /// the store still holds that comment there.
+    fn live_target(&self) -> Option<usize> {
+        let t = self.comment_target.as_ref()?;
+        let c = self.store.get(t.index)?;
+        let same = t.anchor == (c.file.clone(), c.side, c.start, c.end);
+        (same && t.row == self.diff_cursor).then_some(t.index)
     }
 
     pub fn delete_comment(&mut self) {
-        // Cards don't show rendered: `d` only acts through the comments-list overlay.
-        if self.rendered_active() && self.mode != Mode::List {
-            return;
-        }
         if let Some(i) = self.target_comment() {
             logln!("comment delete [{i}]");
             self.store.take(i);
+            self.comment_target = None;
             self.clamp_list_cursor();
             self.status = "comment deleted".to_string();
             // Don't strand the user in an empty "Comments (0)" overlay, matching `export`.
@@ -4093,28 +4244,31 @@ impl App {
         }
     }
 
-    /// Move the diff cursor to the next (`dir >= 0`) or previous commented line.
+    /// Move the diff cursor to the next (`dir >= 0`) or previous comment, card by card in
+    /// painted order, and pick that comment — so a block holding two comments reaches each.
+    /// With no pick, it steps from the cursor's row.
     pub fn jump_comment(&mut self, dir: isize) {
-        if self.rendered_active() {
-            return; // no cards in the rendered view
-        }
-        let mut idxs: Vec<usize> = self.commented_lines().into_iter().collect();
-        if idxs.is_empty() {
+        let mut cards = self.card_rows();
+        if cards.is_empty() {
             return;
         }
-        idxs.sort_unstable();
-        self.focus = Focus::Diff;
+        // Stable, so cards under one row keep the store order they paint in.
+        cards.sort_by_key(|&(row, _)| row);
+        let n = cards.len();
         let cur = self.diff_cursor;
-        let target = if dir >= 0 {
-            idxs.iter().copied().find(|&i| i > cur).or_else(|| idxs.first().copied())
-        } else {
-            idxs.iter().rev().copied().find(|&i| i < cur).or_else(|| idxs.last().copied())
+        let at = self.live_target().and_then(|t| cards.iter().position(|&(_, ci)| ci == t));
+        let k = match at {
+            Some(k) if dir >= 0 => (k + 1) % n,
+            Some(k) => (k + n - 1) % n,
+            None if dir >= 0 => cards.iter().position(|&(r, _)| r > cur).unwrap_or(0),
+            None => cards.iter().rposition(|&(r, _)| r < cur).unwrap_or(n - 1),
         };
-        if let Some(t) = target {
-            self.select_anchor = None; // a comment jump is navigation, not a selection extend
-            self.diff_cursor = t;
-            self.reveal_diff = true;
-        }
+        let (row, ci) = cards[k];
+        self.focus = Focus::Diff;
+        self.select_anchor = None; // a comment jump is navigation, not a selection extend
+        self.diff_cursor = row;
+        self.reveal_diff = true;
+        self.target_comment_card(ci);
     }
 
     // --- Search overlay ------------------------------------------------
@@ -4583,13 +4737,7 @@ impl App {
         // Whether the diff-jump is already the primary, so the `go` band doesn't repeat the toggle.
         let mut pane_is_primary = false;
 
-        if self.rendered_active() && self.focus == Focus::Diff {
-            // The rendered view: the way to the commentable source leads, and no comment
-            // key is offered; the shared tail below adds the
-            // scope, send, and band actions. With the file list focused, the tree's own
-            // actions apply instead.
-            out.push((A::Preview, Primary));
-        } else if self.file_rows.is_empty()
+        if self.file_rows.is_empty()
             && self.scope == Scope::Branch
             && self.branch_base.winner.is_none()
             && self.base_pick_available()
@@ -5390,6 +5538,93 @@ fn rendered_row_at_line(rows: &[Row], line: u32) -> Option<usize> {
     Some(block_lead(rows, start))
 }
 
+/// The rendered blocks' source ranges in row order, one per run of rows sharing a `src`.
+fn rendered_blocks(rows: &[Row]) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for row in rows {
+        if let Row::Rendered { src, src_end, .. } = row
+            && out.last().is_none_or(|&(s, _)| s != *src)
+        {
+            out.push((*src, *src_end));
+        }
+    }
+    out
+}
+
+/// The block (by its `src`) that source line `line` belongs to rendered, the rule
+/// [`rendered_row_at_line`] lands by: the block whose range holds it, else the first block
+/// below it — a blank line between blocks paints as the gap above the next — else the last
+/// block. `None`, a line past the file's end, lands on the last block too.
+fn holding_block(blocks: &[(u32, u32)], line: Option<u32>) -> Option<u32> {
+    let last = blocks.last().map(|&(s, _)| s);
+    let Some(line) = line else { return last };
+    blocks
+        .iter()
+        .find(|&&(s, e)| (s..=e).contains(&line))
+        .or_else(|| blocks.iter().find(|&&(s, _)| s > line))
+        .map(|&(s, _)| s)
+        .or(last)
+}
+
+/// Each row's nearest new-side line numbers before and after it, in diff order — for a
+/// deletion, the lines its run sits between.
+fn new_line_bounds(lines: &[&Row]) -> Vec<Bounds> {
+    let mut bounds = vec![Bounds::default(); lines.len()];
+    let mut before = None;
+    for (i, row) in lines.iter().enumerate() {
+        bounds[i].before = before;
+        before = row.new_no().or(before);
+    }
+    let mut after = None;
+    // Whether the first row past the deletion run a row sits in is an insertion.
+    let mut replaced = false;
+    for (i, row) in lines.iter().enumerate().rev() {
+        bounds[i].after = after;
+        bounds[i].replaced = replaced;
+        after = row.new_no().or(after);
+        replaced = match row {
+            Row::Insertion { .. } => true,
+            Row::Deletion { .. } => replaced,
+            _ => false,
+        };
+    }
+    bounds
+}
+
+/// Where a diff row sits among the new side's lines: the nearest new-side line before and
+/// after it, and — for a deletion — whether its run is replaced, an insertion right after it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Bounds {
+    before: Option<u32>,
+    after: Option<u32>,
+    replaced: bool,
+}
+
+/// The block (by its `src`) that owns a deletion run. A replaced run — an insertion right
+/// after it — belongs with its replacement: the block holding the first inserted line. A pure
+/// deletion goes by adjacency: the block holding the line before it (an edit at its tail,
+/// even with a blank line after), else the block holding the line after it (an edit at its
+/// head). A run touching neither lies between blocks, and lands on the next block below it,
+/// or the last block at the end of the file. The one owner rule anchors and cards both read.
+fn deletion_owner(blocks: &[(u32, u32)], at: Bounds) -> Option<u32> {
+    let holding = |line: Option<u32>| {
+        let line = line?;
+        blocks.iter().find(|&&(s, e)| (s..=e).contains(&line)).map(|&(s, _)| s)
+    };
+    if at.replaced {
+        return holding_block(blocks, at.after);
+    }
+    holding(at.before).or_else(|| holding(at.after)).or_else(|| holding_block(blocks, at.after))
+}
+
+/// A diff's rows with every fold opened: each source line once, in diff order.
+fn diff_lines(rows: &[Row]) -> impl Iterator<Item = &Row> {
+    rows.iter().flat_map(|row| match row {
+        Row::Fold { lines } => lines.as_slice(),
+        _ => std::slice::from_ref(row),
+    })
+}
+
 /// The lead row of the rendered block holding row `i`: its first line with text, else its
 /// first line. A block's leading rows are the blank gap the renderer sets above it, so the
 /// lead is where the block reads as starting — where a flip lands and the gutter numbers it.
@@ -5461,6 +5696,8 @@ fn span_rgb(color: ratatui::style::Color, text: ratatui::style::Color) -> crate:
     }
 }
 
+/// Whether source row `row` lies in `c`'s range on the comment's side. Rendered rows go by
+/// block instead ([`App::rendered_cover`]).
 fn line_in(c: &Comment, row: &Row) -> bool {
     let no = match c.side {
         Side::New => row.new_no(),
@@ -6026,12 +6263,11 @@ mod tests {
     }
 
     #[test]
-    fn rendered_markdown_over_a_commented_line_opens_the_file() {
-        // Cards are not painted rendered, so nothing on screen claims the key and the
-        // file wins it, even with the cursor on a commented line
+    fn rendered_markdown_over_a_commented_block_edits_the_comment() {
+        // The rendered view paints the card under the block, so the comment claims the key
+        // exactly as on source, and the edit opens in place without leaving the rendered view.
         // The table above cannot assert this: its footer expectation
         // is derived from `comment_claims_edit`, so only an outcome catches a wrong predicate.
-        use super::EditTarget;
         let mut app = edit_app();
         app.store.add(crate::model::Comment {
             file: "src/lib.rs".into(),
@@ -6049,12 +6285,9 @@ mod tests {
         app.diff_cursor = 0;
 
         app.start_edit();
-        assert!(!app.composing(), "an invisible card does not claim the key");
-        assert_eq!(
-            app.editor_request,
-            Some(EditTarget { path: "src/lib.rs".into(), line: 1 }),
-            "the file opens at the rendered cursor's line"
-        );
+        assert!(app.composing(), "the card on screen claims the key");
+        assert_eq!(app.editor_request, None, "so the file does not open");
+        assert!(app.renders_markdown(), "the edit stays rendered");
     }
 
     #[test]

@@ -291,6 +291,19 @@ pub fn hit_diff(
     None
 }
 
+/// The comment whose card the painted frame shows at `(col, row)`, if any.
+#[must_use]
+pub fn card_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
+    let inner = read_inner_rect(area, app);
+    if !contains(inner, col, row) {
+        return None;
+    }
+    match app.painted_slots().get((row - inner.y) as usize)? {
+        Slot::Card { comment, .. } => Some(*comment),
+        _ => None,
+    }
+}
+
 /// The number of diff rows visible in the diff pane, used to clamp the scroll.
 #[must_use]
 pub fn diff_viewport_height(area: Rect, app: &App) -> usize {
@@ -346,7 +359,7 @@ fn composing_split(app: &App, height: usize, width: usize) -> (usize, usize, usi
     // Cap the box at height-1 so a comment taller than the viewport can't hide its anchor.
     let box_h = composer_height(app, width).min(height.saturating_sub(1)).max(1);
     let diff_budget = height - box_h;
-    let (_, hi) = app.selection_range();
+    let hi = app.compose_row();
     // A mid-event edge scroll can push `diff_scroll` past the last row before the frame
     // re-bounds it, so bound by hand — `Ord::clamp` asserts min <= max and would panic.
     let anchor = hi.max(app.diff_scroll).min(app.visible.len().saturating_sub(1));
@@ -362,7 +375,7 @@ fn tail<T: Clone>(v: Vec<T>, cap: usize) -> Vec<T> {
 /// The read pane's display lines top to bottom for the current state — the one layout walk.
 /// Two callers: `render_diff_view` paints from it and records it, and a mid-gesture scroll
 /// re-runs it (`refresh_read_layout`). Empty on a notice.
-fn read_layout(app: &App, inner: Rect) -> Vec<Slot> {
+fn read_layout(app: &App, inner: Rect, cards: &[(usize, usize)]) -> Vec<Slot> {
     if app.visible.is_empty() || inner.height == 0 {
         return Vec::new();
     }
@@ -370,7 +383,6 @@ fn read_layout(app: &App, inner: Rect) -> Vec<Slot> {
     let width = inner.width as usize;
     let gutter_w = gutter_for(&app.diff);
     let p = app.palette();
-    let cards = app.card_rows();
     let editing = editing_comment(app);
     let rows = app.visible.len();
     // A row's slots: its wrapped code lines, then its visible cards' lines — the same order
@@ -427,7 +439,7 @@ fn read_layout(app: &App, inner: Rect) -> Vec<Slot> {
 /// hit-tests against post-scroll state.
 pub fn refresh_read_layout(app: &App, area: Rect) {
     let pane = read_pane(area, app);
-    app.note_painted_slots(read_layout(app, pane.inner));
+    app.note_painted_slots(read_layout(app, pane.inner, &app.card_rows()));
 }
 
 /// The display-cell range a code display line paints over `cells`: the wrap segment with
@@ -576,10 +588,10 @@ pub fn read_point_clamped(
 
 /// The commentable logical row whose gutter `(col, row)` lands on, `None` elsewhere. The
 /// whole gutter width takes the click and the drag, and a continuation line's gutter belongs
-/// to its logical row. The rendered view's gutter takes no comments yet.
+/// to its logical row.
 #[must_use]
 pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize> {
-    if app.tab == Tab::Pr || app.rendered_active() {
+    if app.tab == Tab::Pr {
         return None;
     }
     let pane = read_pane(area, app);
@@ -1888,13 +1900,14 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         expand_hint: &expand_hint,
         rendered: app.rendered_lines(),
     };
-    let commented = app.commented_lines();
+    // One comment→row walk feeds both the marks and the card splice.
+    let (cards, commented) = app.comment_marks();
     let (lo, hi) = app.selection_range();
     let selecting = app.focus == Focus::Diff && app.select_anchor.is_some();
 
     // The one display-line walk: painted from below and recorded for this frame's hit
     // tests, so the screen and the maps cannot disagree.
-    let slots = read_layout(app, inner);
+    let slots = read_layout(app, inner, &cards);
     app.note_painted_slots(slots.clone());
     note_rendered_regions(app, &slots, inner, gutter_prefix_width(gutter_w));
 
@@ -2059,13 +2072,22 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         layout;
     let RowState { commented, cursor, selected, hovered, lead } = state;
     if let Row::Rendered { src, line, .. } = row {
-        // The block's lead line carries its source number; its other lines a blank one,
-        // like a wrapped row's continuation.
+        // The block's lead line carries its source number, in the comment accent when a
+        // comment covers the block; its other lines a blank one, like a wrapped row's
+        // continuation. The hover's `[+]` covers the field on any line, as on source.
         let num = if lead { src.to_string() } else { String::new() };
-        let mut spans = vec![
-            Span::styled(" ", Style::default().fg(pal.dim2)),
-            Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(pal.dim1)),
-        ];
+        let num_color = if commented { pal.orange } else { pal.dim1 };
+        let mut spans = vec![Span::styled(" ", Style::default().fg(pal.dim2))];
+        if hovered {
+            spans.push(Span::raw(" ".repeat(gutter_w - 3)));
+            spans.push(Span::styled(
+                "[+]",
+                Style::default().fg(pal.orange).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+        } else {
+            spans.push(Span::styled(format!("{num:>gutter_w$} "), Style::default().fg(num_color)));
+        }
         spans.extend(rendered.get(*line as usize).map(|l| l.spans.clone()).unwrap_or_default());
         let mut out = Line::from(spans);
         if let Some(pad) = width.checked_sub(out.width()).filter(|p| *p > 0) {

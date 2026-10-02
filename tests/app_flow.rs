@@ -4109,7 +4109,7 @@ fn a_non_markdown_file_never_renders() {
 }
 
 #[test]
-fn the_rendered_view_takes_no_comments_and_clears_a_selection_on_entry() {
+fn the_rendered_view_takes_comments_and_clears_a_selection_on_entry() {
     let (_repo, mut app) = markdown_app();
     app.focus = Focus::Diff;
     app.toggle_preview(); // to source
@@ -4122,11 +4122,12 @@ fn the_rendered_view_takes_no_comments_and_clears_a_selection_on_entry() {
     assert!(app.rendered_active());
     assert!(app.select_anchor.is_none(), "entering the rendered view clears a live selection");
 
-    // Authoring keys stay inert here for now, and the rows come pre-wrapped.
+    // The authoring keys work on rendered rows like on source; the rows come pre-wrapped.
     app.toggle_select();
-    assert!(app.select_anchor.is_none(), "no line selection in the rendered view");
+    assert!(app.select_anchor.is_some(), "`v` starts a range in the rendered view");
     app.start_comment();
-    assert!(!app.composing(), "no commenting in the rendered view");
+    assert!(app.composing(), "`c` opens the composer in the rendered view");
+    app.cancel_comment();
     app.toggle_wrap();
     assert!(app.wrap, "the wrap toggle is inert in the rendered view");
 }
@@ -8047,4 +8048,535 @@ fn editing_a_stale_comment_leaves_the_open_markdown_rendered() {
     app.start_edit();
     assert_eq!(app.diff_path.as_deref(), Some("README.md"));
     assert!(app.rendered_active(), "an unrelated file keeps its rendered view");
+}
+
+/// A markdown file whose paragraph's second line was rewritten, open rendered on `Changes`:
+/// a heading (line 1), the paragraph (lines 3-4, its line 4 a `−`/`+` pair), a list item
+/// (line 6).
+fn rendered_review_app() -> (Repo, App) {
+    let r = Repo::init();
+    r.write("doc.md", "# Title\n\nalpha one\nbeta two\n\n- item\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Title\n\nalpha one\nBETA TWO\n\n- item\n");
+    let mut app = app_on(&r);
+    assert!(app.rendered_active(), "the markdown file opens rendered");
+    app.focus = Focus::Diff;
+    (r, app)
+}
+
+/// The first rendered row whose text holds `needle`.
+fn rendered_row(app: &App, needle: &str) -> usize {
+    app.visible.iter().position(|row| row.text().contains(needle)).expect("a row with the text")
+}
+
+/// Write `text` in the open composer and save it.
+fn write_comment(app: &mut App, text: &str) {
+    assert!(app.composing(), "the composer is open");
+    typed(app, text);
+    app.submit_comment();
+}
+
+#[test]
+fn a_rendered_comment_equals_the_source_comment() {
+    let (_repo, mut app) = rendered_review_app();
+    // Rendered: `c` on the modified paragraph.
+    app.diff_cursor = rendered_row(&app, "alpha one");
+    app.start_comment();
+    write_comment(&mut app, "tighten this");
+    let rendered = app.store.get(0).unwrap().clone();
+    let rendered_export = herdr_reviewr::export::format_all(&[&rendered]);
+    assert_eq!((rendered.side, rendered.start, rendered.end), (Side::New, 3, 4));
+    assert_eq!(
+        rendered.lines, " alpha one\n-beta two\n+BETA TWO",
+        "the block's diff rows, its deletion included"
+    );
+
+    // Source: the same diff rows by `v` + `c`.
+    app.store.take(0);
+    app.toggle_preview();
+    assert!(!app.rendered_active());
+    app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(3)).unwrap();
+    app.toggle_select();
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    write_comment(&mut app, "tighten this");
+    let source = app.store.get(0).unwrap().clone();
+    assert_eq!(source, rendered, "same side, range, snippet, kind, and rev");
+    assert_eq!(herdr_reviewr::export::format_all(&[&source]), rendered_export);
+
+    // A rendered range over two blocks anchors the contiguous span, the blank line between
+    // them included, and equals the source selection over lines 1..=4.
+    app.store.take(0);
+    app.toggle_preview();
+    app.diff_cursor = 0;
+    app.toggle_select();
+    app.diff_cursor = rendered_row(&app, "alpha one");
+    app.start_comment();
+    write_comment(&mut app, "both");
+    let rendered = app.store.take(0).unwrap();
+    assert_eq!((rendered.side, rendered.start, rendered.end), (Side::New, 1, 4));
+    assert_eq!(rendered.lines, " # Title\n \n alpha one\n-beta two\n+BETA TWO");
+    let rendered_export = herdr_reviewr::export::format_all(&[&rendered]);
+
+    app.toggle_preview();
+    app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(1)).unwrap();
+    app.toggle_select();
+    app.diff_cursor = app.visible.iter().position(|r| r.marker() == '+').unwrap();
+    app.start_comment();
+    write_comment(&mut app, "both");
+    let source = app.store.get(0).unwrap();
+    assert_eq!(*source, rendered, "a multi-block range equals the contiguous source range");
+    assert_eq!(herdr_reviewr::export::format_all(&[source]), rendered_export);
+}
+
+/// Comment the first `-` row of `doc.md`'s diff in source, flip to rendered, and return the
+/// rendered row its card sits under.
+fn old_side_card_row(old: &str, new: &str) -> (Repo, App, usize) {
+    let r = Repo::init();
+    r.write("doc.md", old);
+    r.commit_all("init");
+    r.write("doc.md", new);
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    comment_on(&mut app, '-', "removed");
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let cards = app.card_rows();
+    assert_eq!(cards.len(), 1, "the old-side comment shows rendered");
+    let row = cards[0].0;
+    (r, app, row)
+}
+
+#[test]
+fn a_tail_deletion_belongs_to_its_own_block_even_before_a_blank_line() {
+    // The paragraph's last line is removed; a blank line follows the removal.
+    let (_r, mut app, row) =
+        old_side_card_row("para one\nlast line\n\n# Next\n", "para one\n\n# Next\n");
+    assert_eq!(row, rendered_row(&app, "para one"), "the card sits under its paragraph");
+
+    // Anchoring the paragraph rendered takes the removed line with it.
+    app.store.take(0);
+    app.diff_cursor = row;
+    app.start_comment();
+    write_comment(&mut app, "para");
+    let c = app.store.get(0).unwrap();
+    assert_eq!(c.lines, " para one\n-last line");
+}
+
+#[test]
+fn a_whole_paragraph_removed_between_blocks_lands_on_the_next_block() {
+    let (_r, mut app, row) =
+        old_side_card_row("# A\n\npara one\n\ngone para\n\n# C\n", "# A\n\npara one\n\n# C\n");
+    let next = rendered_row(&app, "C");
+    assert_eq!(row, next, "a between-blocks deletion sits under the next block");
+
+    // The paragraph above does not claim it; a range spanning both blocks takes it.
+    app.store.take(0);
+    app.diff_cursor = rendered_row(&app, "para one");
+    app.start_comment();
+    write_comment(&mut app, "para");
+    assert!(!app.store.get(0).unwrap().lines.contains("gone para"));
+    app.store.take(0);
+    app.toggle_select();
+    app.diff_cursor = next;
+    app.start_comment();
+    write_comment(&mut app, "span");
+    assert!(app.store.get(0).unwrap().lines.contains("-gone para"));
+}
+
+#[test]
+fn an_all_files_rendered_comment_equals_the_source_comment() {
+    use herdr_reviewr::app::Tab;
+    let (_repo, mut app) = rendered_review_app();
+    enter_tab(&mut app, Tab::AllFiles);
+    assert!(app.rendered_active());
+    app.focus = Focus::Diff;
+    app.diff_cursor = rendered_row(&app, "BETA TWO");
+    app.start_comment();
+    write_comment(&mut app, "content note");
+    let rendered = app.store.take(0).unwrap();
+    assert!(!rendered.diff_anchored, "the File view anchors content, as on source");
+    assert_eq!((rendered.start, rendered.end), (3, 4));
+
+    app.toggle_preview();
+    app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(3)).unwrap();
+    app.toggle_select();
+    app.diff_cursor += 1;
+    app.start_comment();
+    write_comment(&mut app, "content note");
+    assert_eq!(app.store.get(0), Some(&rendered));
+}
+
+#[test]
+fn the_gutter_click_and_drag_open_the_composer_on_rendered_rows() {
+    let (_repo, mut app) = rendered_review_app();
+    let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
+    let gutter_x = inner.x + 1;
+    let para = rendered_row(&app, "alpha one");
+    let para_y = inner.y + u16::try_from(para).unwrap();
+
+    // A gutter click on the heading opens the composer there.
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), gutter_x, inner.y);
+    assert!(app.gutter_drag());
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), gutter_x, inner.y);
+    assert!(app.composing());
+    assert_eq!(app.selection_range(), (0, 0));
+    assert_eq!(app.pending_location().as_deref(), Some("doc.md:1"));
+
+    // While composing, the gutter is inert and the draft's anchor holds.
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), gutter_x, para_y);
+    assert!(!app.gutter_drag());
+    assert_eq!(app.selection_range(), (0, 0), "the draft's anchor never moves");
+    press(&mut app, &Keymap::default(), KeyCode::Esc);
+    assert_eq!(app.mode, Mode::Normal);
+
+    // A gutter drag spans heading to paragraph and opens the composer on release.
+    sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), gutter_x, inner.y);
+    sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), gutter_x, para_y);
+    assert!(app.gutter_drag());
+    assert_eq!(app.selection_range(), (0, para));
+    sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), gutter_x, para_y);
+    assert!(app.composing());
+    write_comment(&mut app, "range note");
+    let c = app.store.get(0).unwrap();
+    assert_eq!((c.start, c.end), (1, 4));
+    assert!(app.rendered_active(), "commenting never leaves the rendered view");
+}
+
+#[test]
+fn list_jump_edit_and_delete_work_in_the_rendered_view() {
+    let (_repo, mut app) = rendered_review_app();
+    app.diff_cursor = rendered_row(&app, "alpha one");
+    app.start_comment();
+    write_comment(&mut app, "first");
+    let card = app.card_rows()[0].0;
+    assert_eq!(card, rendered_row(&app, "BETA TWO"), "the card sits under the block's last row");
+
+    // Jump: from the top onto the commented block, rendered.
+    app.diff_cursor = 0;
+    app.jump_comment(1);
+    assert!(app.commented_lines().contains(&app.diff_cursor), "the jump lands on the comment");
+    assert!(app.rendered_active());
+
+    // Edit under the cursor: the box opens in the card's place, still rendered.
+    app.start_edit();
+    assert!(matches!(app.mode, Mode::Composing { editing: Some(0) }));
+    assert!(app.rendered_active(), "editing no longer flips to source");
+    assert_eq!(app.diff_cursor, card, "the cursor lands on the card's row");
+    app.input_push('!');
+    app.submit_comment();
+    assert_eq!(app.store.get(0).unwrap().text, "first!");
+
+    // Edit from the list: the same landing, rendered.
+    app.diff_cursor = 0;
+    app.open_list();
+    app.start_edit();
+    assert!(matches!(app.mode, Mode::Composing { editing: Some(0) }));
+    assert!(app.rendered_active());
+    assert_eq!(app.diff_cursor, card);
+    app.cancel_comment();
+    assert_eq!(app.mode, Mode::List, "the list edit returns to the list");
+    app.close_list();
+
+    // Delete under the cursor, rendered.
+    app.diff_cursor = rendered_row(&app, "alpha one");
+    app.delete_comment();
+    assert!(app.store.is_empty());
+    assert!(app.rendered_active());
+}
+
+#[test]
+fn a_poll_or_resize_during_a_rendered_draft_never_moves_its_anchor() {
+    let (r, mut app) = rendered_review_app();
+    app.sync_rendered_width(60);
+    app.diff_cursor = rendered_row(&app, "BETA TWO");
+    app.start_comment();
+    typed(&mut app, "half");
+    let rows = app.visible.clone();
+    let range = app.selection_range();
+    let location = app.pending_location();
+
+    // The agent prepends lines, and the pane resizes, while the draft is open.
+    r.write("doc.md", "intro\n\nmore\n\n# Title\n\nalpha one\nBETA TWO\n\n- item\n");
+    app.reload().unwrap();
+    app.sync_rendered_width(40);
+    assert_eq!(app.visible, rows, "the rendered rows are frozen under the draft");
+    assert_eq!(app.selection_range(), range);
+    assert_eq!(app.pending_location(), location);
+
+    app.submit_comment();
+    let c = app.store.get(0).unwrap();
+    assert_eq!((c.start, c.end), (3, 4), "the comment anchors where the draft was written");
+}
+
+#[test]
+fn comments_survive_view_flips_and_polls_in_both_views() {
+    let (r, mut app) = rendered_review_app();
+    // Made rendered, shown in source.
+    app.diff_cursor = rendered_row(&app, "alpha one");
+    app.start_comment();
+    write_comment(&mut app, "rendered-made");
+    app.toggle_preview();
+    assert!(!app.rendered_active());
+    assert_eq!(app.card_rows().len(), 1, "a rendered comment shows in source");
+
+    // Made in source: an old-side comment on the deletion, and one on the blank line 5 that
+    // no block covers.
+    comment_on(&mut app, '-', "old-side");
+    app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(5)).unwrap();
+    app.start_comment();
+    write_comment(&mut app, "blank");
+    assert_eq!(app.store.get(1).unwrap().side, Side::Old);
+    assert_eq!(app.card_rows().len(), 3);
+
+    // Back to rendered: every card shows, the old-side one under the block holding the
+    // deletion, the blank-line one under the block below it.
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let cards = app.card_rows();
+    assert_eq!(cards.len(), 3, "no comment hides rendered: {cards:?}");
+    let para_end = rendered_row(&app, "BETA TWO");
+    let item = rendered_row(&app, "item");
+    assert!(cards.contains(&(para_end, 0)));
+    assert!(cards.contains(&(para_end, 1)), "the deletion's card sits under its block");
+    assert!(cards.contains(&(item, 2)), "a blank line's card sits under the block below it");
+
+    // A poll that edits elsewhere drops and hides nothing, in either view.
+    r.write("doc.md", "# Title\n\nalpha one\nBETA TWO\n\n- item\n- more\n");
+    app.reload().unwrap();
+    assert_eq!(app.store.len(), 3);
+    assert_eq!(app.card_rows().len(), 3, "rendered, after the poll");
+    app.toggle_preview();
+    assert_eq!(app.card_rows().len(), 3, "source, after the poll");
+}
+
+#[test]
+fn a_deletion_at_the_end_of_the_file_renders_under_the_last_block() {
+    let r = Repo::init();
+    r.write("doc.md", "# Title\n\nbody\n\ngone\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Title\n\nbody\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    comment_on(&mut app, '-', "why remove");
+    assert_eq!(app.store.get(0).unwrap().side, Side::Old);
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let last = app.visible.len() - 1;
+    assert_eq!(app.card_rows(), vec![(last, 0)], "the last block holds an EOF deletion");
+}
+
+/// Open `doc.md` edited from `old` to `new`, rendered, the read pane focused.
+fn replaced_line_app(old: &str, new: &str) -> (Repo, App) {
+    let r = Repo::init();
+    r.write("doc.md", old);
+    r.commit_all("init");
+    r.write("doc.md", new);
+    let mut app = app_on(&r);
+    assert!(app.rendered_active());
+    app.focus = Focus::Diff;
+    (r, app)
+}
+
+/// The rendered block source line of row `i`.
+fn rendered_src(app: &App, i: usize) -> u32 {
+    match &app.visible[i] {
+        herdr_reviewr::diff::Row::Rendered { src, .. } => *src,
+        row => panic!("not a rendered row: {row:?}"),
+    }
+}
+
+#[test]
+fn a_replaced_line_belongs_to_its_replacement_block() {
+    // (old, new, the replacement's rendered text, the block above's text, the snippet)
+    let cases = [
+        ("- a\n- b\n- c\n", "- a\n- B\n- c\n", "B", "a", "-- b\n+- B"),
+        ("- a\n- b\n- c\n", "- a\n- B\n", "B", "a", "-- b\n-- c\n+- B"),
+        (
+            "| h |\n|---|\n| x |\n| y |\n",
+            "| h |\n|---|\n| X |\n| y |\n",
+            "X",
+            "h",
+            "-| x |\n+| X |",
+        ),
+        ("```\nfoo\nbar\n```\n", "```\nfoo\nBAR\n```\n", "BAR", "foo", "-bar\n+BAR"),
+        ("# H\npara one\n", "# H\nPARA one\n", "PARA", "H", "-para one\n+PARA one"),
+    ];
+    for (old, new, needle, above, snippet) in cases {
+        let (_r, mut app) = replaced_line_app(old, new);
+        let at = rendered_row(&app, needle);
+
+        // Rendered: the replacement's block takes the removed line, the block above does not.
+        app.diff_cursor = at;
+        app.start_comment();
+        write_comment(&mut app, "note");
+        let rendered = app.store.take(0).unwrap();
+        assert_eq!(rendered.lines, snippet, "{needle}");
+        app.diff_cursor = rendered_row(&app, above);
+        app.start_comment();
+        write_comment(&mut app, "above");
+        let c = app.store.take(0).unwrap();
+        assert!(!c.lines.lines().any(|l| l.starts_with('-')), "{above}: {:?}", c.lines);
+
+        // Source: the same diff rows, the `−` run through its insertions, make the same
+        // comment.
+        app.toggle_preview();
+        let first = app.visible.iter().position(|r| r.marker() == '-').unwrap();
+        let last = app.visible.iter().rposition(|r| r.marker() == '+').unwrap();
+        app.diff_cursor = first;
+        app.toggle_select();
+        app.diff_cursor = last;
+        app.start_comment();
+        write_comment(&mut app, "note");
+        let source = app.store.take(0).unwrap();
+        assert_eq!(source, rendered, "{needle}: the source comment on the same rows");
+
+        // An old-side comment on the replaced line carries its card under the replacement.
+        app.diff_cursor = first;
+        app.start_comment();
+        write_comment(&mut app, "old");
+        assert_eq!(app.store.get(0).unwrap().side, Side::Old);
+        app.toggle_preview();
+        let at = rendered_row(&app, needle);
+        let card = app.card_rows()[0].0;
+        assert_eq!(rendered_src(&app, card), rendered_src(&app, at), "{needle}: card block");
+    }
+}
+
+#[test]
+fn an_old_side_comment_follows_its_line_restored_as_context() {
+    let r = Repo::init();
+    r.write("doc.md", "# A\n\n# B\n\nbody\n");
+    r.commit_all("init");
+    r.write("doc.md", "# A\n\nbody\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    comment_on(&mut app, '-', "why drop B");
+    assert_eq!(app.store.get(0).unwrap().side, Side::Old);
+
+    // The agent restores `# B` and edits elsewhere.
+    r.write("doc.md", "# A\n\n# B\n\nbody edited\n");
+    app.reload().unwrap();
+    let card = app.card_rows()[0].0;
+    assert_eq!(app.visible[card].old_no(), Some(3), "source: the card on the restored line");
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let card = app.card_rows()[0].0;
+    assert_eq!(rendered_src(&app, card), 3, "rendered: the card on the `# B` block");
+}
+
+#[test]
+fn a_rendered_range_anchor_survives_a_resize() {
+    let (_r, mut app) = {
+        let r = Repo::init();
+        let long = "word ".repeat(40);
+        r.write("doc.md", &format!("# T\n\n{long}\n\n- item\n"));
+        let app = app_on(&r);
+        (r, app)
+    };
+    app.focus = Focus::Diff;
+    app.sync_rendered_width(80);
+    app.diff_cursor = rendered_row(&app, "item");
+    app.toggle_select();
+    let before = app.select_anchor.unwrap();
+
+    app.sync_rendered_width(30);
+    let anchor = app.select_anchor.unwrap();
+    assert_ne!(anchor, before, "the paragraph rewrapped above the anchor");
+    assert_eq!(anchor, rendered_row(&app, "item"), "the anchor kept its row by identity");
+    app.start_comment();
+    assert_eq!(app.pending_location().as_deref(), Some("doc.md:5"));
+}
+
+#[test]
+fn two_comments_on_one_block_are_each_reachable() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\nl1\nl2\nl3\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    for (line, text) in [(3, "first"), (5, "second")] {
+        app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(line)).unwrap();
+        app.start_comment();
+        write_comment(&mut app, text);
+    }
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let para = rendered_row(&app, "l1");
+    assert_eq!(app.card_rows(), vec![(para, 0), (para, 1)], "both cards under the paragraph");
+
+    // `]` steps card by card, and `e` edits the one it reached.
+    app.diff_cursor = 0;
+    app.jump_comment(1);
+    assert_eq!(app.diff_cursor, para);
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(0) });
+    app.cancel_comment();
+    app.jump_comment(1);
+    assert_eq!(app.diff_cursor, para);
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(1) }, "the second card is reachable");
+    app.cancel_comment();
+    app.jump_comment(-1);
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(0) }, "and back");
+    app.cancel_comment();
+
+    // `d` deletes the picked one.
+    app.jump_comment(1);
+    app.delete_comment();
+    assert_eq!(app.store.len(), 1);
+    assert_eq!(app.store.get(0).unwrap().text, "first");
+
+    // Any other cursor move drops the pick: the first covering comment answers again.
+    app.focus = Focus::Diff;
+    app.move_cursor(-1).unwrap();
+    app.move_cursor(1).unwrap();
+    app.start_edit();
+    assert_eq!(app.mode, Mode::Composing { editing: Some(0) });
+    app.cancel_comment();
+}
+
+#[test]
+fn a_card_click_picks_its_comment() {
+    let r = Repo::init();
+    r.write("doc.md", "# T\n\nl1\nl2\nl3\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+    app.focus = Focus::Diff;
+    app.toggle_preview();
+    for (line, text) in [(3, "first"), (5, "second")] {
+        app.diff_cursor = app.visible.iter().position(|r| r.new_no() == Some(line)).unwrap();
+        app.start_comment();
+        write_comment(&mut app, text);
+    }
+    app.toggle_preview();
+    let screen_y = |app: &App, needle: &str| -> u16 {
+        let backend = ratatui::backend::TestBackend::new(SEL_AREA.width, SEL_AREA.height);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| herdr_reviewr::ui::render(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..SEL_AREA.height)
+            .find(|&y| {
+                let line: String =
+                    (0..SEL_AREA.width).map(|x| buf.cell((x, y)).unwrap().symbol()).collect();
+                line.contains(needle)
+            })
+            .expect("the card paints")
+    };
+    let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
+    for (needle, index) in [("second", 1), ("first", 0)] {
+        let y = screen_y(&app, needle);
+        sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), inner.x + 4, y);
+        sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), inner.x + 4, y);
+        app.start_edit();
+        assert_eq!(app.mode, Mode::Composing { editing: Some(index) }, "clicked {needle}");
+        app.cancel_comment();
+    }
 }

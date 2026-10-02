@@ -2342,6 +2342,10 @@ fn perform_click(
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
+                // A click on a card picks its comment, for the `edit`/`delete` that follow.
+                if let Surface::Card { comment } = drag.surface {
+                    app.target_comment_card(comment);
+                }
                 app.expand_fold(heights, ui::diff_viewport_height(area, app));
             }
         }
@@ -2595,6 +2599,9 @@ pub fn handle_mouse(
                 app.focus = Focus::Diff;
                 app.diff_cursor = i;
                 app.select_anchor = None;
+                if let Some(comment) = ui::card_at(area, app, m.column, m.row) {
+                    app.target_comment_card(comment);
+                }
                 // A click on a fold marker expands it, keeping the viewport still.
                 app.expand_fold(heights, ui::diff_viewport_height(area, app));
             }

@@ -1566,7 +1566,7 @@ fn a_markdown_file_paints_rendered_rows_numbered_by_block() {
     assert!(out.contains("  3 Run cargo test"), "the paragraph's row carries line 3:\n{out}");
     let footer = out.lines().last().unwrap();
     assert!(footer.contains("m source"), "the footer leads to source:\n{footer}");
-    assert!(!footer.contains("c comment"), "no comment key rendered:\n{footer}");
+    assert!(footer.contains("c comment"), "rendered rows take comments:\n{footer}");
 
     // Source view: raw markdown, and the footer leads back.
     app.toggle_preview();
@@ -4415,4 +4415,90 @@ fn a_long_folder_name_leaves_room_for_the_dot() {
     app.expand_dir();
     let row = files_row(&app, "…");
     assert_eq!(row.replacen('▾', "▸", 1), collapsed_name, "the name reads the same expanded");
+}
+
+#[test]
+fn rendered_cards_sit_under_the_last_row_of_their_block() {
+    // A paragraph wrapping to several rendered rows, its source line 4 (`beta`) deleted.
+    let r = Repo::init();
+    let long = "gamma ".repeat(30) + "omega";
+    r.write("doc.md", &format!("# Head\n\nalpha\nbeta\n{long}\n\n- item\n"));
+    r.commit_all("init");
+    r.write("doc.md", &format!("# Head\n\nalpha\n{long}\n\n- item\n"));
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+
+    // From source: a new-side comment on the paragraph's first line, an old-side one on
+    // the deletion.
+    app.toggle_preview();
+    for (marker, text) in [(' ', "on alpha"), ('-', "on the removal")] {
+        app.diff_cursor = app
+            .visible
+            .iter()
+            .position(|row| row.marker() == marker && row.text() == marker_text(marker))
+            .unwrap();
+        app.start_comment();
+        for ch in text.chars() {
+            app.input_push(ch);
+        }
+        app.submit_comment();
+    }
+    assert_eq!(app.store.len(), 2);
+
+    app.toggle_preview();
+    assert!(app.rendered_active());
+    let out = render(&app);
+    let lines: Vec<&str> = out.lines().collect();
+    let y = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+    let (first, last, item) = (y("alpha gamma"), y("omega"), y("item"));
+    assert!(first < last, "the paragraph wraps to several rows:\n{out}");
+    for text in ["on alpha", "on the removal"] {
+        let card = y(text);
+        assert!(last < card && card < item, "{text:?} sits under the block's last row:\n{out}");
+    }
+
+    // A draft on the paragraph's first row opens where its card will sit.
+    app.store.take(1);
+    app.store.take(0);
+    app.diff_cursor = app.visible.iter().position(|row| row.text().contains("alpha")).unwrap();
+    app.start_comment();
+    let out = render(&app);
+    let lines: Vec<&str> = out.lines().collect();
+    let y = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+    assert!(y("omega") < y("comment ·"), "the composer splices under the block:\n{out}");
+}
+
+/// The source text of the fixture row a marker picks out above: line 3 for context, the
+/// deleted line for `-`.
+fn marker_text(marker: char) -> &'static str {
+    if marker == '-' { "beta" } else { "alpha" }
+}
+
+#[test]
+fn a_hovered_rendered_row_shows_the_plus_button_and_a_commented_block_its_accent() {
+    let r = Repo::init();
+    r.write("doc.md", "# Head\n\nbody\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    app.focus = Focus::Diff;
+    let area = Rect::new(0, 0, 140, 40);
+    let inner = ui::read_inner_rect(area, &app);
+
+    app.hover = Some((inner.x + 8, inner.y));
+    let buf = render_buffer(&app);
+    assert_eq!(buf.cell((inner.x + 1, inner.y)).unwrap().symbol(), "[");
+    assert_eq!(buf.cell((inner.x + 2, inner.y)).unwrap().symbol(), "+");
+    assert_eq!(buf.cell((inner.x + 3, inner.y)).unwrap().symbol(), "]");
+
+    // A comment on the heading paints its number in the comment accent.
+    app.hover = None;
+    app.diff_cursor = 0;
+    app.start_comment();
+    app.input_push('x');
+    app.submit_comment();
+    let buf = render_buffer(&app);
+    let num = buf.cell((inner.x + 3, inner.y)).unwrap();
+    assert_eq!(num.symbol(), "1");
+    assert_eq!(num.fg, PEACH, "the commented block's number takes the accent");
 }
