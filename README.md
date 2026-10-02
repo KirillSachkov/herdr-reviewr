@@ -26,7 +26,7 @@ One persistent pane, pointed at a git worktree:
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
 - **Markdown review** — flip a `.md` file to rendered with `m`.
-- **Themes** — 19 palettes in dark and light.
+- **Themes** — 20 palettes in dark and light.
 
 It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
 GitLab, or Azure DevOps and never posts.
@@ -246,7 +246,7 @@ theme = "tokyo-night"
 
 - **Dark:** `catppuccin`, `catppuccin-frappe`, `catppuccin-macchiato`, `dracula`, `nord`,
   `gruvbox`, `one-dark`, `solarized`, `monokai`, `tokyo-night`, `rose-pine`,
-  `ayu`.
+  `ayu`, `everforest`.
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`,
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
 
@@ -509,7 +509,7 @@ herdr plugin link .
 
 Structured (JSON) export, a side-by-side split view, mark-file-reviewed,
 named-key notation for keybindings, OSC light/dark theme autodetect, more themes
-(`kanagawa`, `vesper`, `everforest`, a dark `github`), a `terminal`-following palette,
+(`kanagawa`, `vesper`, a dark `github`), a `terminal`-following palette,
 and OSC 52 clipboard.
 
 ## Sponsors
@@ -530,3 +530,4 @@ Bundled `.tmTheme` syntax files in `assets/`, each under its own license:
 - [Tokyo Night](https://github.com/folke/tokyonight.nvim) (`tokyo-night`, `tokyo-night-day`) — Apache-2.0.
 - [Rosé Pine](https://github.com/rose-pine/tm-theme) (`rose-pine`, `rose-pine-dawn`) — MIT.
 - [ayu](https://github.com/dempfi/ayu) (`ayu`) — MIT, converted from its Sublime color scheme.
+- [Everforest](https://github.com/sainnhe/everforest) (`everforest`) — MIT, built from its palette and highlight groups.

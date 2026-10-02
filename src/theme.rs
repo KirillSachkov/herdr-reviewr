@@ -172,6 +172,7 @@ fn build(name: &str) -> Option<Theme> {
         "rose-pine-dawn" => bundled("rose-pine-dawn", Light, ROSE_PINE_DAWN_TM, ROSE_PINE_DAWN),
         // Beyond herdr's set, paired with a vendored `.tmTheme`.
         "ayu" => bundled("ayu", Dark, AYU_TM, AYU),
+        "everforest" => everforest(),
         _ => return None,
     })
 }
@@ -249,6 +250,18 @@ const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTh
 const ROSE_PINE_TM: &[u8] = include_bytes!("../assets/rose-pine.tmTheme");
 const ROSE_PINE_DAWN_TM: &[u8] = include_bytes!("../assets/rose-pine-dawn.tmTheme");
 const AYU_TM: &[u8] = include_bytes!("../assets/ayu-dark.tmTheme");
+const EVERFOREST_TM: &[u8] = include_bytes!("../assets/everforest.tmTheme");
+
+/// Everforest dark hard: derived from its anchors, except the diff row fills. They are the one
+/// hand-set fill in a derived theme because upstream ships its own (`bg_green`, `bg_red`),
+/// so the rows match the Neovim theme. It has no word-emphasis fills, so those stay derived.
+fn everforest() -> Theme {
+    let derived = bundled("everforest", Appearance::Dark, EVERFOREST_TM, EVERFOREST);
+    Theme {
+        palette: Palette { ins_bg: hex(0x3c4841), del_bg: hex(0x493b40), ..derived.palette },
+        ..derived
+    }
+}
 
 /// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation
 /// path (and paired with `two-face`'s Latte syntax theme).
@@ -302,6 +315,9 @@ const ROSE_PINE_DAWN: Anchors =
 /// ports use), the `editor.fg` text, and its syntax palette for the accents.
 const AYU: Anchors =
     anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
+/// Everforest dark, hard background: `bg0`, `fg` and the accents from `autoload/everforest.vim`.
+const EVERFOREST: Anchors =
+    anchors(0x272e33, 0xd3c6aa, 0xe67e80, 0xa7c080, 0xdbbc7f, 0xe69875, 0xd699b6, 0x7fbbb3);
 
 /// Build `Anchors` from `0xRRGGBB` hex literals, so a palette reads as one compact row.
 /// One argument per anchor slot — the count is the palette's shape, not accidental.
@@ -543,6 +559,16 @@ mod tests {
     }
 
     #[test]
+    fn everforest_diff_rows_use_its_own_palette_fills() {
+        let p = resolve(Some("everforest")).palette;
+        assert_eq!(p.ins_bg, Color::Rgb(0x3c, 0x48, 0x41));
+        assert_eq!(p.del_bg, Color::Rgb(0x49, 0x3b, 0x40));
+        // Everything else still comes from the anchors.
+        assert_eq!(p.base, Color::Rgb(0x27, 0x2e, 0x33));
+        assert_eq!(p.text, Color::Rgb(0xd3, 0xc6, 0xaa));
+    }
+
+    #[test]
     fn unknown_and_terminal_fall_back_to_default() {
         assert_eq!(resolve(Some("nope")).name, "catppuccin");
         assert_eq!(resolve(Some("terminal")).name, "catppuccin");
@@ -639,6 +665,7 @@ mod tests {
         ("rose-pine", false),
         ("rose-pine-dawn", true),
         ("ayu", false),
+        ("everforest", false),
     ];
 
     #[test]
