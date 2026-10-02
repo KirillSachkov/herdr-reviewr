@@ -3015,7 +3015,10 @@ mod refresh_tests {
         );
         assert!(!app.divider_drag_cancelled());
 
+        // The frozen draft is unsent, so `q` asks and `Q` quits.
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('q'))));
+        assert!(app.confirming_quit && !app.should_quit);
+        handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('Q'))));
         assert!(app.should_quit);
     }
 
@@ -3052,6 +3055,14 @@ mod refresh_tests {
         handle_blocked_event(&mut app, &q);
         handle_blocked_event(&mut app, &Event::Key(KeyEvent::from(KeyCode::Char('Q'))));
         assert!(app.should_quit, "asked, `Q` quits");
+
+        // A draft frozen under the error screen is unsent too, so its quit asks first.
+        let mut app = App::new(std::path::PathBuf::from("."), Scope::Uncommitted, None);
+        app.mode = crate::app::Mode::Composing { editing: None };
+        app.input = "half a thought".to_string();
+        app.set_config_error("invalid config".to_string());
+        handle_blocked_event(&mut app, &q);
+        assert!(app.confirming_quit && !app.should_quit, "a draft makes `q` ask");
     }
 
     #[test]

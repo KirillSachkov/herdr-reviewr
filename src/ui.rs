@@ -42,7 +42,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         if app.confirming_quit {
             // The blocked screen reads the default bindings, as its key handling does.
             let key = crate::keymap::default_keymap().hint(crate::keymap::Action::QuitDiscard);
-            let (n, key) = (app.store.len(), key.label());
+            let (n, key) = (app.unsent(), key.label());
             let _ = if n == 1 {
                 write!(
                     message,
@@ -2751,8 +2751,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
         A::QuitDiscard => {
-            let pending = crate::export::counted_comments(app.store.len());
-            return (hint(K::QuitDiscard), format!("quit ({pending} pending)"));
+            // The count alone: `send N` beside it already names what is counted, and the
+            // shorter label keeps `esc cancel` on a 40-column row.
+            return (hint(K::QuitDiscard), format!("quit ({} pending)", app.unsent()));
         }
         A::Save => ("enter".into(), "save"),
         A::Newline => ("shift+enter".into(), "newline"),
@@ -2940,8 +2941,10 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
     };
 
     // The read-only PR tab leads with the PR's state summary, capped so the primary and the `?`
-    // keep their room on the line.
-    let pr_state = (app.tab == Tab::Pr).then(|| app.pr_snapshot()).flatten();
+    // keep their room on the line. The quit question owns the row instead, so its way out
+    // always fits.
+    let pr_state =
+        (app.tab == Tab::Pr && !app.confirming_quit).then(|| app.pr_snapshot()).flatten();
     if let Some(s) = pr_state {
         let primary_w = primary.map_or(0, |a| entry_body_width(app, a));
         let budget = w.saturating_sub(used + primary_w + reserve + 4).max(8);
@@ -2987,11 +2990,12 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
     let status_tail =
         send_w + if do_acts.is_empty() { reserve } else { reserve.max(MORE_ELLIPSIS) };
     let free = w.saturating_sub(used + status_tail);
-    let status_w = if app.status.is_empty() || free < STATUS_FRAME + STATUS_MIN {
-        0
-    } else {
-        (STATUS_FRAME + app.status.width()).min(free)
-    };
+    let status_w =
+        if app.status.is_empty() || app.confirming_quit || free < STATUS_FRAME + STATUS_MIN {
+            0
+        } else {
+            (STATUS_FRAME + app.status.width()).min(free)
+        };
 
     // The cursor's actions, packed until one would crowd `send` and the `?` off the line; the rest
     // spill to the `do` band.
@@ -3019,7 +3023,7 @@ fn footer_row1(app: &App, w: usize) -> (Vec<Span<'static>>, Vec<FooterAction>) {
     // The transient status rides after the actions, truncated into the room its reservation kept.
     // It drops only below `STATUS_MIN`, where no message would be legible anyway. A modal that
     // trimmed an action keeps room for its `…` too, since nothing else there says more keys exist.
-    if !app.status.is_empty() {
+    if status_w > 0 {
         let more = if overflow.is_empty() { reserve } else { reserve.max(MORE_ELLIPSIS) };
         let room = w.saturating_sub(used + STATUS_FRAME + more);
         if room >= STATUS_MIN {
@@ -4396,13 +4400,18 @@ fn pr_state_line(_app: &App, s: &forge::PrSnapshot) -> String {
 }
 
 /// The checks rollup in one token, worded the same in the footer and the navigator header:
-/// `✗ N failing`, `● running`, `✓ N passed`, or `no checks`.
+/// `✗ 1 check failing`, `● checks running`, `✓ 3 checks passed`, `✓ checks skipped`, or
+/// `no checks`. A skipped check counts toward neither side.
 fn checks_summary(s: &forge::PrSnapshot) -> String {
+    let checks = |n: usize| if n == 1 { "1 check".to_string() } else { format!("{n} checks") };
     match s.checks_rollup() {
         None => "no checks".into(),
-        Some(forge::CheckStatus::Failure) => format!("✗ {} failing", s.failing_checks()),
-        Some(forge::CheckStatus::Running) => "● running".into(),
-        Some(_) => format!("✓ {} passed", s.checks.len()),
+        Some(forge::CheckStatus::Failure) => format!("✗ {} failing", checks(s.failing_checks())),
+        Some(forge::CheckStatus::Running) => "● checks running".into(),
+        Some(_) => match s.passed_checks() {
+            0 => "✓ checks skipped".into(),
+            n => format!("✓ {} passed", checks(n)),
+        },
     }
 }
 
@@ -4499,9 +4508,9 @@ fn settle_pr_nav_scroll(
     (scroll.min(max), max)
 }
 
-/// The `checks` section header: the label, then the rollup the footer shows.
+/// The `checks` section header: the rollup the footer shows, which names checks itself.
 fn pr_checks_header(s: &forge::PrSnapshot) -> String {
-    format!("checks · {}", checks_summary(s))
+    checks_summary(s)
 }
 
 /// One comment row: `@author anchor`, then a trailing `resolved`/`outdated` marker or the age.

@@ -5416,11 +5416,20 @@ impl App {
     /// drops every unsent comment for good. The question's own `quit-discard` key is the answer
     /// that quits.
     pub fn request_quit(&mut self) {
-        if self.store.is_empty() {
+        if self.unsent() == 0 {
             self.should_quit = true;
         } else {
             self.confirming_quit = true;
         }
+    }
+
+    /// What a quit would drop: every written comment, plus a new comment's draft with text in
+    /// it. A draft can only be open when the config-error screen took over mid-composing,
+    /// since `q` is text inside the composer.
+    pub fn unsent(&self) -> usize {
+        let draft =
+            matches!(self.mode, Mode::Composing { editing: None }) && !self.input.trim().is_empty();
+        self.store.len() + usize::from(draft)
     }
 
     /// Whether the footer is the open-ended `Normal` bar, with its `?` and bands. A modal, or the

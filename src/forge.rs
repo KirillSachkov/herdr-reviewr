@@ -320,6 +320,11 @@ impl PrSnapshot {
     pub fn failing_checks(&self) -> usize {
         self.checks.iter().filter(|c| c.status == CheckStatus::Failure).count()
     }
+
+    /// Checks that ran and passed. A skipped check counts toward neither side.
+    pub fn passed_checks(&self) -> usize {
+        self.checks.iter().filter(|c| c.status == CheckStatus::Success).count()
+    }
 }
 
 /// How one forge-CLI invocation failed, before any forge-specific classification.

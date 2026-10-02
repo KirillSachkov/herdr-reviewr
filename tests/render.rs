@@ -4630,11 +4630,17 @@ fn the_quit_question_owns_the_footer_and_the_blocked_screen() {
     app.request_quit();
     let row = footer_line(&render_at(&app, 100));
     assert!(
-        row.contains("Q quit (1 comment pending)") && row.contains("esc cancel"),
+        row.contains("Q quit (1 pending)") && row.contains("esc cancel"),
         "the footer is the question:\n{row}"
     );
     assert!(row.contains("s send 1") && row.contains("y copy"), "{row}");
     assert!(!row.trim_end().ends_with('?'), "the question owns the bar:\n{row}");
+
+    // A pane-width row keeps the way out, even with a status left over from the comment.
+    app.status = "comment added".to_string();
+    let narrow = footer_line(&render_at(&app, 40));
+    assert!(narrow.contains("Q quit") && narrow.contains("esc cancel"), "{narrow}");
+    assert!(!narrow.contains("comment added"), "the question owns the row:\n{narrow}");
 
     app.set_config_error("config: invalid value for `theme`".to_string());
     let out = render(&app);
@@ -4660,9 +4666,11 @@ fn the_pr_tab_names_the_forge_and_words_checks_one_way() {
 
     app.set_tab(Tab::Pr).unwrap();
     for (status, rollup) in [
-        (CheckStatus::Success, "✓ 2 passed"),
-        (CheckStatus::Failure, "✗ 2 failing"),
-        (CheckStatus::Running, "● running"),
+        (CheckStatus::Success, "✓ 2 checks passed"),
+        (CheckStatus::Failure, "✗ 2 checks failing"),
+        (CheckStatus::Running, "● checks running"),
+        // A skipped check never reads as passed.
+        (CheckStatus::Skipped, "✓ checks skipped"),
     ] {
         let check = |name: &str| Check { name: name.into(), status };
         app.pr = PrView::Pr(Box::new(PrSnapshot {
@@ -4671,6 +4679,10 @@ fn the_pr_tab_names_the_forge_and_words_checks_one_way() {
         }));
         let out = render_at(&app, 140);
         assert!(footer_line(&out).contains(rollup), "the footer says {rollup}:\n{out}");
-        assert!(out.contains(&format!("checks · {rollup}")), "the navigator says {rollup}:\n{out}");
+        assert_eq!(
+            out.matches(rollup).count(),
+            2,
+            "the footer and the navigator say {rollup}:\n{out}"
+        );
     }
 }
