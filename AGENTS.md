@@ -6,7 +6,7 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 
 ## Commands
 
-- `just test` — full test suite, with the herdr environment stripped so no test can reach a live agent pane. Inside herdr, run a single test the same way: `env -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID HERDR_BIN_PATH=false cargo test <name>` (unit tests live beside the code, integration tests in `tests/`: `cargo test --test app_flow <name>`).
+- `just test` — full test suite, with the herdr environment stripped so no test can reach a live agent pane. Inside herdr, run a single test the same way: `env -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID -u HERDR_SOCKET_PATH HERDR_BIN_PATH=false cargo test <name>` (unit tests live beside the code, integration tests in `tests/`: `cargo test --test app_flow <name>`).
 - `just lint` — clippy with warnings as errors. `just fmt` / `just fmt-check` — rustfmt.
 - `just ci` — exactly what CI runs (fmt-check, lint, test, release build).
 - `just qa-install` — put a local build into the user's real herdr panes. See "QA install" below before using it.
@@ -37,10 +37,10 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/ui.rs` — all rendering. Row heights and wrapping recompute per frame across the visible diff, so render cost scales with open-file size.
 - `src/forge.rs` + the `PrRefresh`/`PrCoordinator` state machines in `lib.rs` — the PR snapshot. Fetches are tagged with the input (repository identity, pinned HEAD and base, the branch's published heads and pin) that produced them, and a result paints only if a fresh probe proves the input still matches. This generation/input-tag pattern is the template for moving other derived state off-thread.
 - `src/gitlab.rs` / `src/azure_devops.rs` — the `glab` and `az` providers behind the forge boundary in `forge.rs`, each mapping its CLI's payloads onto the one `PrSnapshot` shape.
-- `src/turn.rs` — the pure turn state machine: a resting→working edge starts a turn, and a pending candidate promotes to the `last-turn` baseline once the worktree diverges from it. The world worker's `TurnHost` drives it; `src/herdr.rs` holds the herdr CLI calls.
+- `src/turn.rs` — the pure turn state machine: a resting→working edge starts a turn, and a pending candidate promotes to the `last-turn` baseline once the worktree diverges from it. The world worker's `TurnHost` drives it; `src/herdr.rs` holds the herdr calls: the CLI, and the socket for the send.
 - `src/model.rs` — `CommentStore` (in-memory), comment anchoring (`diff_anchored` distinguishes diff comments from All-files content comments — each renders only in its own view).
 - `src/editor.rs` — the editor command: a name-keyed dialect table (how each editor takes a line, and whether it draws in the pane), quote-aware splitting, and the `editor` key's `{file}`/`{line}` template. Pure argv resolution, spawning nowhere. `run_editor` in `lib.rs` owns the spawn, and hands the pane over for a terminal editor, blocking the frame loop for that editor's whole session.
-- `src/export.rs` — comment export: format all, send via `herdr agent send` or clipboard, consume-on-success only.
+- `src/export.rs` — comment export: format all, send as one `pane.send_text` request over herdr's socket or copy to the clipboard, consume-on-success only.
 - `src/config.rs` — plugin config: the whole file validates before every frame/action. An invalid config blocks all review work until recovery, which carries authored state.
 - `src/actions.rs` — the plugin actions, run as `herdr-reviewr --action <toggle|open|close|auto-open>`: config validation first, then a live sweep of the workspace for panes running the review UI (`pane process-info` per pane, concurrently), then close or open. `NonUiRun` is the one rule for which argv is not the review UI, shared by `main.rs` dispatch and that sweep.
 - `herdr-plugin.toml` — plugin packaging: the pane, the toggle/open/close actions, and the worktree workspace-birth auto-open event, each running `bin/herdr-reviewr` directly.

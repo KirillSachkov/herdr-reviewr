@@ -5017,6 +5017,7 @@ impl App {
             herdr::Refusal::NoAgent => {
                 format!("no agent in this workspace, press {copy} to copy")
             }
+            herdr::Refusal::TooLarge => format!("review too large to send, press {copy} to copy"),
         }
     }
 

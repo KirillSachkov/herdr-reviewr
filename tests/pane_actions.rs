@@ -3,37 +3,18 @@
 //! test process, and every run gets its herdr environment set explicitly, so no test reaches
 //! a live herdr.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use common::fake_herdr;
 use serde_json::{Value, json};
 
 fn reviewr_bin() -> &'static str {
     env!("CARGO_BIN_EXE_herdr-reviewr")
-}
-
-/// The fake herdr, built here rather than located: `cargo test --test pane_actions` builds no
-/// examples, so a located binary could be missing or stale. Once per test process, and a
-/// no-op when `cargo test` already built it.
-fn fake_herdr() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let output = Command::new(env!("CARGO"))
-            .args(["build", "--example", "fake_herdr", "--message-format=json"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|message| message["target"]["name"] == "fake_herdr")
-            .find_map(|message| message["executable"].as_str().map(PathBuf::from))
-            .expect("cargo reports the fake herdr's executable")
-    })
 }
 
 /// The fixture file for `pane`, spelled the way the fake reads it: `:` becomes `_`, since

@@ -3,7 +3,8 @@
 //! pane's cosmetic `reviewr` label, and the pane reads and writes the plugin actions
 //! (`crate::actions`) are made of.
 //!
-//! Uses the herdr CLI via `$HERDR_BIN_PATH`. The two agent readers
+//! Uses the herdr CLI via `$HERDR_BIN_PATH`, except the send, which is one request over herdr's
+//! socket API at `$HERDR_SOCKET_PATH` ([`send_text`]). The two agent readers
 //! ask different questions and neither narrows the other: [`send_target`] resolves candidates
 //! from the reviewr pane's herdr workspace, while [`agent_samples`] reports every agent and lets
 //! the caller decide membership by worktree. Browsing and the clipboard export never come
@@ -11,9 +12,10 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::logln;
 use crate::turn::Status;
@@ -113,8 +115,8 @@ impl std::error::Error for HerdrError {}
 /// Run a herdr subcommand and return its stdout, or the classified failure.
 ///
 /// Nothing shows this error to a reviewer: every caller either replaces it with a sentence of its
-/// own or drops it. So the whole of it — the argv, which carries a review's text in `pane
-/// send-text`, and herdr's JSON error envelope — goes to the log and only there.
+/// own or drops it. So the whole of it, the argv and herdr's JSON error envelope, goes to the log
+/// and only there.
 fn call(args: &[&str]) -> Result<String, HerdrError> {
     let out = match crate::proc::command(herdr_bin()).args(args).output() {
         Ok(out) => out,
@@ -575,6 +577,8 @@ pub enum Refusal {
     Unanswered,
     /// The workspace holds no agent to send to.
     NoAgent,
+    /// The review is over herdr's request cap, so it cannot go as one paste.
+    TooLarge,
 }
 
 /// The log's wording. The reviewer's line is the app's (`App::refusal_line`).
@@ -584,6 +588,9 @@ impl std::fmt::Display for Refusal {
             Refusal::AtPrompt(name) => write!(f, "{name} is at a prompt"),
             Refusal::Unanswered => write!(f, "herdr did not answer"),
             Refusal::NoAgent => write!(f, "no agent in the workspace"),
+            Refusal::TooLarge => {
+                write!(f, "the review is over herdr's {MAX_REQUEST_BYTES}-byte request cap")
+            }
         }
     }
 }
@@ -605,7 +612,7 @@ enum Readiness {
 /// sending: a prompt drops a paste, so the comments would never reach the input
 /// (`docs/herdr-api-notes.md`). The read and the send are two herdr calls, so an agent can
 /// still raise a prompt in between. herdr offers no atomic send-if-ready.
-pub fn ensure_ready(pane: &str) -> Result<()> {
+fn ensure_ready(pane: &str) -> Result<()> {
     let agents = match agent_list() {
         Ok(agents) => agents,
         Err(e) => {
@@ -631,14 +638,147 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
     }
 }
 
-/// Write literal text into the agent pane's input, without submitting.
+/// herdr's cap on one socket request line, newline excluded: past it herdr stops reading and
+/// drops the connection unanswered (`MAX_INITIAL_REQUEST_BYTES` in herdr's `src/api/server.rs`).
+/// A connection carries exactly one request, so this caps the whole send.
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// How long a send waits for herdr's reply. herdr gives up reading a request 5 s after the
+/// connection opens (`INITIAL_REQUEST_TIMEOUT`), and its write into the pane is a channel push,
+/// so past that plus [`ANSWER_BOUND`] for the answer herdr has dropped the request or is wedged.
+/// Waiting less would give up on a large send herdr is still reading: the comments stay, the
+/// paste lands anyway, and the next `Send` pastes the review twice.
+const SEND_BOUND: Duration = Duration::from_secs(5).saturating_add(ANSWER_BOUND);
+
+/// Write literal text into the agent pane's input, without submitting, once the agent is ready
+/// for it ([`ensure_ready`]).
 ///
-/// Uses `pane send-text`, not the agent-level send: herdr 0.7.5 replaced `agent send` with
-/// the logical-key `agent send-keys`, while `pane send-text` has carried the literal-text,
-/// no-Enter semantics unchanged since 0.7.0 (`docs/herdr-api-notes.md`).
+/// The text goes as one `pane.send_text` request over herdr's socket API, which writes it to the
+/// pane as raw bytes. The CLI's `pane send-text` takes the text as one argument, and Windows caps
+/// a command line at 32,767 characters, so a long review could not go that way
+/// (`docs/herdr-api-notes.md`).
+///
+/// Both refusals that need no herdr run before anything is asked of it: no socket is no herdr to
+/// ask, as a missing herdr binary is for every CLI call, and a review over the cap could never
+/// land. Only a `result` reply is success. An error reply is herdr refusing the paste, and a
+/// dropped or unanswered connection is herdr not answering, though the paste may have landed.
 pub fn send_text(pane: &str, text: &str) -> Result<()> {
-    herdr(&["pane", "send-text", pane, &pasted(text)])?;
-    Ok(())
+    let Some(socket) = env::var_os("HERDR_SOCKET_PATH") else {
+        return Err(Refusal::Unanswered.into());
+    };
+    let request = serde_json::json!({
+        "id": "reviewr:send",
+        "method": "pane.send_text",
+        "params": {"pane_id": pane, "text": paste_payload(text)},
+    })
+    .to_string();
+    if request.len() > MAX_REQUEST_BYTES {
+        return Err(Refusal::TooLarge.into());
+    }
+    ensure_ready(pane)?;
+    match socket_call(socket, request) {
+        Ok(()) => Ok(()),
+        Err(HerdrError::Unanswered) => Err(Refusal::Unanswered.into()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// One request line over herdr's socket, answered by one reply line, bounded by [`SEND_BOUND`].
+/// The exchange runs on its own thread, so a wedged herdr costs the wait and never the frame
+/// loop's life. The thread ends when herdr closes the connection.
+fn socket_call(socket: OsString, request: String) -> Result<(), HerdrError> {
+    let (tx, rx) = mpsc::channel();
+    let deadline = Instant::now() + SEND_BOUND;
+    thread::spawn(move || {
+        let _ = tx.send(socket::exchange(&socket, &request, deadline));
+    });
+    let reply = match rx.recv_timeout(SEND_BOUND) {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(error)) => {
+            logln!("herdr socket call failed: {error}");
+            return Err(HerdrError::Unanswered);
+        }
+        Err(_) => {
+            logln!("herdr socket call unanswered after {SEND_BOUND:?}");
+            return Err(HerdrError::Unanswered);
+        }
+    };
+    reply_outcome(&reply)
+}
+
+/// A socket reply as a call outcome: a `result` is success, and an error envelope is a refusal
+/// carrying its code. herdr echoes the same envelope it writes to stderr for a failed CLI call.
+fn reply_outcome(reply: &str) -> Result<(), HerdrError> {
+    if let Some(code) = error_code(reply) {
+        logln!("herdr refused over the socket: {}", reply.trim());
+        return Err(HerdrError::Refused(Some(code)));
+    }
+    answer::<serde::de::IgnoredAny>(reply).map(drop)
+}
+
+/// The socket transport. `HERDR_SOCKET_PATH` names a Unix domain socket on unix. On Windows it
+/// names a marker file, and the named pipe is that path verbatim under `\\.\pipe\` (herdr's
+/// `connect_local_stream` in `src/ipc.rs`). herdr reads one request line per connection,
+/// answers it with one line, and closes.
+mod socket {
+    use std::ffi::OsStr;
+    use std::io::{self, BufRead, BufReader, Write};
+    use std::time::Instant;
+
+    /// Write `request` as one line and read the one line herdr answers.
+    pub(super) fn exchange(socket: &OsStr, request: &str, deadline: Instant) -> io::Result<String> {
+        let mut stream = connect(socket, deadline)?;
+        stream.write_all(request.as_bytes())?;
+        stream.write_all(b"\n")?;
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply)?;
+        if !reply.ends_with('\n') {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "herdr closed the connection without answering",
+            ));
+        }
+        Ok(reply)
+    }
+
+    #[cfg(unix)]
+    fn connect(socket: &OsStr, _deadline: Instant) -> io::Result<std::os::unix::net::UnixStream> {
+        std::os::unix::net::UnixStream::connect(socket)
+    }
+
+    /// A pipe client opens the pipe as a file. Every instance can be taken for a moment, between
+    /// herdr accepting one client and opening the next instance, so a busy pipe is retried until
+    /// the deadline, as `WaitNamedPipe` would.
+    #[cfg(windows)]
+    fn connect(socket: &OsStr, deadline: Instant) -> io::Result<std::fs::File> {
+        const ERROR_PIPE_BUSY: i32 = 231;
+        let mut pipe = std::ffi::OsString::from(r"\\.\pipe\");
+        pipe.push(socket);
+        loop {
+            match std::fs::OpenOptions::new().read(true).write(true).open(&pipe) {
+                Err(error)
+                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                opened => return opened,
+            }
+        }
+    }
+}
+
+/// The text as herdr's own paste delivers it, framed as one bracketed paste.
+///
+/// `pane.send_text` writes its bytes to the pane untouched, so the newline encoding is reviewr's
+/// to do: CRLF on Windows and the text unchanged elsewhere, as herdr encodes a paste of its own
+/// (`prepare_paste_text_for_pty_platform`).
+fn paste_payload(text: &str) -> String {
+    if cfg!(windows) {
+        pasted(&text.replace("\r\n", "\n").replace('\n', "\r\n"))
+    } else {
+        pasted(text)
+    }
 }
 
 const PASTE_START: &str = "\x1b[200~";
@@ -864,12 +1004,42 @@ mod tests {
     }
 
     #[test]
-    fn a_send_wraps_the_batch_in_one_bracketed_paste_frame() {
-        // Issue #41's repro string: sent raw, vim ate the leading `b` and `i`.
+    fn a_send_is_one_bracketed_paste_with_the_platforms_newlines() {
+        // (text, unix bytes, Windows bytes). Windows breaks lines as CRLF, as herdr's own paste
+        // does, and a CRLF already there is not doubled. A lone CR is no line break to herdr's
+        // paste either, so it passes through on both.
+        let rows = [
+            // Issue #41's repro string: sent raw, vim ate the leading `b` and `i`.
+            (
+                "bit/DESIGN.md:95 note",
+                "\x1b[200~bit/DESIGN.md:95 note\x1b[201~",
+                "\x1b[200~bit/DESIGN.md:95 note\x1b[201~",
+            ),
+            (
+                "a.rs:2\n+b\nok",
+                "\x1b[200~a.rs:2\n+b\nok\x1b[201~",
+                "\x1b[200~a.rs:2\r\n+b\r\nok\x1b[201~",
+            ),
+            ("a\r\nb", "\x1b[200~a\r\nb\x1b[201~", "\x1b[200~a\r\nb\x1b[201~"),
+            ("a\rb", "\x1b[200~a\rb\x1b[201~", "\x1b[200~a\rb\x1b[201~"),
+        ];
+        for (text, unix, windows) in rows {
+            let want = if cfg!(windows) { windows } else { unix };
+            assert_eq!(super::paste_payload(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_result_reply_is_a_delivered_send() {
+        let ok = "{\"id\":\"reviewr:send\",\"result\":{\"type\":\"ok\"}}\n";
+        assert_eq!(super::reply_outcome(ok), Ok(()));
+        // herdr's error reply echoes the id and carries the same envelope as a failed CLI call.
+        let gone = r#"{"id":"reviewr:send","error":{"code":"pane_not_found","message":"pane w8:p1 not found"}}"#;
         assert_eq!(
-            super::pasted("bit/DESIGN.md:95 note"),
-            "\x1b[200~bit/DESIGN.md:95 note\x1b[201~"
+            super::reply_outcome(gone),
+            Err(HerdrError::Refused(Some("pane_not_found".into())))
         );
+        assert_eq!(super::reply_outcome(r#"{"id":"reviewr:send"}"#), Err(HerdrError::Unreadable));
     }
 
     #[test]

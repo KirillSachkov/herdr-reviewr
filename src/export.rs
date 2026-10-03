@@ -161,7 +161,8 @@ mod clipboard {
     }
 }
 
-/// One chosen agent pane: fill its input via `herdr pane send-text`, then focus it.
+/// One chosen agent pane: fill its input with one `pane.send_text` request over herdr's socket,
+/// then focus it.
 ///
 /// The pane is decided before the export runs, by the sole-agent path or by the picker, and
 /// nothing re-resolves it here. A pane that closed in between fails the send and keeps every
@@ -191,10 +192,9 @@ impl ExportTarget for Agent {
         format!("{} closed", self.name)
     }
 
-    /// An agent at a prompt refuses the send ([`herdr::ensure_ready`]). The state is
-    /// read here, at the moment of sending, because the picker's rows can be minutes old.
+    /// An agent at a prompt refuses the send ([`herdr::send_text`] reads its state at the moment
+    /// of sending), because the picker's rows can be minutes old.
     fn export(&self, text: &str) -> Result<()> {
-        herdr::ensure_ready(&self.pane)?;
         herdr::send_text(&self.pane, text)?;
         // Focus is a convenience once the text is delivered; a focus failure must NOT fail the
         // export, or the comments stay unconsumed and the next Send duplicates the whole review.

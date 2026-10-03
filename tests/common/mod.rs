@@ -1,5 +1,6 @@
-//! A real on-disk git repo for integration tests. Every helper shells out to the
-//! actual `git` binary, so tests exercise the same surface the app does at runtime.
+//! A real on-disk git repo for integration tests, and the fake herdr CLI. Every repo helper
+//! shells out to the actual `git` binary, so tests exercise the same surface the app does at
+//! runtime.
 //!
 //! `dead_code`/`unreachable_pub` are allowed because each test binary includes this
 //! module and uses only the subset of helpers it needs.
@@ -7,10 +8,33 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use herdr_reviewr::app::App;
 use herdr_reviewr::model::Scope;
 use tempfile::TempDir;
+
+/// The fake herdr (`examples/fake_herdr.rs`, which documents its fixture files), built here
+/// rather than located: `cargo test --test <name>` builds no examples, so a located binary
+/// could be missing or stale. Once per test process, and a no-op when `cargo test` already
+/// built it.
+pub fn fake_herdr() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| {
+        let output = Command::new(env!("CARGO"))
+            .args(["build", "--example", "fake_herdr", "--message-format=json"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|message| message["target"]["name"] == "fake_herdr")
+            .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+            .expect("cargo reports the fake herdr's executable")
+    })
+}
 
 pub struct Repo {
     dir: TempDir,

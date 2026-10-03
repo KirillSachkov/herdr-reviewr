@@ -224,9 +224,11 @@ Verified on Claude Code 2.1.287 with the same bracketed paste reviewr sends:
 So every other `agent_status` sends, `working` included. On 0.8.2, `agent list` answers in under
 10 ms. The read and the write are two calls, and herdr has no atomic send-if-ready.
 
+The write goes over herdr's socket API, and the focus stays on the CLI:
+
 ```
-herdr pane send-text <agent_pane> "<literal text>"   # writes input, no Enter
-herdr agent focus    <agent_pane>                    # focus so the reviewer submits
+{"id":"reviewr:send","method":"pane.send_text","params":{"pane_id":"<agent_pane>","text":"<paste>"}}
+herdr agent focus <agent_pane>   # focus so the reviewer submits
 ```
 
 **Every failing call writes a JSON envelope to stderr, never a plain sentence** (verified live,
@@ -239,9 +241,43 @@ herdr agent focus    <agent_pane>                    # focus so the reviewer sub
 No part of this is fit for a 40-column status line, `message` included: it names a pane id the
 reviewer never saw. reviewr logs the whole payload and shows a sentence of its own.
 
-- `pane send-text` writes the literal bytes to the pane without Enter, unchanged since 0.7.0.
-- herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). On 0.7.0 both
-  commands dispatched to the same server write, so `pane send-text` covers the whole range.
+### The send over the socket (read from herdr source, `origin/master`, 2026-10-03)
+
+**Why not the CLI.** `herdr pane send-text <pane> <text>` takes the review as one argument.
+Windows caps a command line at 32,767 characters, so a longer review fails to send there. The CLI
+is itself a socket client (`pane_send_text` in `src/cli/pane.rs` sends `pane.send_text`), so the
+socket request is the same call without the argv.
+
+**Transport** (`docs/next/website/src/content/docs/socket-api.mdx`, `src/api/server.rs`, `src/ipc.rs`):
+
+- Newline-delimited JSON on `HERDR_SOCKET_PATH`, which every pane carries. On unix it is a Unix
+  domain socket. On Windows it is the path of a marker file, and the named pipe is that path
+  verbatim under `\\.\pipe\` (`connect_local_stream` maps it through interprocess's
+  `GenericNamespaced`). reviewr opens the pipe as a file with std, and retries a busy pipe.
+- One request per connection. The server reads one line, answers with one line, and returns,
+  which closes the connection. A few long-lived methods, such as `events.subscribe`, keep it open.
+- A success echoes the id: `{"id":"reviewr:send","result":{"type":"ok"}}`. An error echoes it too,
+  with the same `error` envelope the CLI prints. A transport error closes without a reply.
+- **The cap is 1 MiB per request line, newline excluded** (`MAX_INITIAL_REQUEST_BYTES`). Past it
+  the server stops reading and drops the connection unanswered. It applies to the first line of
+  a connection, which for `pane.send_text` is the only one, so it caps the whole send. reviewr
+  checks the serialized request against it before connecting and refuses a review over it.
+- The server gives up reading a request 5 s after the connection opens
+  (`INITIAL_REQUEST_TIMEOUT`). It reads one byte per call, so a large request takes a while.
+  reviewr waits 7 s for the reply: herdr's 5 s, plus 2 s for the answer.
+
+**`pane.send_text`** (`handle_pane_send_text` in `src/app/api/panes.rs`) pushes `text` to the
+pane's input channel as raw bytes: no bracketing, no newline conversion, no Enter. herdr's own
+paste (`paste_payload` in `src/pane.rs`) converts newlines to CRLF on Windows
+(`prepare_paste_text_for_pty_platform`) and leaves them alone elsewhere. reviewr encodes its
+paste the same way, then brackets it always (`pasted` in `src/herdr.rs` says why).
+
+- Only a `result` reply consumes the comments. An error reply reads as the pane gone. A dropped
+  or unanswered connection reads as herdr not answering. Both keep every comment, though in the
+  second case the paste may still have landed.
+- No `HERDR_SOCKET_PATH` is no herdr, the same refusal as a missing herdr binary.
+- herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). The literal,
+  no-Enter write has been `pane send-text` since 0.7.0.
 
 ## Diff scopes (plain git, no herdr)
 

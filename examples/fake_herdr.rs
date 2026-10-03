@@ -1,5 +1,5 @@
-//! A fake herdr CLI for the plugin-action tests (`tests/pane_actions.rs`), answering in the
-//! live envelope shapes (docs/herdr-api-notes.md). It is Rust rather than a shell script so the
+//! A fake herdr CLI for the plugin-action and send tests (`tests/pane_actions.rs`,
+//! `tests/send_flow.rs`), answering in the live envelope shapes (docs/herdr-api-notes.md). It is Rust rather than a shell script so the
 //! tests run on every OS, Windows included.
 //!
 //! It serves the fixture directory named by `FAKE_HERDR_DIR`, appending each invocation's
@@ -14,6 +14,8 @@
 //! - `plugin config-dir` names the fixture directory itself, after a 5 s hang when
 //!   `configdir-hang` exists.
 //! - `plugin pane open` fails with `openfail` on stderr, else opens pane `w1:p9` in tab `w1:t9`.
+//! - `agent list` fails with `agentsfail` on stderr, else serves `agents.json`, else no agents.
+//! - `tab list` serves `tabs.json`, else no tabs.
 //! - Everything else succeeds.
 //!
 //! A pane id's `:` is spelled `_` in a fixture file name, since Windows forbids `:` there.
@@ -68,6 +70,16 @@ fn main() -> ExitCode {
                 r#"{{"result":{{"type":"plugin_pane_opened","plugin_pane":{{"pane":{{"pane_id":"{OPENED}","tab_id":"w1:t9"}}}}}}}}"#
             )),
         },
+        ["agent", "list"] => match read(&dir.join("agentsfail")) {
+            Some(failure) => fail(&failure),
+            None => answer(
+                &read(&dir.join("agents.json"))
+                    .unwrap_or_else(|| r#"{"result":{"agents":[]}}"#.to_owned()),
+            ),
+        },
+        ["tab", "list", ..] => answer(
+            &read(&dir.join("tabs.json")).unwrap_or_else(|| r#"{"result":{"tabs":[]}}"#.to_owned()),
+        ),
         _ => answer(r#"{"result":{}}"#),
     }
 }
