@@ -9708,3 +9708,130 @@ fn goto_line_in_rendered_markdown_lands_on_its_block_and_opens_details() {
     app.goto_line(9);
     assert!(text(&app).contains("hidden line"), "{}", text(&app));
 }
+
+/// A repo with one changed 30-line file, `src/m.rs`: a fold hides its head, a change at the end.
+fn line_field_repo() -> Repo {
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut text = String::new();
+    for i in 1..=30 {
+        writeln!(text, "line {i}").unwrap();
+    }
+    r.write("src/m.rs", &text);
+    r.commit_all("init");
+    r.write("src/m.rs", &text.replace("line 30", "line 30 edited"));
+    r
+}
+
+/// The line field's event table: `:` opens it in a file tab with content and drops a pick;
+/// digits append, other keys are inert (a digit never switches tab), Backspace edits; Enter
+/// jumps and closes; Enter on nothing or `0` and Esc close with nothing moved; a refresh keeps
+/// the number; a tab switch and an invalid config close it.
+#[test]
+fn the_line_field_follows_its_event_table() {
+    use herdr_reviewr::app::Tab;
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let place = |app: &App| (app.diff_cursor, app.diff_scroll, app.visible.len());
+    let colon = |app: &mut App| press(app, &keymap, KeyCode::Char(':'));
+
+    // Opening drops a pick and focuses the read pane.
+    app.focus = Focus::Diff;
+    app.diff_cursor = app.visible.len() - 1;
+    app.toggle_select();
+    app.focus = Focus::Files;
+    colon(&mut app);
+    assert!(app.line_open());
+    assert_eq!((app.select_anchor, app.focus), (None, Focus::Diff));
+
+    // Typing moves nothing; letters are inert; `2` is a digit, not the All files tab.
+    let before = place(&app);
+    find_type(&mut app, &keymap, "2x5");
+    press(&mut app, &keymap, KeyCode::Backspace);
+    find_type(&mut app, &keymap, "6");
+    assert_eq!(app.find.as_ref().unwrap().query, "26");
+    assert_eq!(app.tab, Tab::Changes, "a digit never switches tab while the field is open");
+    assert_eq!(place(&app), before, "nothing moves before enter");
+
+    // A refresh of the same file keeps the field and its number.
+    common::land_world(&mut app);
+    assert!(app.line_open());
+    assert_eq!(app.find.as_ref().unwrap().query, "26");
+
+    // Enter jumps and closes: line 26 hid in the fold, which opened.
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(26));
+
+    // Esc, an empty Enter and `0` close with nothing moved.
+    for keys in [&[KeyCode::Esc][..], &[KeyCode::Enter], &[KeyCode::Char('0'), KeyCode::Enter]] {
+        colon(&mut app);
+        let before = place(&app);
+        for &k in keys {
+            press(&mut app, &keymap, k);
+        }
+        assert_eq!(app.mode, Mode::Normal, "{keys:?} closes");
+        assert_eq!(place(&app), before, "{keys:?} moves nothing");
+    }
+
+    // A tab switch and an invalid config close it.
+    colon(&mut app);
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(!app.line_open(), "a tab switch closes the field");
+    enter_tab(&mut app, Tab::Changes);
+    colon(&mut app);
+    app.set_config_error("bad config".into());
+    assert!(!app.line_open(), "an invalid config closes the field");
+}
+
+/// `:` works only where a read cursor has a line to land on: the PR tab and an open find or
+/// composer take it as text, and the footer offers it only in a file tab with content.
+#[test]
+fn the_line_field_is_silent_where_it_cannot_work() {
+    use herdr_reviewr::app::{FooterAction, Tab};
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let offered = |app: &App| app.footer_bands().iter().any(|&(a, _)| a == FooterAction::GotoLine);
+    assert!(offered(&app), "a file tab with content offers `:`");
+
+    open_find(&mut app, &keymap);
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    assert!(!app.line_open());
+    assert_eq!(app.find.as_ref().unwrap().query, ":", "find takes `:` as text");
+    press(&mut app, &keymap, KeyCode::Esc);
+
+    enter_tab(&mut app, Tab::Pr);
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    assert!(!app.line_open(), "the PR tab has no line to land on");
+    assert!(!offered(&app));
+}
+
+/// Paste takes the line part of `path:line[:col]` when the path names the open file, the first
+/// number of any other text, and refuses a path to another file until the next edit.
+#[test]
+fn the_line_field_takes_the_line_from_a_pasted_location() {
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let query = |app: &App| app.find.as_ref().unwrap().query.clone();
+    let notice = |app: &App| app.find.as_ref().unwrap().notice.clone();
+    press(&mut app, &keymap, KeyCode::Char(':'));
+
+    app.input_paste("src/m.rs:12:4");
+    assert_eq!((query(&app), notice(&app)), ("12".to_string(), None));
+    app.input_paste("/home/me/repo/src/m.rs:7");
+    assert_eq!(query(&app), "7", "a path ending in the open file's path names it");
+    app.input_paste("see line 21, please");
+    assert_eq!(query(&app), "21");
+
+    app.input_paste("src/other.rs:5");
+    assert_eq!(notice(&app).as_deref(), Some("src/other.rs isn't open"));
+    let before = app.diff_cursor;
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert!(app.line_open(), "enter does nothing while the paste is refused");
+    assert_eq!(app.diff_cursor, before);
+    find_type(&mut app, &keymap, "3");
+    assert_eq!((query(&app), notice(&app)), ("3".to_string(), None), "an edit answers the refusal");
+}

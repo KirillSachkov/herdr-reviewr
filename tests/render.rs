@@ -4954,3 +4954,43 @@ struct Item;
     // a blend toward body text loses far more.
     assert!(lit_chroma >= chroma * 0.5, "{theme}: chroma {chroma:.3} fell to {lit_chroma:.3}");
 }
+
+/// The line field paints its label, the typed number, the file's line count at the right and
+/// its own footer; a refused paste shows why in place of the count. The `?` bar lists `:`.
+#[test]
+fn the_line_field_paints_its_number_count_and_footer() {
+    let r = Repo::init();
+    r.write("base.txt", "x\n");
+    r.commit_all("init");
+    let text = (1..=2048).fold(String::new(), |mut text, i| {
+        use std::fmt::Write as _;
+        writeln!(text, "row {i}").unwrap();
+        text
+    });
+    r.write("m.rs", &text);
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let area = Rect::new(0, 0, 140, 40);
+    let key = |app: &mut App, code| handle_key(app, KeyEvent::from(code), area, &keymap).unwrap();
+
+    key(&mut app, KeyCode::Char('?'));
+    assert!(dump(&render_buffer(&app)).contains(": line"), "the go band lists `:`");
+    key(&mut app, KeyCode::Char('?'));
+
+    key(&mut app, KeyCode::Char(':'));
+    for ch in "1337".chars() {
+        key(&mut app, KeyCode::Char(ch));
+    }
+    let out = dump(&render_buffer(&app));
+    assert!(out.contains("line 1337"), "the label and the number:\n{out}");
+    assert!(out.contains("of 2048"), "the file's line count:\n{out}");
+    assert!(footer_line(&out).contains("enter go"), "the field's footer:\n{out}");
+
+    app.input_paste("src/elsewhere.rs:9");
+    let buf = render_buffer(&app);
+    let out = dump(&buf);
+    assert!(out.contains("src/elsewhere.rs isn't open"), "the refusal shows:\n{out}");
+    assert!(!footer_line(&out).contains("enter go"), "no `enter go` while refused:\n{out}");
+    let notice = cell_of(&buf, "isn't open");
+    assert_eq!(notice.fg, app.palette().ink(Ink::Warning, Fill::Base));
+}

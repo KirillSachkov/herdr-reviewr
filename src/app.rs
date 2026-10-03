@@ -367,8 +367,8 @@ pub enum Mode {
     /// The search screen, replacing the body from any tab. Its state
     /// lives in [`App::search`].
     Search,
-    /// The in-file find band over the read pane. Its state lives in
-    /// [`App::find`].
+    /// The band at the read pane's foot: find in the file, or a line number to jump to. Its
+    /// state lives in [`App::find`].
     Find,
 }
 
@@ -486,9 +486,24 @@ pub enum PickedResult<'a> {
 /// count, and highlight all derive from the query against the open file each frame.
 #[derive(Clone, Debug, Default)]
 pub struct Find {
+    /// What the band asks for: text to find, or a line to jump to.
+    pub kind: BandKind,
     pub query: String,
     /// The caret into `query`: a char index, edited by the shared caret ops.
     pub caret: usize,
+    /// Why Enter won't jump: a pasted path names a file that isn't open. Cleared by the next
+    /// edit.
+    pub notice: Option<String>,
+}
+
+/// What the band at the read pane's foot asks for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BandKind {
+    /// `ctrl+f`: text, stepped through match by match.
+    #[default]
+    Text,
+    /// `:`: a line number, jumped to on Enter.
+    Line,
 }
 
 /// A found match in file order: how the cursor moves onto it.
@@ -565,6 +580,10 @@ pub enum FooterAction {
     /// The find band's own bar: step between matches, and close.
     FindStep,
     CloseFind,
+    /// Open the line field — offered wherever find is.
+    GotoLine,
+    /// The line field's own bar: jump to the typed line.
+    LineGo,
     /// Switch focus between the file list and the diff; the label names the destination pane.
     TogglePane,
     /// Flip a markdown file between rendered and source; the label names the destination
@@ -3832,6 +3851,10 @@ impl App {
         if changed && self.mode == Mode::BasePick {
             self.refilter_base_picker(highlighted);
         }
+        // An edit answers the line field's refusal: the number typed now is the request.
+        if changed && let Some(f) = self.find.as_mut() {
+            f.notice = None;
+        }
     }
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
@@ -3930,6 +3953,10 @@ impl App {
     /// base picker's filter drops it, so a branch name pasted with the newline it was copied
     /// with still matches its branch.
     pub fn input_paste(&mut self, text: &str) {
+        if self.line_open() {
+            self.paste_line(text);
+            return;
+        }
         let mut norm = text.replace("\r\n", "\n").replace('\r', "\n");
         match self.mode {
             Mode::Search | Mode::Find => norm = norm.replace('\n', " "),
@@ -4449,6 +4476,72 @@ impl App {
         self.reveal_diff = true;
     }
 
+    /// `:`: open the line field in the band's place, wherever find opens. Nothing moves until
+    /// Enter ([`App::line_go`]).
+    pub fn open_line(&mut self) {
+        self.open_find();
+        if let Some(f) = self.find.as_mut() {
+            f.kind = BandKind::Line;
+        }
+    }
+
+    /// Whether the band open is the line field.
+    pub fn line_open(&self) -> bool {
+        self.mode == Mode::Find && self.find.as_ref().is_some_and(|f| f.kind == BandKind::Line)
+    }
+
+    /// `enter` in the line field: close it and jump to the typed line. An empty field or `0`
+    /// only closes; a pasted path naming another file holds the field open, refusing.
+    pub fn line_go(&mut self) {
+        let Some(f) = self.find.as_ref() else { return };
+        if f.notice.is_some() {
+            return;
+        }
+        let line = f.query.parse::<u32>().unwrap_or(0);
+        self.close_find();
+        self.goto_line(line);
+    }
+
+    /// The open file's line count, as `:N` numbers it: the source's lines rendered, else the
+    /// new side's, else the old side's for a file with no new lines.
+    pub fn line_count(&self) -> usize {
+        if self.rendered_active() {
+            return self.rendered.content.as_ref().map_or(0, |c| c.text.lines().count());
+        }
+        let rows = || {
+            self.visible.iter().flat_map(|r| match r {
+                Row::Fold { lines } => lines.iter().collect::<Vec<_>>(),
+                row => vec![row],
+            })
+        };
+        let max = |side: fn(&Row) -> Option<u32>| rows().filter_map(side).max();
+        max(Row::new_no).or_else(|| max(Row::old_no)).unwrap_or(0) as usize
+    }
+
+    /// Paste into the line field: the line part of `path:line[:col]`, else the text's first
+    /// number. A path must name the open file — the same path, or one ending with the other at
+    /// a `/` — or the field refuses with a notice instead.
+    fn paste_line(&mut self, text: &str) {
+        let (path, line) = parse_line_paste(text);
+        let open = self.diff_path.clone().unwrap_or_default();
+        let names_open = |p: &str| {
+            let p = p.trim_start_matches("./");
+            p == open || p.ends_with(&format!("/{open}")) || open.ends_with(&format!("/{p}"))
+        };
+        let Some(f) = self.find.as_mut() else { return };
+        match path {
+            Some(p) if !names_open(&p) => {
+                f.query.clear();
+                f.notice = Some(format!("{p} isn't open"));
+            }
+            _ => {
+                f.query = line.unwrap_or_default();
+                f.notice = None;
+            }
+        }
+        f.caret = f.query.chars().count();
+    }
+
     /// `esc`: close the band, dropping the query. The cursor stays where the last step left it
     pub fn close_find(&mut self) {
         if self.mode == Mode::Find {
@@ -4555,7 +4648,11 @@ impl App {
     pub fn find_step(&mut self, delta: i32) {
         // A query lives only while the band is open, and every path that leaves the rows
         // unsearchable closes the band — so a query here always has rows to search.
-        let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else { return };
+        let Some(query) =
+            self.find.as_ref().filter(|f| f.kind == BandKind::Text).map(|f| f.query.clone())
+        else {
+            return;
+        };
         if query.is_empty() {
             return;
         }
@@ -4590,7 +4687,7 @@ impl App {
     /// The find band's count: the current match's 1-based ordinal (`None` off a match) and the
     /// total. `None` while the query is empty — the band shows a blank count then
     pub fn find_count(&self) -> Option<(Option<usize>, usize)> {
-        let query = &self.find.as_ref()?.query;
+        let query = &self.find.as_ref().filter(|f| f.kind == BandKind::Text)?.query;
         if query.is_empty() {
             return None;
         }
@@ -4860,6 +4957,16 @@ impl App {
                     vec![(A::FlipSearchMode, Primary), (A::CloseSearch, Do)]
                 };
             }
+            Mode::Find if self.line_open() => {
+                // Enter jumps only once there is a number and no refusal standing.
+                let ready =
+                    self.find.as_ref().is_some_and(|f| f.notice.is_none() && !f.query.is_empty());
+                return if ready {
+                    vec![(A::LineGo, Primary), (A::CloseFind, Do)]
+                } else {
+                    vec![(A::CloseFind, Primary)]
+                };
+            }
             Mode::Find => {
                 // The steps show only with a match to step to, so the bar never lists a key that
                 // would not work.
@@ -5002,6 +5109,7 @@ impl App {
         // In-file find shows wherever the read pane has content to search.
         if self.find_available() {
             out.push((A::Find, Go));
+            out.push((A::GotoLine, Go));
         }
         // Rendered rows come pre-wrapped, so `w` acts only on source.
         if !self.rendered_active() {
@@ -5865,6 +5973,24 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
     let (side, (start, end)) =
         new.map(|range| (Side::New, range)).or_else(|| old.map(|range| (Side::Old, range)))?;
     Some((side, start, end, snippet))
+}
+
+/// The pasted text's path and line: from `path:line[:col]`, the last word before the first `:`
+/// and the digits after it; otherwise no path and the text's first run of digits.
+fn parse_line_paste(text: &str) -> (Option<String>, Option<String>) {
+    let mut parts = text.trim().splitn(3, ':');
+    let head = parts.next().unwrap_or_default();
+    let line = parts.next().unwrap_or_default().trim();
+    let path = head.split_whitespace().last().filter(|p| !p.is_empty());
+    if let Some(path) = path
+        && !line.is_empty()
+        && line.chars().all(|c| c.is_ascii_digit())
+    {
+        return (Some(path.to_string()), Some(line.to_string()));
+    }
+    let digits: String =
+        text.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
+    (None, (!digits.is_empty()).then_some(digits))
 }
 
 #[cfg(test)]

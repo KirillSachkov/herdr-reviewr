@@ -1059,6 +1059,13 @@ mod tests {
         // The `alt+` chord serializes back in config syntax, not the glyph.
         assert_eq!(config.to_json()["keybindings"]["find"], serde_json::json!(["alt+x"]));
 
+        // `:` jumps to a line by default and rebinds like any action.
+        assert_eq!(bindings["goto-line"], serde_json::json!([":"]));
+        std::fs::write(&path, "[keybindings]\ngoto-line = [\"L\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('L')), Some(Action::GotoLine));
+        assert_eq!(config.keymap().action_for(Key::plain(':')), None);
+
         // A malformed chord is an invalid value.
         std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();

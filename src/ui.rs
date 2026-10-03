@@ -1950,6 +1950,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         find: app
             .find
             .as_ref()
+            .filter(|f| f.kind == crate::app::BandKind::Text)
             .map(|f| (f.query.as_str(), crate::app::find_case_sensitive(&f.query))),
         expand_hint: &expand_hint,
         rendered: app.rendered_lines(),
@@ -2594,30 +2595,37 @@ fn cell_span(
     Span::styled(text, style)
 }
 
-/// The find band at the read pane's foot: the `find` label, the query with its block caret, and
-/// the match count at the right. The single-line query scrolls horizontally to keep the caret in
-/// view.
+/// The band at the read pane's foot: its label (`find` or `line`), the query with its block
+/// caret, and at the right find's match count or the file's line count — or the line field's
+/// refusal. The single-line query scrolls horizontally to keep the caret in view.
 fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let Some(f) = app.find.as_ref() else { return };
     let p = app.palette();
-    let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
-
-    // The count: `k/total` on a match, the total off a match, `no matches` when nothing matches,
-    // blank while the query is empty.
-    let count = match app.find_count() {
-        None => String::new(),
-        Some((_, 0)) => "no matches".to_string(),
-        Some((Some(k), total)) => format!("{k}/{total}"),
-        Some((None, total)) => total.to_string(),
+    let line_field = f.kind == crate::app::BandKind::Line;
+    let (count, count_style) = if let Some(notice) = &f.notice {
+        (notice.clone(), Style::default().fg(p.ink(Ink::Warning, Fill::Base)))
+    } else if line_field {
+        (format!("of {}", app.line_count()), Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)))
+    } else {
+        // The count: `k/total` on a match, the total off a match, `no matches` when nothing
+        // matches, blank while the query is empty.
+        let count = match app.find_count() {
+            None => String::new(),
+            Some((_, 0)) => "no matches".to_string(),
+            Some((Some(k), total)) => format!("{k}/{total}"),
+            Some((None, total)) => total.to_string(),
+        };
+        (count, Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)))
     };
 
     let width = area.width as usize;
     let count_w = count.width();
-    let label = "find ";
+    let (label, placeholder) =
+        if line_field { ("line ", "Line number…") } else { ("find ", "Find in file…") };
     // The query slice is bounded to `query_w` cells, so a long tail never pushes the count off
     // the right edge.
     let query_w = width.saturating_sub(label.width() + count_w + 1).max(1);
-    let (query_spans, caret_cell_col) = input_line(&f.query, f.caret, query_w, "Find in file…", p);
+    let (query_spans, caret_cell_col) = input_line(&f.query, f.caret, query_w, placeholder, p);
 
     let mut spans =
         vec![Span::styled(label, Style::default().fg(p.ink(Ink::TextSecondary, Fill::Base)))];
@@ -2628,7 +2636,7 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
         line.push_span(Span::raw(" ".repeat(pad)));
     }
     if !count.is_empty() {
-        line.push_span(Span::styled(count, dim));
+        line.push_span(Span::styled(count, count_style));
     }
     frame.render_widget(Paragraph::new(line), area);
     anchor_input_cursor(frame, area, label.width() + caret_cell_col, 0);
@@ -2854,6 +2862,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         }
         A::Search => (hint(K::Search), "search"),
         A::Find => (hint(K::Find), "find"),
+        A::GotoLine => (hint(K::GotoLine), "line"),
+        A::LineGo => ("enter".into(), "go"),
         A::Wrap => (hint(K::Wrap), if app.wrap { "unwrap" } else { "wrap" }),
         // The arrows move in the find band, the search screen, and the base picker, where
         // every printable is query text.

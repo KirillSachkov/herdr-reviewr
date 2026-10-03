@@ -1734,6 +1734,19 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     // The in-file find band: printable keys edit the query, the steps move the cursor between
     // matches (`↑`/`↓` are the steps, so the single-line query has no vertical caret), `esc`
     // closes. Every other key is inert.
+    // The line field takes digits and the caret's edits; Enter jumps, Esc closes, and every
+    // other key is inert, so a digit never reaches the tab keys.
+    if app.line_open() {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let word = alt || ctrl;
+        match key.code {
+            Esc => app.close_find(),
+            Enter => app.line_go(),
+            Char(c) if !ctrl && !alt && !c.is_ascii_digit() => {}
+            code => apply_text_edit(app, code, ctrl, alt, word),
+        }
+        return Ok(());
+    }
     if app.mode == Mode::Find {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
@@ -1973,6 +1986,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Comments => app.open_list(),
             K::Search => app.open_search(),
             K::Find => app.open_find(),
+            K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
             // `delete` off the diff and `open-pr` off the `PR` tab are inert. `edit` is not:
             // it reaches the navigator's file rows too. `quit-discard` only answers the quit
