@@ -1326,6 +1326,120 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
+// --- canonical worktree text ---------------------------------------------------
+//
+// A blob is already in git's canonical form. The worktree is not: under `core.autocrlf` or
+// an `eol` attribute its text files carry CRLF, and `git diff` cleans them (git's
+// `convert_to_git`) before comparing. Reading the raw bytes instead paints every line of
+// such a file as changed. So every worktree read that reaches the screen or an export goes
+// through `worktree_text`, which replays git's line-ending step.
+//
+// Only that step. A `filter=` driver, `ident`, and `working-tree-encoding` are not
+// replayed, so a file using them reads as its eol-cleaned worktree bytes. Git LFS marks its
+// files `-text`, so they read raw, as before.
+
+/// What git's clean step does to a path's line endings on the way into the object store:
+/// the `text`/`eol` attributes and `core.autocrlf`, resolved for one path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Crlf {
+    /// No conversion: `-text`, no attribute under `core.autocrlf=false`, or an `auto` path
+    /// whose index blob already holds CRLF (git's safer autocrlf).
+    Keep,
+    /// `text`, with any `eol`: every CRLF becomes LF.
+    Text,
+    /// `text=auto`, or no attribute under `core.autocrlf=true`/`input`: every CRLF becomes
+    /// LF unless the content looks binary.
+    Auto,
+}
+
+/// The working-tree content of `path` in git's canonical form, the text `git diff` compares,
+/// lossily as UTF-8. Empty when the file is absent (a deletion) or unreadable. The one reader
+/// for worktree text.
+pub fn worktree_text(repo: &Path, path: &str) -> String {
+    let Ok(bytes) = std::fs::read(repo.join(path)) else { return String::new() };
+    // git's own shortcut: content with no CRLF converts to itself under every rule, so the
+    // common file pays no git call.
+    let rule =
+        if bytes.windows(2).any(|w| w == b"\r\n") { crlf_rule(repo, path) } else { Crlf::Keep };
+    clean(&bytes, rule)
+}
+
+/// `bytes` as git's clean step leaves them under `rule`, lossily as UTF-8. A CR that does not
+/// end a line stays, as it does in git.
+pub fn clean(bytes: &[u8], rule: Crlf) -> String {
+    let convert = match rule {
+        Crlf::Keep => false,
+        Crlf::Text => true,
+        Crlf::Auto => !looks_binary(bytes),
+    };
+    if !convert {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
+            out.push(b);
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// git's text sniff for `auto` conversion (`convert_is_binary`): a lone CR, a NUL, or more
+/// than one non-printable byte per 128 printable ones. A trailing DOS end-of-file (`^Z`)
+/// does not count.
+fn looks_binary(bytes: &[u8]) -> bool {
+    let (mut printable, mut nonprintable) = (0usize, 0usize);
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' if bytes.get(i + 1) == Some(&b'\n') => i += 1,
+            b'\r' | 0 => return true,
+            b'\n' => {}
+            // Backspace, tab, escape, and form feed read as text.
+            0x08 | b'\t' | 0x1b | 0x0c => printable += 1,
+            c if c < 0x20 || c == 0x7f => nonprintable += 1,
+            _ => printable += 1,
+        }
+        i += 1;
+    }
+    if bytes.last() == Some(&0x1a) {
+        nonprintable -= 1;
+    }
+    (printable >> 7) < nonprintable
+}
+
+/// The [`Crlf`] rule git applies to `path`. One `ls-files --eol` reads the path's attributes
+/// and its index blob's line endings, and `core.autocrlf` is read only when no attribute
+/// decides. A git that cannot answer leaves the bytes as they are, the raw read.
+fn crlf_rule(repo: &Path, path: &str) -> Crlf {
+    // `-o` lists an untracked or ignored path too, whose rule comes from its attributes alone.
+    let args = ["--literal-pathspecs", "ls-files", "-z", "--eol", "-c", "-o", "--", path];
+    let Ok(out) = git(repo, &args) else { return Crlf::Keep };
+    // `i/<index eol> w/<worktree eol> attr/<attributes>\t<path>`, the attributes possibly
+    // two words (`text eol=lf`).
+    let info = out.split('\0').next().and_then(|r| r.split_once('\t')).map_or("", |(i, _)| i);
+    let index = info.split_whitespace().find_map(|t| t.strip_prefix("i/")).unwrap_or("");
+    let attr = info.split_once("attr/").map_or("", |(_, a)| a.trim());
+    // git skips the `auto` conversion when the index blob holds CRLF, so a file committed
+    // with CRLF keeps it.
+    let auto = if matches!(index, "crlf" | "mixed") { Crlf::Keep } else { Crlf::Auto };
+    match attr {
+        "-text" => Crlf::Keep,
+        "text" | "text eol=lf" | "text eol=crlf" => Crlf::Text,
+        "text=auto" | "text=auto eol=lf" | "text=auto eol=crlf" => auto,
+        _ if autocrlf(repo) => auto,
+        _ => Crlf::Keep,
+    }
+}
+
+/// Whether `core.autocrlf` asks for conversion: `true` (any of git's spellings) or `input`.
+fn autocrlf(repo: &Path) -> bool {
+    let value = git_lenient(repo, &["config", "--get", "core.autocrlf"]);
+    let value = value.trim().to_ascii_lowercase();
+    matches!(value.as_str(), "true" | "yes" | "on" | "input")
+        || value.parse::<i64>().is_ok_and(|n| n != 0)
+}
+
 // --- base pick (branch scope) --------------------------------------------------
 //
 // One revision spelling per worktree: a blob under `refs/worktree/reviewr/base-pick`.
@@ -2451,5 +2565,28 @@ mod tests {
             rows[0],
             (ChangeKind::Renamed, "copy.rs".to_string(), Some("orig.rs".to_string()))
         );
+    }
+
+    #[test]
+    fn clean_follows_each_git_line_ending_rule() {
+        use super::{Crlf, clean};
+        let cases: &[(&[u8], Crlf, &str)] = &[
+            // `-text`, or nothing asks: the bytes as they are.
+            (b"a\r\nb\r\n", Crlf::Keep, "a\r\nb\r\n"),
+            // `text`: every CRLF, binary or not. A CR inside a line is content.
+            (b"a\r\nb\rc\r\n", Crlf::Text, "a\nb\rc\n"),
+            (b"a\0\r\n", Crlf::Text, "a\0\n"),
+            // `auto`: CRLF and mixed endings convert...
+            (b"a\r\nb\nc\r\n", Crlf::Auto, "a\nb\nc\n"),
+            // ...a DOS end-of-file byte does not make text binary...
+            (b"a\r\n\x1a", Crlf::Auto, "a\n\x1a"),
+            // ...and content git calls binary stays: a lone CR, a NUL, control bytes.
+            (b"a\r\nb\rc\r\n", Crlf::Auto, "a\r\nb\rc\r\n"),
+            (b"a\0\r\n", Crlf::Auto, "a\0\r\n"),
+            (b"\x01\x02\r\n", Crlf::Auto, "\x01\x02\r\n"),
+        ];
+        for &(bytes, rule, want) in cases {
+            assert_eq!(clean(bytes, rule), want, "{bytes:?} under {rule:?}");
+        }
     }
 }

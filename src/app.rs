@@ -1533,9 +1533,9 @@ impl App {
     /// Build the read pane's File view for `path`: an over-budget blob (a model weight, a
     /// vendored bundle) previews as the too-large notice without a read — reading it whole
     /// would spike the UI thread before `build_file`'s budget could discard it — else the
-    /// worktree content is highlighted through the shared content-hash cache. Returns the
-    /// diff and the content read (empty for the notice), for a caller that also keeps the
-    /// raw content. The one build the source view and the search
+    /// worktree content, in git's canonical form, is highlighted through the shared
+    /// content-hash cache. Returns the diff and the content read (empty for the notice), for a
+    /// caller that also keeps the content. The one build the source view and the search
     /// preview share.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
         let oversize = std::fs::metadata(self.repo.join(path))
@@ -1543,7 +1543,7 @@ impl App {
         if oversize {
             (FileDiff::too_large_notice(path.to_string()), String::new())
         } else {
-            let content = worktree_content(&self.repo, path);
+            let content = git::worktree_text(&self.repo, path);
             let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
             (diff, content)
         }
@@ -1926,7 +1926,8 @@ impl App {
     }
 
     /// The old and new content of `file` for the current scope: old from `HEAD` (or the
-    /// merge-base on the branch scope), new from the worktree. A rename reads its old side
+    /// merge-base on the branch scope), new from the worktree in git's canonical form, so the
+    /// sides compare the way `git diff` compares them. A rename reads its old side
     /// from `previous_path`, so the diff shows real edits, not a wholesale delete-and-add.
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> (String, String) {
         let new_path = path;
@@ -1934,7 +1935,7 @@ impl App {
         match self.scope {
             Scope::Uncommitted => {
                 let old = git::file_content(&self.repo, "HEAD", old_path);
-                let new = worktree_content(&self.repo, new_path);
+                let new = git::worktree_text(&self.repo, new_path);
                 (old, new)
             }
             Scope::Branch => {
@@ -1945,7 +1946,7 @@ impl App {
                     .and_then(|b| git::merge_base(&self.repo, b.oid()));
                 let old =
                     mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
-                (old, worktree_content(&self.repo, new_path))
+                (old, git::worktree_text(&self.repo, new_path))
             }
             Scope::LastTurn => {
                 let old = self
@@ -1953,7 +1954,7 @@ impl App {
                     .as_deref()
                     .map(|b| git::file_content(&self.repo, b, old_path))
                     .unwrap_or_default();
-                (old, worktree_content(&self.repo, new_path))
+                (old, git::worktree_text(&self.repo, new_path))
             }
             // Both sides from the commits: `A^` and `B`.
             Scope::Commits => {
@@ -5678,14 +5679,6 @@ fn is_markdown_path(path: &str) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-}
-
-/// The working-tree content of `path`, lossily as UTF-8; empty when the file is
-/// absent (a deletion) or unreadable.
-fn worktree_content(repo: &std::path::Path, path: &str) -> String {
-    std::fs::read(repo.join(path))
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
 }
 
 /// The current-content line source row `i` stands for: its own, else — a deletion or a fold

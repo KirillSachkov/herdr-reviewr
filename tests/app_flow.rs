@@ -9545,3 +9545,120 @@ fn quitting_with_unsent_comments_asks_first() {
     press(&mut app, &keymap, KeyCode::Char('q'));
     assert!(!app.confirming_quit && !app.should_quit);
 }
+
+// --- Canonical worktree text ------------------------------------------
+
+/// `git diff`'s changed lines for `path` against `HEAD`, a line-ending CR spelled as the
+/// marker reviewr paints for it. Split on `\n` alone, so a CR survives to be spelled.
+fn git_changed_lines(r: &Repo, path: &str) -> Vec<String> {
+    let out = r.git(&["diff", "--no-color", "HEAD", "--", path]);
+    out.split('\n')
+        .skip_while(|l| !l.starts_with("@@"))
+        .filter(|l| l.starts_with('-') || l.starts_with('+'))
+        .map(|l| match l.strip_suffix('\r') {
+            Some(body) => format!("{body}{}", herdr_reviewr::diff::CR_MARKER),
+            None => l.to_string(),
+        })
+        .collect()
+}
+
+/// The open diff's change rows, marker-prefixed.
+fn change_rows(app: &App) -> Vec<String> {
+    app.diff.rows.iter().filter(|r| r.marker() != ' ').map(Row::marker_text).collect()
+}
+
+/// The repository's loose-object count, which any object write would raise.
+fn loose_objects(r: &Repo) -> String {
+    r.git(&["count-objects"]).split(' ').next().unwrap_or_default().to_string()
+}
+
+#[test]
+fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
+    // `core.autocrlf=true`, as Git for Windows installs it. Set per repo, so the scenario
+    // runs the same on every OS. The agent rewrites a committed LF file.
+    const BASE: &str = "one\ntwo\nthree\n";
+    const CRLF: &str = "one\r\ntwo\r\nthree\r\n";
+    const CRLF_EDIT: &str = "one\r\nTWO\r\nthree\r\n";
+    const LF_EDIT: &str = "one\nTWO\nthree\n";
+    const MIXED_EDIT: &str = "one\r\nTWO\nthree\r\n";
+    let edit: &[&str] = &["-two", "+TWO"];
+    let cases: &[(&str, &str, &[&str])] = &[
+        // (.gitattributes, what the agent writes, the changed rows)
+        ("", CRLF, &[]),
+        ("", CRLF_EDIT, edit),
+        ("", LF_EDIT, edit),
+        ("", MIXED_EDIT, edit),
+        ("* text eol=crlf\n", CRLF, &[]),
+        ("* text eol=crlf\n", CRLF_EDIT, edit),
+        ("* text eol=crlf\n", LF_EDIT, edit),
+        ("* text eol=crlf\n", MIXED_EDIT, edit),
+        // `-text`: git keeps every CR, so a changed ending is a change, and shows.
+        ("* -text\n", CRLF, &["-one", "-two", "-three", "+one^M", "+two^M", "+three^M"]),
+        ("* -text\n", LF_EDIT, edit),
+        ("* -text\n", MIXED_EDIT, &["-one", "-two", "-three", "+one^M", "+TWO", "+three^M"]),
+    ];
+    for &(attributes, written, want) in cases {
+        let case = format!("{attributes:?} writing {written:?}");
+        let r = Repo::init();
+        r.git(&["config", "core.autocrlf", "true"]);
+        r.write(".gitattributes", attributes);
+        r.write("a.txt", BASE);
+        r.commit_all("init");
+        r.set_origin_default("main", "HEAD");
+        let objects = loose_objects(&r);
+        r.write("a.txt", written);
+        assert_eq!(git_changed_lines(&r, "a.txt"), want, "git agrees: {case}");
+
+        let mut app = app_on(&r);
+        for scope in [Scope::Uncommitted, Scope::Branch] {
+            app.set_scope(scope).unwrap();
+            if want.is_empty() {
+                // Unchanged to git: no row anywhere, and the text reviewr reads is the blob.
+                assert!(changed_paths(&app).is_empty(), "{case} under {scope:?}");
+                assert_eq!(
+                    herdr_reviewr::git::worktree_text(r.path(), "a.txt"),
+                    r.git(&["cat-file", "blob", "HEAD:a.txt"]),
+                    "{case}"
+                );
+            } else {
+                app.select_file(0).unwrap();
+                assert_eq!(change_rows(&app), want, "{case} under {scope:?}");
+            }
+        }
+
+        // Every view of the file reads the canonical text, and a content comment's export
+        // carries no CR.
+        enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
+        app.select_file(file_row_of(&app, "a.txt").expect("a.txt listed")).unwrap();
+        let lines: Vec<String> = app.visible.iter().map(Row::text).collect();
+        assert!(lines.iter().all(|l| !l.contains('\r')), "{case}: {lines:?}");
+        app.focus = Focus::Diff;
+        app.diff_cursor = 1;
+        app.start_comment();
+        typed(&mut app, "why?");
+        app.submit_comment();
+        let all: Vec<&herdr_reviewr::model::Comment> = app.store.iter().collect();
+        let export = herdr_reviewr::export::format_all(&all);
+        assert!(export.contains(&lines[1]) && !export.contains('\r'), "{case}: {export:?}");
+
+        app.open_search();
+        let results = herdr_reviewr::search::SearchResults {
+            files: vec![herdr_reviewr::search::FileHit { path: "a.txt".into(), spans: vec![] }],
+            file_total: 1,
+            ..Default::default()
+        };
+        let done = herdr_reviewr::search::SearchCompletion {
+            generation: 1,
+            outcome: herdr_reviewr::search::SearchOutcome::Ready(results),
+        };
+        herdr_reviewr::land_search_completion(&mut app, done, 1);
+        app.build_search_preview();
+        let preview = app.search.as_ref().and_then(|s| s.preview.as_ref()).expect("a preview");
+        let previewed: Vec<String> = preview.diff.rows.iter().map(Row::text).collect();
+        assert_eq!(previewed, lines, "{case}: the preview reads what All files reads");
+        app.close_search();
+
+        // No writes: reviewr asked git for line-ending rules and stored nothing.
+        assert_eq!(loose_objects(&r), objects, "{case}");
+    }
+}

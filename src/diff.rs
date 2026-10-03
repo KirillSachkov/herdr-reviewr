@@ -255,7 +255,11 @@ impl FileDiff {
         let line = |spans: &[Vec<Span>], i: usize| spans.get(i).cloned().unwrap_or_default();
 
         let mut rows = Vec::new();
+        // Whether each row's line ended in a CR, which the highlighter leaves out of its text.
+        let mut crs = Vec::new();
         for change in TextDiff::from_lines(old, new).iter_all_changes() {
+            let raw = change.value();
+            crs.push(raw.strip_suffix('\n').unwrap_or(raw).ends_with('\r'));
             match change.tag() {
                 ChangeTag::Equal => {
                     let (oi, ni) = (change.old_index().unwrap(), change.new_index().unwrap());
@@ -283,7 +287,10 @@ impl FileDiff {
                 }
             }
         }
+        // Pair on the text alone, then mark the endings: a line that changed only its ending
+        // pairs with its twin, and the marker is the one thing emphasized.
         let pairs = compute_emphasis(&mut rows);
+        mark_crs(&mut rows, &crs, hl.default_fg());
         Self {
             path,
             previous_path,
@@ -341,6 +348,33 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
             *spans = next;
         }
         Row::Rendered { .. } | Row::Fold { .. } => {}
+    }
+}
+
+/// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
+pub const CR_MARKER: &str = "^M";
+
+/// Mark the line-ending CRs of each change block whose lines disagree on one, `crs` saying
+/// which rows' lines ended in a CR. Text read in git's canonical form keeps only the CRs git
+/// keeps, and the highlighter leaves every one out of the row text, so a line that changed
+/// only its ending would otherwise paint as an identical −/+ pair. Each marked row ends in
+/// [`CR_MARKER`], emphasized. A block whose lines all agree changed no ending and stays
+/// unmarked, so a file that is CRLF throughout reads like any other.
+fn mark_crs(rows: &mut [Row], crs: &[bool], color: Rgb) {
+    for (dels, inss) in change_blocks(rows) {
+        let block = &crs[dels.start..inss.end];
+        if block.iter().all(|&cr| cr == block[0]) {
+            continue;
+        }
+        for i in (dels.start..inss.end).filter(|&i| crs[i]) {
+            let at = rows[i].text().chars().count() as u32;
+            if let Row::Deletion { spans, emphasis, .. } | Row::Insertion { spans, emphasis, .. } =
+                &mut rows[i]
+            {
+                spans.push(Span { text: CR_MARKER.to_string(), color });
+                emphasis.push((at, at + CR_MARKER.len() as u32));
+            }
+        }
     }
 }
 
@@ -705,6 +739,24 @@ mod tests {
         assert_eq!(ins.marker_text(), "+BETA");
         // The whole file is shown — context rows surround the change.
         assert!(d.rows.iter().filter(|r| matches!(r, Row::Context { .. })).count() >= 2);
+    }
+
+    #[test]
+    fn a_changed_line_ending_shows_its_cr_and_a_shared_one_does_not() {
+        let changes = |d: &FileDiff| -> Vec<(String, Vec<(u32, u32)>)> {
+            d.rows
+                .iter()
+                .filter(|r| r.marker() != ' ')
+                .map(|r| (r.marker_text(), r.emphasis().to_vec()))
+                .collect()
+        };
+        // Only the ending changed: the gained CR is the one emphasized difference.
+        let d = build("alpha\nbeta\n", "alpha\r\nbeta\n");
+        assert_eq!(changes(&d), [("-alpha".into(), vec![]), ("+alpha^M".into(), vec![(5, 7)])]);
+        assert_eq!(d.pairs, [(1, 1)], "the line pairs with its twin");
+        // CRLF throughout: an edit shows its text, and no ending changed.
+        let d = build("alpha\r\nbeta\r\n", "alpha\r\nBETA\r\n");
+        assert_eq!(changes(&d), [("-beta".into(), vec![]), ("+BETA".into(), vec![])]);
     }
 
     #[test]

@@ -10,7 +10,8 @@ use herdr_reviewr::git::{
     ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
     changed_files as changed_files_oid, checked_out_branch, default_branch_name, delete_base_pick,
     file_content, list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref,
-    resolve_base, resolve_commit, snapshot_worktree, write_base_pick, write_baseline_ref,
+    resolve_base, resolve_commit, snapshot_worktree, worktree_text, write_base_pick,
+    write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -30,6 +31,50 @@ fn changed_files(
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
     let winner = resolve_base(repo, base).ok()?.status.winner?;
     merge_base_oid(repo, winner.oid())
+}
+
+#[test]
+fn worktree_text_is_the_text_git_would_store() {
+    // git itself is the oracle: what `git add` stores is the canonical form `git diff`
+    // compares against. Every line-ending rule, read before the add that answers it.
+    let contents = ["a\r\nb\r\n", "a\nb\n", "a\r\nb\nc\r\n", "a\r\nb\rc\r\n", "a\0\r\n", "a\r\nb"];
+    // core.autocrlf, .gitattributes, and content committed first with no conversion.
+    let regimes = [
+        ("true", "", None),
+        ("input", "", None),
+        ("false", "", None),
+        ("false", "* text\n", None),
+        ("false", "* text=auto\n", None),
+        ("false", "* eol=lf\n", None),
+        ("true", "* -text\n", None),
+        ("true", "* text eol=crlf\n", None),
+        // `auto` keeps the CRLF of a file whose index blob already holds it.
+        ("true", "", Some("x\r\ny\r\n")),
+        ("false", "* text=auto\n", Some("x\r\ny\r\n")),
+    ];
+    for (autocrlf, attributes, committed) in regimes {
+        let r = Repo::init();
+        r.git(&["config", "core.autocrlf", "false"]);
+        if let Some(committed) = committed {
+            for i in 0..contents.len() {
+                r.write(&format!("f{i}.txt"), committed);
+            }
+            r.commit_all("crlf");
+        }
+        r.git(&["config", "core.autocrlf", autocrlf]);
+        r.write(".gitattributes", attributes);
+        for (i, content) in contents.iter().enumerate() {
+            let path = format!("f{i}.txt");
+            r.write(&path, content);
+            let ours = worktree_text(r.path(), &path);
+            r.git(&["add", &path]);
+            let stored = r.git(&["cat-file", "blob", &format!(":{path}")]);
+            assert_eq!(
+                ours, stored,
+                "{content:?}, autocrlf={autocrlf}, {attributes:?}, committed {committed:?}"
+            );
+        }
+    }
 }
 
 #[test]

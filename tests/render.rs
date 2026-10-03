@@ -519,6 +519,35 @@ fn a_changed_word_gets_the_emphasis_background() {
     assert!(found, "a changed word carries the emphasis background");
 }
 
+#[test]
+fn a_line_that_gained_only_a_cr_paints_its_marker_emphasized() {
+    const EMPH_INS_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x30, 0x55, 0x3f);
+    // `-text`: git keeps the CR, so `git diff` reports the line changed.
+    let r = Repo::init();
+    r.write(".gitattributes", "* -text\n");
+    r.write("e.txt", "alpha\nbeta\n");
+    r.commit_all("init");
+    r.write("e.txt", "alpha\r\nbeta\n");
+    let mut app = app_on(&r);
+    app.focus = Focus::Files; // no diff cursor, so the emphasis bg shows
+    let buf = render_buffer(&app);
+    let out = dump(&buf);
+
+    // Not an identical −/+ pair: the insertion ends in the marker, on the emphasis fill, and
+    // no raw CR reaches the terminal.
+    let rows: Vec<&str> = out.lines().filter(|l| l.contains("alpha")).collect();
+    assert!(rows.iter().any(|l| l.contains("alpha^M")), "{out}");
+    assert!(rows.iter().any(|l| l.contains("alpha ") && !l.contains("alpha^M")), "{out}");
+    assert!(!out.contains('\r'));
+    let (x, y) = (0..140u16)
+        .flat_map(|x| (0..40u16).map(move |y| (x, y)))
+        .find(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "^"))
+        .expect("the marker is painted");
+    assert_eq!(buf.cell((x, y)).unwrap().bg, EMPH_INS_BG);
+    assert_eq!(buf.cell((x + 1, y)).unwrap().symbol(), "M");
+    assert_eq!(buf.cell((x + 1, y)).unwrap().bg, EMPH_INS_BG);
+}
+
 /// Catppuccin surface1 — the cursor fill of the pane that does not hold focus.
 const UNFOCUSED_CURSOR_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x45, 0x47, 0x5a);
 

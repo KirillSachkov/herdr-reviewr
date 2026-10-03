@@ -4,6 +4,7 @@
 //! changes and produces per-line foreground spans; the pane keeps the terminal's own
 //! background, so only token colors come from the theme.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io::Cursor;
 
@@ -83,15 +84,22 @@ impl Highlighter {
             syntaxes.find_syntax_by_extension(lang).or_else(|| syntaxes.find_syntax_by_token(lang))
         });
         let (Some(syntax), Some(theme)) = (syntax, self.theme.as_ref()) else {
-            return content
-                .lines()
-                .map(|l| vec![Span { text: l.to_string(), color: self.default_fg }])
+            return LinesWithEndings::from(content)
+                .map(|l| vec![Span { text: body(l).to_string(), color: self.default_fg }])
                 .collect();
         };
         let mut h = HighlightLines::new(syntax, theme);
         let mut out = Vec::new();
         for line in LinesWithEndings::from(content) {
-            let spans = match h.highlight_line(line, syntaxes) {
+            // The newline syntaxes expect each line to end in `\n`, so a line that ended in a
+            // CR highlights as its LF form.
+            let text = body(line);
+            let line: Cow<'_, str> = if line[text.len()..].starts_with('\r') {
+                Cow::Owned(format!("{text}\n"))
+            } else {
+                Cow::Borrowed(line)
+            };
+            let spans = match h.highlight_line(&line, syntaxes) {
                 Ok(regions) => regions
                     .into_iter()
                     .map(|(style, text)| Span {
@@ -100,15 +108,25 @@ impl Highlighter {
                     })
                     .collect(),
                 // A grammar error degrades to plain text rather than blocking the diff.
-                Err(_) => vec![Span {
-                    text: line.trim_end_matches('\n').to_string(),
-                    color: self.default_fg,
-                }],
+                Err(_) => vec![Span { text: text.to_string(), color: self.default_fg }],
             };
             out.push(spans);
         }
         out
     }
+
+    /// The color of plain, unhighlighted text.
+    pub fn default_fg(&self) -> Rgb {
+        self.default_fg
+    }
+}
+
+/// A line without its ending: `\n`, `\r\n`, or a final bare `\r`. A line-ending CR is never
+/// text, so it can't reach a snippet or the terminal raw. The diff shows one git keeps as a
+/// marker (`diff::CR_MARKER`).
+fn body(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
 }
 
 #[cfg(test)]
@@ -139,6 +157,25 @@ mod tests {
         let lines = h.highlight("alpha\nbeta\n", None);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0], vec![super::Span { text: "alpha".into(), color: (0xcd, 0xd6, 0xf4) }]);
+    }
+
+    #[test]
+    fn a_line_ending_cr_is_never_span_text() {
+        let h = Highlighter::new(mocha());
+        let text = |lines: Vec<Vec<super::Span>>| -> Vec<String> {
+            lines.iter().map(|l| l.iter().map(|s| s.text.as_str()).collect()).collect()
+        };
+        // Highlighted and plain alike: a CRLF line, an LF line, a final bare CR. A CR inside
+        // a line is content and stays.
+        let content = "let a = 1;\r\nlet b = 2;\nlet c\r= 3;\r";
+        let want = ["let a = 1;", "let b = 2;", "let c\r= 3;"];
+        assert_eq!(text(h.highlight(content, Some("rs"))), want);
+        assert_eq!(text(h.highlight(content, None)), want);
+        // The CRLF line tokenizes as its LF twin does.
+        assert_eq!(
+            h.highlight("let a = 1;\r\n", Some("rs")),
+            h.highlight("let a = 1;\n", Some("rs"))
+        );
     }
 
     #[test]

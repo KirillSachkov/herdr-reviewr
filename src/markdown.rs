@@ -1693,6 +1693,22 @@ mod tests {
     }
 
     #[test]
+    fn crlf_source_renders_as_its_lf_twin() {
+        // A CRLF ending is a line ending, never text the sanitizer would show as `�`. A PR
+        // body arrives this way, and so does a file whose CRs git keeps.
+        let (hl, p) = setup();
+        let md =
+            "# T\r\n\r\nA paragraph\r\nthat wraps.\r\n\r\n| a | b |\r\n|---|---|\r\n| 1 | 2 |\r\n";
+        let crlf = render(md, 80, &hl, &p);
+        let lf = render(&md.replace("\r\n", "\n"), 80, &hl, &p);
+        let t = texts(&crlf.lines);
+        assert_eq!(t, ["T", "", "A paragraph that wraps.", "", "a │ b", "─────", "1 │ 2"]);
+        assert_eq!(t, texts(&lf.lines));
+        let lines = |r: &Rendered| r.meta.iter().map(|m| m.lines).collect::<Vec<_>>();
+        assert_eq!(lines(&crlf), lines(&lf), "the same source lines");
+    }
+
+    #[test]
     fn heading_is_bold_accent_without_markers() {
         let (hl, p) = setup();
         let lines = render_lines("## Install", 80, &hl, &p);
