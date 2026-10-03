@@ -690,6 +690,9 @@ pub struct App {
     /// Set by a navigation that moves `diff_cursor`; consumed once per frame to scroll the
     /// cursor into view. The wheel never sets it.
     pub reveal_diff: bool,
+    /// Set by a jump to a named line (`goto_line`): consumed with `reveal_diff`, it centers the
+    /// cursor when it landed off screen instead of nudging it to the nearest edge.
+    pub reveal_center: bool,
     /// The file crossing a hunk step armed when it found no further hunk in the open file. The
     /// next step the same way takes it, and any other input drops it.
     armed_cross: Option<ArmedCross>,
@@ -948,6 +951,7 @@ impl App {
             file_scroll: 0,
             reveal_files: false,
             reveal_diff: false,
+            reveal_center: false,
             armed_cross: None,
             resume_list: false,
             toggled_dirs: HashSet::new(),
@@ -2619,6 +2623,29 @@ impl App {
         let target = if self.composing() { self.compose_row() } else { self.diff_cursor };
         let target = target.min(self.visible.len() - 1);
         self.diff_scroll = keep_in_view(target, self.diff_scroll, heights, viewport);
+    }
+
+    /// Center the cursor's row in the read pane when it sits off screen; leave the scroll when
+    /// it is already in view. Row heights decide both, so a wrapped row counts its full height.
+    pub fn center_diff_cursor(&mut self, heights: &[usize], viewport: usize) {
+        if self.visible.is_empty() || heights.is_empty() || viewport == 0 {
+            return;
+        }
+        let target = self.diff_cursor.min(heights.len() - 1);
+        let in_view = self.diff_scroll <= target
+            && heights[self.diff_scroll..=target].iter().sum::<usize>() <= viewport;
+        if in_view {
+            return;
+        }
+        // Rows above the target fill about half of what the target leaves of the pane.
+        let room = viewport.saturating_sub(heights[target]) / 2;
+        let mut top = target;
+        let mut above = 0;
+        while top > 0 && above + heights[top - 1] <= room {
+            top -= 1;
+            above += heights[top];
+        }
+        self.diff_scroll = top;
     }
 
     /// Clamp `diff_scroll` within range (no blank tail). Called every frame. Height-aware:
@@ -4430,6 +4457,63 @@ impl App {
         self.find = None;
     }
 
+    /// `:N`: land the read cursor on line `n` of the open file — the new side's line, or the old
+    /// side's in a file with no new-side lines; in rendered markdown the block holding source
+    /// line `n`. A fold or a collapsed `<details>` hiding the line opens; a line past the end
+    /// lands on the last. A jump is navigation, so a line-range pick drops. Off screen, the
+    /// line lands centered. Inert with nothing to land on, or `n == 0`.
+    pub fn goto_line(&mut self, n: u32) {
+        if n == 0 || !self.find_available() {
+            return;
+        }
+        self.clear_selection();
+        self.focus = Focus::Diff;
+        if self.rendered_active() {
+            self.open_disclosures_holding(n);
+            self.diff_cursor = self.rendered.index.row_at_line(n).unwrap_or(0);
+        } else {
+            let has_new = self.visible.iter().any(|r| match r {
+                Row::Fold { lines } => lines.iter().any(|l| l.new_no().is_some()),
+                _ => r.new_no().is_some(),
+            });
+            let side: fn(&Row) -> Option<u32> = if has_new { Row::new_no } else { Row::old_no };
+            let mut row = line_row(&self.visible, n, side);
+            if let Row::Fold { .. } = self.visible[row]
+                && let Some(anchor) = self.visible[row].fold_anchor()
+            {
+                self.expanded_folds.insert(anchor);
+                self.rebuild_visible();
+                row = line_row(&self.visible, n, side);
+            }
+            self.diff_cursor = row;
+        }
+        self.reveal_center = true;
+    }
+
+    /// Open every collapsed `<details>` whose body holds source line `n`, outermost included, so
+    /// the line renders; the rows rebuild around them.
+    fn open_disclosures_holding(&mut self, n: u32) {
+        let open: Vec<String> =
+            self.rendered.built.as_ref().map(|b| b.input.details.clone()).unwrap_or_default();
+        let line = n as usize;
+        let closed: Vec<String> = self
+            .rendered
+            .doc
+            .disclosures
+            .iter()
+            .filter(|d| d.body <= line && line <= d.end && !open.contains(&d.key))
+            .map(|d| d.key.clone())
+            .collect();
+        if closed.is_empty() {
+            return;
+        }
+        for key in closed {
+            self.rendered.details.insert(key, true);
+        }
+        self.rebuild_visible();
+        self.settle_read();
+    }
+
     /// Every match of `query` over the open file in file order, the runs hidden inside folds
     /// included, with the cursor's rank among them (matches strictly before it) and whether the
     /// cursor's own row matches. The current match is the cursor's row when it matches, so both
@@ -5703,13 +5787,19 @@ fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
 /// The source row a rendered block starting on line `src` lands on: the row numbered `src`,
 /// else the collapsed fold hiding it, else the first row numbered past it, else the last row.
 fn source_row_of(rows: &[Row], src: u32) -> usize {
+    line_row(rows, src, Row::new_no)
+}
+
+/// The row holding line `line` by `side`'s numbering: the row numbered `line`, else the
+/// collapsed fold hiding it, else the first row numbered past it, else the last row.
+fn line_row(rows: &[Row], line: u32, side: fn(&Row) -> Option<u32>) -> usize {
     let holds = |r: &Row| match r {
-        Row::Fold { lines } => lines.iter().any(|l| l.new_no() == Some(src)),
-        _ => r.new_no() == Some(src),
+        Row::Fold { lines } => lines.iter().any(|l| side(l) == Some(line)),
+        _ => side(r) == Some(line),
     };
     rows.iter()
         .position(holds)
-        .or_else(|| rows.iter().position(|r| r.new_no().is_some_and(|n| n > src)))
+        .or_else(|| rows.iter().position(|r| side(r).is_some_and(|n| n > line)))
         .unwrap_or(rows.len().saturating_sub(1))
 }
 

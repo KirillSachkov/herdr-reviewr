@@ -1014,7 +1014,12 @@ fn event_loop(
             // the heights below measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
             let heights = ui::diff_row_heights(app, area);
-            if std::mem::take(&mut app.reveal_diff) || app.composing() {
+            // A jump to a named line centers instead of nudging; it consumes any nudge asked
+            // in the same event, which would otherwise pin the line to the edge first.
+            let nudge = std::mem::take(&mut app.reveal_diff);
+            if std::mem::take(&mut app.reveal_center) && !app.composing() {
+                app.center_diff_cursor(&heights, effective);
+            } else if nudge || app.composing() {
                 app.reveal_diff_cursor(&heights, effective);
             }
             app.bound_diff_scroll(&heights, effective);

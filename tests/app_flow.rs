@@ -9578,3 +9578,133 @@ fn a_selected_find_match_reads_on_the_selection() {
         assert!(ratio >= 4.5, "{theme}: selected match text {ratio:.2} < 4.5");
     }
 }
+
+/// One frame's scroll settle, as the frame loop runs it: a jump to a named line centers, any
+/// other move nudges, then the offset bounds. One display row per logical row.
+fn settle_frame(app: &mut App, viewport: usize) {
+    let heights = vec![1usize; app.visible.len()];
+    let nudge = std::mem::take(&mut app.reveal_diff);
+    if std::mem::take(&mut app.reveal_center) {
+        app.center_diff_cursor(&heights, viewport);
+    } else if nudge {
+        app.reveal_diff_cursor(&heights, viewport);
+    }
+    app.bound_diff_scroll(&heights, viewport);
+}
+
+/// `:N` lands on the new side's line N in the Changes diff: a folded line opens its fold, a
+/// deleted line numbered N is not the target, a line past the end lands on the last row, and a
+/// line-range pick drops.
+#[test]
+fn goto_line_lands_on_the_new_sides_line_in_the_changes_diff() {
+    use herdr_reviewr::diff::Row;
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut base = String::from("total = 0\n");
+    for i in 0..10 {
+        writeln!(base, "filler{i}").unwrap();
+    }
+    base.push_str("last = 1\ngone\n");
+    r.write("m.rs", &base);
+    r.commit_all("init");
+    r.write("m.rs", &base.replace("last = 1\ngone\n", "last = total\n"));
+    let mut app = app_on(&r);
+    let new_no = |app: &App| app.visible[app.diff_cursor].new_no();
+
+    // Line 1 hides in the leading fold: the jump opens it and lands there.
+    assert!(app.visible.iter().any(|row| matches!(row, Row::Fold { .. })));
+    let before = app.visible.len();
+    app.goto_line(1);
+    assert!(app.visible.len() > before, "the fold opened");
+    assert_eq!(new_no(&app), Some(1));
+    assert!(app.visible[app.diff_cursor].text().contains("total = 0"));
+    assert_eq!(app.focus, Focus::Diff);
+
+    // Old line 12 (`last = 1`) was deleted; line 12 means the new side's `last = total`.
+    app.goto_line(12);
+    assert_eq!(new_no(&app), Some(12));
+    assert!(app.visible[app.diff_cursor].text().contains("last = total"));
+
+    // Past the end lands on the last row.
+    app.goto_line(999);
+    assert_eq!(app.diff_cursor, app.visible.len() - 1);
+
+    // A jump drops a line-range pick; `0` does nothing at all.
+    app.diff_cursor = 0;
+    app.toggle_select();
+    app.goto_line(5);
+    assert_eq!(app.select_anchor, None, "a jump is navigation, not a pick extend");
+    let (cursor, len) = (app.diff_cursor, app.visible.len());
+    app.goto_line(0);
+    assert_eq!((app.diff_cursor, app.visible.len()), (cursor, len));
+}
+
+/// A file with no new-side lines numbers by its old side.
+#[test]
+fn goto_line_in_a_deleted_file_lands_on_the_old_line() {
+    let r = Repo::init();
+    r.write("gone.rs", "one\ntwo\nthree\n");
+    r.commit_all("init");
+    std::fs::remove_file(r.path_buf().join("gone.rs")).unwrap();
+    let mut app = app_on(&r);
+    app.goto_line(2);
+    assert_eq!(app.visible[app.diff_cursor].old_no(), Some(2));
+    assert!(app.visible[app.diff_cursor].text().contains("two"));
+}
+
+/// All files lands on line N, centered when it was off screen, and leaves the scroll when it
+/// is already on screen.
+#[test]
+fn goto_line_centers_an_off_screen_line_and_keeps_an_on_screen_one() {
+    use herdr_reviewr::app::Tab;
+    use std::fmt::Write as _;
+    let r = Repo::init();
+    let mut text = String::new();
+    for i in 1..=100 {
+        writeln!(text, "line {i}").unwrap();
+    }
+    r.write("long.rs", &text);
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    let row = app
+        .file_rows
+        .iter()
+        .position(|f| f.file_index().is_some_and(|i| app.entries[i].path == "long.rs"))
+        .unwrap();
+    app.select_file(row).unwrap();
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, 0);
+
+    app.goto_line(50);
+    assert!(app.visible[app.diff_cursor].text().contains("line 50"));
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, 45, "line 50 sits mid-pane: 4 rows above it, 5 below");
+
+    app.goto_line(52);
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, 45, "an on-screen line leaves the view still");
+}
+
+/// Rendered markdown lands on the block holding the line; a line inside a collapsed `<details>`
+/// opens it.
+#[test]
+fn goto_line_in_rendered_markdown_lands_on_its_block_and_opens_details() {
+    let r = Repo::init();
+    let doc = "# Title\n\nfirst paragraph\nstill first\n\n<details>\n<summary>More</summary>\n\nhidden line\n\n</details>\n\nlast paragraph\n";
+    r.write("doc.md", doc);
+    r.commit_all("init");
+    r.write("doc.md", &doc.replace("last paragraph", "last paragraph, edited"));
+    let mut app = app_on_rendered(&r);
+    assert!(app.rendered_active());
+    let text = |app: &App| app.visible[app.diff_cursor].text();
+
+    // Line 4 sits in the first paragraph's block.
+    app.goto_line(4);
+    assert!(text(&app).contains("first paragraph"), "{}", text(&app));
+
+    // Line 9 hides in the collapsed `<details>`: it opens and the cursor lands on the line.
+    assert!(!app.visible.iter().any(|row| row.text().contains("hidden line")), "collapsed");
+    app.goto_line(9);
+    assert!(text(&app).contains("hidden line"), "{}", text(&app));
+}
