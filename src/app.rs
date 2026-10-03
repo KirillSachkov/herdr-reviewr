@@ -499,10 +499,10 @@ pub enum BandKind {
     /// `ctrl+f`: text, stepped through match by match.
     #[default]
     Text,
-    /// `:`: a line number, jumped to on Enter, in the file and tab it opened over — another file
-    /// or tab closes it. `refused` says why Enter won't jump: a pasted location names another
-    /// file. The next edit answers it.
-    Line { over: (Tab, Option<String>), refused: Option<String> },
+    /// `:`: a line number, jumped to on Enter, in the file it opened over — another file or tab
+    /// closes it. `refused` says why Enter won't jump: a pasted location names another file. The
+    /// next edit answers it.
+    Line { refused: Option<String> },
 }
 
 /// A found match in file order: how the cursor moves onto it.
@@ -1594,6 +1594,10 @@ impl App {
     /// rows of the file being left are dropped first, so no place or mark is carried from one
     /// file to another.
     fn open_fresh(&mut self) {
+        // Find follows the reviewer across files; the line field was typed for the one left.
+        if self.line_open() {
+            self.close_find();
+        }
         self.rendered.details.clear();
         self.rendered.built = None;
         self.rendered.drop_rows();
@@ -1679,13 +1683,7 @@ impl App {
                 self.select_anchor = Some(i);
             }
         }
-        // Find follows the reviewer across files it can search; the line field was typed for
-        // the file it opened over.
-        let line_moved = matches!(
-            self.find.as_ref().map(|f| &f.kind),
-            Some(BandKind::Line { over, .. }) if over.1 != self.diff_path
-        );
-        if self.mode == Mode::Find && (!self.find_available() || line_moved) {
+        if self.mode == Mode::Find && !self.find_available() {
             self.close_find();
         }
         self.revalidate_read_marks(clicked_before.as_deref());
@@ -4494,9 +4492,8 @@ impl App {
     /// Nothing moves until Enter ([`App::line_go`]).
     pub fn open_line(&mut self) {
         self.open_find();
-        let over = (self.tab, self.diff_path.clone());
         if let Some(f) = self.find.as_mut() {
-            f.kind = BandKind::Line { over, refused: None };
+            f.kind = BandKind::Line { refused: None };
         }
     }
 
@@ -4509,14 +4506,14 @@ impl App {
     /// Why Enter won't jump: a pasted location named another file.
     pub fn line_refusal(&self) -> Option<&str> {
         match &self.find.as_ref()?.kind {
-            BandKind::Line { refused, .. } => refused.as_deref(),
+            BandKind::Line { refused } => refused.as_deref(),
             BandKind::Text => None,
         }
     }
 
     /// An edit in the line field answers its refusal: the number typed now is the request.
     pub fn clear_line_refusal(&mut self) {
-        if let Some(Find { kind: BandKind::Line { refused, .. }, .. }) = self.find.as_mut() {
+        if let Some(Find { kind: BandKind::Line { refused }, .. }) = self.find.as_mut() {
             *refused = None;
         }
     }
@@ -4559,10 +4556,7 @@ impl App {
     /// last line on [`App::line_side`].
     pub fn line_count(&self) -> usize {
         if self.rendered_active() {
-            return self.rendered.content.as_ref().map_or(0, |c| {
-                let breaks = c.text.bytes().filter(|&b| b == b'\n').count();
-                breaks + usize::from(!c.text.is_empty() && !c.text.ends_with('\n'))
-            });
+            return self.rendered.content.as_ref().map_or(0, |c| c.text.lines().count());
         }
         let side = self.line_side();
         crate::marks::diff_lines(&self.visible).filter_map(side).max().unwrap_or(0) as usize
@@ -4578,7 +4572,7 @@ impl App {
             std::path::Path::new(p).ends_with(&open) || std::path::Path::new(&open).ends_with(p)
         };
         let pasted = parse_line_paste(text);
-        let Some(Find { kind: BandKind::Line { refused, .. }, query, caret }) = self.find.as_mut()
+        let Some(Find { kind: BandKind::Line { refused }, query, caret }) = self.find.as_mut()
         else {
             return;
         };
@@ -5939,14 +5933,12 @@ fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
 /// never a trailing row the side doesn't number (a deleted tail on the new side) — else the last
 /// row.
 fn line_row(rows: &[Row], line: u32, side: fn(&Row) -> Option<u32>) -> usize {
-    let numbered = |r: &Row| match r {
-        Row::Fold { lines } => lines.iter().any(|l| side(l).is_some()),
-        _ => side(r).is_some(),
+    // A row's lines, a collapsed fold's hidden ones included.
+    let any_line = |r: &Row, pred: &dyn Fn(Option<u32>) -> bool| {
+        crate::marks::diff_lines(std::slice::from_ref(r)).any(|l| pred(side(l)))
     };
-    let holds = |r: &Row| match r {
-        Row::Fold { lines } => lines.iter().any(|l| side(l) == Some(line)),
-        _ => side(r) == Some(line),
-    };
+    let numbered = |r: &Row| any_line(r, &|n| n.is_some());
+    let holds = |r: &Row| any_line(r, &|n| n == Some(line));
     rows.iter()
         .position(holds)
         .or_else(|| rows.iter().position(|r| side(r).is_some_and(|n| n > line)))
@@ -6027,38 +6019,52 @@ enum LinePaste {
     Nothing,
 }
 
-/// Read a pasted location: the first word `fff`'s location parser reads as `path:line` (a
-/// column or a range after it, or `path(line)`), unwrapped from backticks, quotes and trailing
-/// punctuation; a bare `line:col` has no path. Else the first word that is only a number. A
-/// number inside a word (`v2` in a path) is no line.
+/// Read a pasted location, word by word, each unwrapped from backticks, quotes, brackets and
+/// trailing punctuation: the first word that holds `path:line` (a column, a range or grep's
+/// matched text may follow the line) or `path(line)` gives its line, and a word with a path ends
+/// the search. A bare `line:col` is a line. Else the first word that is only a number; a number
+/// inside a word (`v2` in a path) is no line. A line too long for a `u32` is past every file's
+/// end. `fff`'s location parser reads lines as `i32` and rejects text after the line, so the
+/// words are read here.
 fn parse_line_paste(text: &str) -> LinePaste {
-    use fff_search::location::{Location, parse_location};
-    let mut words = text.split_whitespace().map(|w| {
-        w.trim_matches(['`', '\'', '"', '<', '>', '[', ']'])
-            .trim_end_matches([',', '.', ';', '!', '?'])
-    });
     let number = |s: &str| {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
             .then(|| s.parse::<u32>().unwrap_or(u32::MAX))
     };
-    for word in words.clone() {
-        let (path, location) = parse_location(word);
-        let Some(
-            Location::Line(line)
-            | Location::Position { line, .. }
-            | Location::Range { start: (line, _), .. },
-        ) = location
-        else {
-            continue;
-        };
-        let Ok(line) = u32::try_from(line) else { continue };
+    // The digits a word's line starts with, after `at`.
+    let line_at = |word: &str, at: usize| {
+        let digits: String = word[at..].chars().take_while(char::is_ascii_digit).collect();
+        number(&digits)
+    };
+    let words: Vec<&str> = text
+        .split_whitespace()
+        .map(|w| {
+            let w = w.trim_matches(['`', '\'', '"', '<', '>', '[', ']']);
+            let w = w.trim_end_matches([',', '.', ';', '!', '?', '`', '\'', '"']);
+            let w = w.strip_prefix('(').unwrap_or(w);
+            if w.contains('(') { w } else { w.trim_end_matches(')') }
+        })
+        .collect();
+    for word in &words {
+        let found = word
+            .find(':')
+            .and_then(|colon| line_at(word, colon + 1).map(|line| (&word[..colon], line)))
+            .or_else(|| {
+                let open = word.find('(')?;
+                word.ends_with(')').then_some((&word[..open], line_at(word, open + 1)?))
+            });
+        let Some((path, line)) = found else { continue };
         return match number(path) {
             // `1337:12`: a line and a column, no path.
             Some(bare) => LinePaste::At { path: None, line: bare },
+            None if path.is_empty() => LinePaste::At { path: None, line },
             None => LinePaste::At { path: Some(path.to_string()), line },
         };
     }
-    words.find_map(number).map_or(LinePaste::Nothing, |line| LinePaste::At { path: None, line })
+    words
+        .into_iter()
+        .find_map(number)
+        .map_or(LinePaste::Nothing, |line| LinePaste::At { path: None, line })
 }
 
 #[cfg(test)]

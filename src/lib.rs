@@ -1730,13 +1730,12 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         match key.code {
             Esc => app.close_find(),
             Enter => app.line_go(),
-            Char(c) if plain && c.is_ascii_digit() => {
-                app.clear_line_refusal();
-                app.input_push(c);
-            }
-            code @ (KeyCode::Backspace | KeyCode::Delete) if plain => {
-                app.clear_line_refusal();
+            code @ (Char('0'..='9') | KeyCode::Backspace | KeyCode::Delete) if plain => {
+                let before = app.find.as_ref().map(|f| f.query.clone());
                 apply_text_edit(app, code, false, false, false);
+                if app.find.as_ref().map(|f| &f.query) != before.as_ref() {
+                    app.clear_line_refusal();
+                }
             }
             code @ (KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End) if plain => {
                 apply_text_edit(app, code, false, false, false);

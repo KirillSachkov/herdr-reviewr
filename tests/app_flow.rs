@@ -9886,6 +9886,12 @@ fn the_line_field_takes_the_line_from_a_pasted_location() {
         ("m.rs:5", took("5")),
         ("./src/m.rs:6", took("6")),
         ("1337:12", took("1337")),
+        ("see `src/m.rs:42`, which", took("42")),
+        ("src/m.rs:12:fn main() {", took("12")),
+        ("see (src/m.rs:14).", took("14")),
+        ("src/m.rs(15)", took("15")),
+        ("src/m.rs:3000000000", took("3000000000")),
+        ("src/m.rs:99999999999", took("4294967295")),
         ("see line 21, please", took("21")),
     ] {
         app.input_paste(pasted);
@@ -9899,11 +9905,17 @@ fn the_line_field_takes_the_line_from_a_pasted_location() {
         ("`src/n.rs:12`", "src/n.rs"),
         ("src/v2/other.rs:10-20", "src/v2/other.rs"),
         ("rc/m.rs:5", "rc/m.rs"),
+        ("(src/n.rs:5)", "src/n.rs"),
+        ("\"src/n.rs:5\".", "src/n.rs"),
+        ("src/n.rs:3000000000", "src/n.rs"),
     ] {
         app.input_paste(pasted);
         let refusal = format!("{path} isn't open");
         assert_eq!(field(&app), ("21".to_string(), Some(refusal)), "{pasted}");
     }
+    // A key that edits nothing answers nothing: Delete at the end leaves the refusal standing.
+    press(&mut app, &keymap, KeyCode::Delete);
+    assert!(app.line_refusal().is_some(), "an edit that changes nothing is no answer");
     let before = app.diff_cursor;
     press(&mut app, &keymap, KeyCode::Enter);
     assert!(app.line_open(), "enter does nothing while the paste is refused");
