@@ -8,6 +8,7 @@
 //! owns the terminal lifecycle and the event loop; it maps input events onto
 //! [`app::App`] methods and renders with [`ui`].
 
+pub mod actions;
 pub mod app;
 pub mod azure_devops;
 pub mod browser;

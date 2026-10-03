@@ -1,16 +1,20 @@
+use herdr_reviewr::actions::{self, NonUiRun};
+
 fn main() -> anyhow::Result<()> {
-    // Recognized anywhere in argv, matching the actions' pane-identity read: a process
-    // invoked with this flag never counts as the review UI, so it must never run the
-    // review UI either. This dispatch and the jq
-    // exclusion in `herdr/pane.sh` (`is_reviewr_pane`) are the two halves of that
-    // contract — a future non-UI flag must land in both, or the actions will count its
-    // transient process as a live reviewr pane.
-    if std::env::args_os().skip(1).any(|arg| arg == "--resolve-plugin-config") {
-        if let Err(error) = herdr_reviewr::config::print_plugin_config() {
-            eprintln!("reviewr: {error}");
-            std::process::exit(1);
+    // One rule decides both halves of "a flag run is not the review UI": this dispatch, and
+    // the plugin actions' read of which panes run the review UI (`actions::is_review_ui`).
+    // Both go through `NonUiRun::from_args`, so a process started with a non-UI flag never
+    // runs the review UI, and the actions never count it as a live reviewr pane.
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    match NonUiRun::from_args(&args) {
+        Some(NonUiRun::ResolvePluginConfig) => {
+            if let Err(error) = herdr_reviewr::config::print_plugin_config() {
+                eprintln!("reviewr: {error}");
+                std::process::exit(1);
+            }
+            Ok(())
         }
-        return Ok(());
+        Some(NonUiRun::Action(name)) => std::process::exit(actions::run(name.as_deref())),
+        None => herdr_reviewr::run(),
     }
-    herdr_reviewr::run()
 }

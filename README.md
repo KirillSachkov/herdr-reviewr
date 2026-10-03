@@ -44,7 +44,7 @@ GitLab, or Azure DevOps and never posts.
 
 ## Requirements
 
-- **herdr ≥ 0.7.5** (the plugin system).
+- **herdr ≥ 0.9.0** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
 - **macOS or Linux.**

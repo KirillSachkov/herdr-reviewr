@@ -42,7 +42,8 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/editor.rs` — the editor command: a name-keyed dialect table (how each editor takes a line, and whether it draws in the pane), quote-aware splitting, and the `editor` key's `{file}`/`{line}` template. Pure argv resolution, spawning nowhere. `run_editor` in `lib.rs` owns the spawn, and hands the pane over for a terminal editor, blocking the frame loop for that editor's whole session.
 - `src/export.rs` — comment export: format all, send via `herdr agent send` or clipboard, consume-on-success only.
 - `src/config.rs` — plugin config: the whole file validates before every frame/action. An invalid config blocks all review work until recovery, which carries authored state.
-- `herdr-plugin.toml` + `herdr/pane.sh` — plugin packaging: pane, toggle/open/close actions, and worktree workspace-birth auto-open.
+- `src/actions.rs` — the plugin actions, run as `herdr-reviewr --action <toggle|open|close|auto-open>`: config validation first, then a live sweep of the workspace for panes running the review UI (`pane process-info` per pane, concurrently), then close or open. `NonUiRun` is the one rule for which argv is not the review UI, shared by `main.rs` dispatch and that sweep.
+- `herdr-plugin.toml` — plugin packaging: the pane, the toggle/open/close actions, and the worktree workspace-birth auto-open event, each running `bin/herdr-reviewr` directly.
 
 ## QA install — putting a local build into the user's herdr panes
 
@@ -58,6 +59,6 @@ Three rules. Each one has already burned a session:
 
 1. **Never overwrite that binary in place.** `cp` onto the existing file keeps the inode and macOS SIGKILLs the binary at every launch (exit 137, blank panes, no log). Replace through a fresh inode and re-sign — which is exactly what `just qa-install` does. Do not improvise the swap by hand.
 2. **Swapping the file does not restart running panes.** They keep the old binary image until closed and reopened. Refresh inside reviewr does nothing for this.
-3. **Never script pane opens.** The plugin's `open`/`toggle` actions act on the currently focused workspace and ignore `HERDR_WORKSPACE_ID`. Automating reopens stacks panes into whatever space the user is looking at. Closing via `herdr/pane.sh close` is safe. Reopening is the user's keystroke, always.
+3. **Never script pane opens.** The plugin's `open`/`toggle` actions act on the currently focused workspace and ignore `HERDR_WORKSPACE_ID`. Automating reopens stacks panes into whatever space the user is looking at. Closing via `herdr-reviewr --action close`, which sweeps the `HERDR_WORKSPACE_ID` it runs with, is safe. Reopening is the user's keystroke, always.
 
-Rollback: `bin/herdr-reviewr.release-backup` sits beside the installed binary, swap it back the same fresh-inode way (or `herdr plugin install` to restore the release).
+Rollback: `just qa-restore` puts back the release binary and manifest that `just qa-install` backed up beside them (or `herdr plugin install` restores the release).

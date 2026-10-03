@@ -729,7 +729,8 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Print the shared normalized configuration for the plugin action script. This is its own
+/// Print the shared normalized configuration, for a check from outside the binary (the
+/// `scripts/qa-install.sh` run check is one). This is its own
 /// entrypoint (`--resolve-plugin-config`), so it resolves the config directory itself — and
 /// initializes the log itself, or the herdr-side diagnostics of a failed lookup would be
 /// dropped on the one path that exercises the CLI fallback from a plain shell.

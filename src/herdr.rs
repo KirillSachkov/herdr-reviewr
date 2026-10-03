@@ -1,6 +1,7 @@
 //! herdr host integration: resolve the agent pane to send to, sample the agents turn
-//! tracking watches, ask herdr for the plugin config directory, and stamp/clear the
-//! pane's cosmetic `reviewr` label.
+//! tracking watches, ask herdr for the plugin config directory, stamp/clear the
+//! pane's cosmetic `reviewr` label, and the pane reads and writes the plugin actions
+//! (`crate::actions`) are made of.
 //!
 //! Uses the herdr CLI via `$HERDR_BIN_PATH`. The two agent readers
 //! ask different questions and neither narrows the other: [`send_target`] resolves candidates
@@ -76,25 +77,214 @@ fn herdr_bin() -> String {
     env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
 }
 
-/// Run a herdr subcommand and return its stdout.
+/// How a herdr call failed, classified so a caller can tell a benign race from a real failure.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HerdrError {
+    /// herdr could not be run at all.
+    Unanswered,
+    /// herdr ran and exited non-zero. Holds the `error.code` of the JSON envelope it wrote to
+    /// stderr, when it wrote one (`docs/herdr-api-notes.md`).
+    Refused(Option<String>),
+    /// herdr exited 0, but its answer is missing the shape the call documents. A shape
+    /// failure is never read as an empty answer.
+    Unreadable,
+}
+
+impl HerdrError {
+    /// The addressed pane no longer exists: it exited between an earlier read and this call.
+    pub fn pane_gone(&self) -> bool {
+        matches!(self, Self::Refused(Some(code)) if code == "pane_not_found")
+    }
+}
+
+impl std::fmt::Display for HerdrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unanswered => write!(f, "herdr could not run"),
+            Self::Refused(Some(code)) => write!(f, "herdr refused: {code}"),
+            Self::Refused(None) => write!(f, "herdr refused"),
+            Self::Unreadable => write!(f, "herdr answered in an unknown shape"),
+        }
+    }
+}
+
+impl std::error::Error for HerdrError {}
+
+/// Run a herdr subcommand and return its stdout, or the classified failure.
 ///
 /// Nothing shows this error to a reviewer: every caller either replaces it with a sentence of its
 /// own or drops it. So the whole of it — the argv, which carries a review's text in `pane
 /// send-text`, and herdr's JSON error envelope — goes to the log and only there.
-fn herdr(args: &[&str]) -> Result<String> {
+fn call(args: &[&str]) -> Result<String, HerdrError> {
     let out = match crate::proc::command(herdr_bin()).args(args).output() {
         Ok(out) => out,
         Err(e) => {
             logln!("herdr {args:?} could not run: {e}");
-            // No herdr to ask is herdr not answering, whichever call it was.
-            return Err(Refusal::Unanswered.into());
+            return Err(HerdrError::Unanswered);
         }
     };
     if !out.status.success() {
-        logln!("herdr {args:?} failed: {}", String::from_utf8_lossy(&out.stderr).trim());
-        bail!("herdr refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        logln!("herdr {args:?} failed: {}", stderr.trim());
+        return Err(HerdrError::Refused(error_code(&stderr)));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The `error.code` of the JSON envelope a failed herdr call writes to stderr. Read line by
+/// line, so an advisory line printed beside the envelope cannot hide it.
+fn error_code(stderr: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        error: ErrorBody,
+    }
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        code: String,
+    }
+    stderr
+        .lines()
+        .find_map(|line| serde_json::from_str::<Envelope>(line.trim()).ok())
+        .map(|envelope| envelope.error.code)
+}
+
+/// [`call`] for the review UI's own calls, where any failure is just a failure. A herdr that
+/// could not run becomes [`Refusal::Unanswered`], which the app words for the reviewer.
+fn herdr(args: &[&str]) -> Result<String> {
+    match call(args) {
+        Ok(out) => Ok(out),
+        // No herdr to ask is herdr not answering, whichever call it was.
+        Err(HerdrError::Unanswered) => Err(Refusal::Unanswered.into()),
+        Err(_) => bail!("herdr refused"),
+    }
+}
+
+/// The `result` of a herdr JSON answer, parsed as `T`. Anything else is
+/// [`HerdrError::Unreadable`].
+fn answer<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, HerdrError> {
+    #[derive(Deserialize)]
+    struct Answer<T> {
+        result: T,
+    }
+    serde_json::from_str::<Answer<T>>(json).map(|answer| answer.result).map_err(|error| {
+        logln!("herdr answer unreadable: {error}");
+        HerdrError::Unreadable
+    })
+}
+
+/// One `herdr pane list` snapshot of a workspace.
+#[derive(Debug, Deserialize)]
+pub struct PaneList {
+    pub panes: Vec<PaneEntry>,
+}
+
+/// One pane in a [`PaneList`]. `pane_id` is required: an entry without one could never be
+/// addressed, so the listing fails to parse instead.
+#[derive(Debug, Deserialize)]
+pub struct PaneEntry {
+    pub pane_id: String,
+    /// The live foreground process's cwd, which can differ from the pane's launch cwd
+    /// (`docs/herdr-api-notes.md`).
+    #[serde(default)]
+    pub foreground_cwd: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+impl PaneList {
+    /// The panes in workspace `ws`.
+    pub fn of(ws: &str) -> Result<Self, HerdrError> {
+        answer(&call(&["pane", "list", "--workspace", ws])?)
+    }
+
+    /// The entry for pane `pane`, if the snapshot lists it.
+    pub fn pane(&self, pane: &str) -> Option<&PaneEntry> {
+        self.panes.iter().find(|entry| entry.pane_id == pane)
+    }
+
+    /// The `label` of pane `pane`. An absent key, an empty label, and an unknown pane all read
+    /// as no label.
+    fn label(&self, pane: &str) -> Option<&str> {
+        self.pane(pane)?.label.as_deref().filter(|label| !label.is_empty())
+    }
+}
+
+/// One `herdr pane process-info` answer: the processes herdr reports in the pane's foreground.
+/// On macOS and Linux that is the foreground process group. On Windows it is one process, the
+/// topmost recognized agent or else the pane's root process.
+#[derive(Debug, Deserialize)]
+pub struct ProcessInfo {
+    /// Required, and what marks an answer as a process-info answer at all: an answer without
+    /// it is a shape failure, never "no processes".
+    pub pane_id: String,
+    /// herdr omits the key when the list is empty, so an absent key is zero processes. On
+    /// Windows a just-opened pane answers that way until herdr's 250 ms process snapshot
+    /// catches up (`docs/herdr-api-notes.md`).
+    #[serde(default)]
+    pub foreground_processes: Vec<Process>,
+}
+
+/// One foreground process. `name` is left out on purpose: it is a rewritable process title,
+/// so only the executable identifies a process (`docs/herdr-api-notes.md`).
+#[derive(Debug, Deserialize)]
+pub struct Process {
+    #[serde(default)]
+    pub argv0: Option<String>,
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+}
+
+impl ProcessInfo {
+    /// The foreground processes of pane `pane`.
+    pub fn of(pane: &str) -> Result<Self, HerdrError> {
+        Self::parse(&call(&["pane", "process-info", "--pane", pane])?)
+    }
+
+    fn parse(json: &str) -> Result<Self, HerdrError> {
+        #[derive(Deserialize)]
+        struct Result {
+            process_info: ProcessInfo,
+        }
+        answer::<Result>(json).map(|result| result.process_info)
+    }
+}
+
+/// The pane a `herdr plugin pane open` created.
+#[derive(Debug, Deserialize)]
+pub struct OpenedPane {
+    pub pane_id: String,
+    #[serde(default)]
+    pub tab_id: Option<String>,
+}
+
+/// Open one of a plugin's panes. `args` follows `plugin pane open` on the command line.
+pub fn open_plugin_pane(args: &[&str]) -> Result<OpenedPane, HerdrError> {
+    #[derive(Deserialize)]
+    struct Result {
+        plugin_pane: PluginPane,
+    }
+    #[derive(Deserialize)]
+    struct PluginPane {
+        pane: OpenedPane,
+    }
+    let call_args = [&["plugin", "pane", "open"], args].concat();
+    let opened = answer::<Result>(&call(&call_args)?)?.plugin_pane.pane;
+    if opened.pane_id.is_empty() {
+        return Err(HerdrError::Unreadable);
+    }
+    Ok(opened)
+}
+
+/// Close pane `pane` with plain `pane close`, which reaches any pane by id. `plugin pane close`
+/// only reaches panes in herdr's in-memory plugin-pane registry, which forgets them on a restart
+/// and never holds a layout-launched one (`docs/herdr-api-notes.md`).
+pub fn close_pane(pane: &str) -> Result<(), HerdrError> {
+    call(&["pane", "close", pane]).map(drop)
+}
+
+/// Set tab `tab`'s label.
+pub fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
+    call(&["tab", "rename", tab, label]).map(drop)
 }
 
 /// How long a startup or exit path waits for a herdr answer before moving on. The call keeps
@@ -163,34 +353,7 @@ pub fn clear_pane_label() {
 /// Our pane's current label from `pane list`, or `None` when it has none or the listing
 /// fails. Blocking — the label threads call it, never the frame loop.
 fn current_label(ws: &str, pane: &str) -> Option<String> {
-    parse_pane_label(&herdr(&["pane", "list", "--workspace", ws]).ok()?, pane)
-}
-
-/// The `label` of pane `pane` in a `pane list` envelope. Absent key, empty label, unknown
-/// pane, and an unparseable envelope all read as no label.
-fn parse_pane_label(json: &str, pane: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Response {
-        result: PaneList,
-    }
-    #[derive(Deserialize)]
-    struct PaneList {
-        panes: Vec<PaneEntry>,
-    }
-    #[derive(Deserialize)]
-    struct PaneEntry {
-        pane_id: String,
-        #[serde(default)]
-        label: Option<String>,
-    }
-    let response: Response = serde_json::from_str(json).ok()?;
-    response
-        .result
-        .panes
-        .into_iter()
-        .find(|entry| entry.pane_id == pane)?
-        .label
-        .filter(|label| !label.is_empty())
+    PaneList::of(ws).ok()?.label(pane).map(str::to_owned)
 }
 
 /// The config directory herdr resolves for this plugin, from `herdr plugin config-dir`.
@@ -507,7 +670,9 @@ pub fn focus(pane: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentChoice, AgentPane, HashMap, Status, parse_agents, parse_tab_labels};
+    use super::{
+        AgentChoice, AgentPane, HashMap, HerdrError, Status, parse_agents, parse_tab_labels,
+    };
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -720,11 +885,39 @@ mod tests {
         // The live `pane list` entry shape (docs/herdr-api-notes.md): `label` appears only
         // on labeled panes. The label logic stamps the unlabeled and clears only its own.
         let json = r#"{"result":{"panes":[{"pane_id":"w1:p1","label":"build"},{"pane_id":"w1:p2"},{"pane_id":"w1:p3","label":""}]}}"#;
-        assert_eq!(super::parse_pane_label(json, "w1:p1").as_deref(), Some("build"));
-        assert_eq!(super::parse_pane_label(json, "w1:p2"), None);
-        assert_eq!(super::parse_pane_label(json, "w1:p3"), None, "empty label reads as none");
-        assert_eq!(super::parse_pane_label(json, "w9:p9"), None, "unknown pane reads as none");
-        assert_eq!(super::parse_pane_label("[]", "w1:p1"), None, "junk envelope reads as none");
+        let list: super::PaneList = super::answer(json).unwrap();
+        assert_eq!(list.label("w1:p1"), Some("build"));
+        assert_eq!(list.label("w1:p2"), None);
+        assert_eq!(list.label("w1:p3"), None, "empty label reads as none");
+        assert_eq!(list.label("w9:p9"), None, "unknown pane reads as none");
+    }
+
+    #[test]
+    fn a_herdr_answer_missing_its_shape_is_unreadable_never_empty() {
+        // An error envelope on stdout with exit 0 has no `result`: reading it as an empty
+        // listing would make every reviewr pane in the workspace invisible to the actions.
+        let envelope = r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#;
+        assert_eq!(super::answer::<super::PaneList>(envelope).err(), Some(HerdrError::Unreadable));
+        assert_eq!(super::ProcessInfo::parse(envelope).err(), Some(HerdrError::Unreadable));
+        // herdr skips an empty `foreground_processes` when it serializes, so an answer for
+        // its pane without the key is a real answer of zero processes.
+        let bare = r#"{"result":{"process_info":{"pane_id":"w1:p1","shell_pid":7}}}"#;
+        assert_eq!(super::ProcessInfo::parse(bare).unwrap().foreground_processes.len(), 0);
+    }
+
+    #[test]
+    fn a_failed_call_carries_herdrs_error_code() {
+        // herdr writes one JSON envelope to stderr (docs/herdr-api-notes.md). The code is what
+        // tells a pane that exited mid-sweep from a herdr that failed.
+        let gone = r#"{"error":{"code":"pane_not_found","message":"pane w1:p3 not found"},"id":"cli:request"}"#;
+        assert_eq!(super::error_code(gone).as_deref(), Some("pane_not_found"));
+        assert!(HerdrError::Refused(super::error_code(gone)).pane_gone());
+        // An advisory line before the envelope does not hide it.
+        let noisy = format!("warning: something\n{gone}\n");
+        assert_eq!(super::error_code(&noisy).as_deref(), Some("pane_not_found"));
+        let internal = r#"{"error":{"code":"internal","message":"boom"}}"#;
+        assert!(!HerdrError::Refused(super::error_code(internal)).pane_gone());
+        assert_eq!(super::error_code("plain words"), None);
     }
 
     #[test]
