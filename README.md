@@ -262,7 +262,8 @@ theme = "tokyo-night"
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`,
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
 
-Names match herdr's where both ship a palette.
+Names and accents match herdr's where both ship a palette, so focus in the pane matches herdr's
+frame. Every color stays readable on whatever sits behind it.
 
 ### Markdown view
 
