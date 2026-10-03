@@ -9888,76 +9888,24 @@ fn the_line_field_is_silent_where_it_cannot_work() {
     assert!(!offered(&app));
 }
 
-/// A paste is one location or one number. A location gives its line when its path names the
-/// open file — the same path, the open path's tail (`m.rs`), the repo root joined with it, or a
-/// GitHub blob URL to it; one in another file refuses and keeps the number, a longer relative
-/// path included (a monorepo's `docs/src/m.rs` is not `src/m.rs`). Prose, logs and tracebacks
-/// hold more than one word, so they leave the field as it was.
+/// A paste into the line field is a number or `$`, quotes and punctuation around it dropped.
+/// Anything else — a `path:line`, prose, a log line — leaves the field as it was: whether a path
+/// means the open file is search's to resolve.
 #[test]
-fn the_line_field_takes_the_line_from_a_pasted_location() {
+fn the_line_field_takes_a_pasted_number_only() {
     let r = line_field_repo();
     let mut app = app_on(&r);
     let keymap = Keymap::default();
-    let field = |app: &App| {
-        let f = app.find.as_ref().unwrap();
-        (f.query.clone(), app.line_refusal().map(str::to_string))
-    };
-    assert_eq!(app.diff_path.as_deref(), Some("src/m.rs"));
+    let query = |app: &App| app.find.as_ref().unwrap().query.clone();
     press(&mut app, &keymap, KeyCode::Char(':'));
-    let root = r.path_buf().display().to_string();
-    let took = |line: &str| (line.to_string(), None::<String>);
-    for (pasted, want) in [
-        ("src/m.rs:12:4".to_string(), took("12")),
-        ("`src/m.rs:13`".to_string(), took("13")),
-        ("src/m.rs:10-20\n".to_string(), took("10")),
-        (format!("{root}/src/m.rs:7"), took("7")),
-        ("m.rs:5".to_string(), took("5")),
-        ("./src/m.rs:6".to_string(), took("6")),
-        ("1337:12".to_string(), took("1337")),
-        ("src/m.rs(42):".to_string(), took("42")),
-        ("\u{201c}src/m.rs:43\u{201d}".to_string(), took("43")),
-        ("com.x.Foo.bar(m.rs:44)".to_string(), took("44")),
-        ("src/m.rs#L46".to_string(), took("46")),
-        ("https://github.com/o/r/blob/main/src/m.rs#L47-L50".to_string(), took("47")),
-        ("src/m.rs:99999999999".to_string(), took("4294967295")),
-        ("`21`".to_string(), took("21")),
-    ] {
-        app.input_paste(&pasted);
-        assert_eq!(field(&app), want, "{pasted}");
-    }
-
-    // A location in another file refuses and keeps the number; Enter waits on an edit.
-    for (pasted, path) in [
-        ("src/n.rs:5", "src/n.rs"),
-        ("(src/n.rs:5)", "src/n.rs"),
-        ("rc/m.rs:5", "rc/m.rs"),
-        ("docs/src/m.rs:5", "docs/src/m.rs"),
-        ("src/n.rs:3000000000", "src/n.rs"),
-    ] {
+    for (pasted, want) in [("42", "42"), ("`1337`\n", "1337"), (" 21, ", "21"), ("$", "$")] {
         app.input_paste(pasted);
-        let refusal = format!("{path} isn't open");
-        assert_eq!(field(&app), ("21".to_string(), Some(refusal)), "{pasted}");
+        assert_eq!(query(&app), want, "{pasted:?}");
     }
-    // A key that edits nothing answers nothing: Delete at the end leaves the refusal standing.
-    press(&mut app, &keymap, KeyCode::Delete);
-    assert!(app.line_refusal().is_some(), "an edit that changes nothing is no answer");
-    let before = app.diff_cursor;
-    press(&mut app, &keymap, KeyCode::Enter);
-    assert!(app.line_open(), "enter does nothing while the paste is refused");
-    assert_eq!(app.diff_cursor, before);
-    find_type(&mut app, &keymap, "3");
-    assert_eq!(field(&app), ("213".to_string(), None), "an edit answers the refusal");
-
-    // More than one word, or no line at all: the field stays as it was.
-    for pasted in [
-        "see src/m.rs:13",
-        "At 10:30 I saw src/m.rs:1337",
-        "  File \"src/n.py\", line 12, in run",
-        "error at line 12: expected 3 args",
-        "src/v2/other.rs",
-    ] {
+    app.input_paste("7");
+    for pasted in ["src/m.rs:12", "see line 21", "1,337", "v2", "src/n.rs#L5", ""] {
         app.input_paste(pasted);
-        assert_eq!(field(&app), ("213".to_string(), None), "{pasted}");
+        assert_eq!(query(&app), "7", "{pasted:?} leaves the field");
     }
 }
 

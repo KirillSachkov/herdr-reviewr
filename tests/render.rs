@@ -4956,7 +4956,7 @@ struct Item;
 }
 
 /// The line field paints its label, the typed number, the file's line count at the right and
-/// its own footer; a refused paste shows why in place of the count. The `?` bar lists `:`.
+/// its own footer; its digits light no find match. The `?` bar lists `:`.
 #[test]
 fn the_line_field_paints_its_number_count_and_footer() {
     let r = Repo::init();
@@ -4989,17 +4989,4 @@ fn the_line_field_paints_its_number_count_and_footer() {
     // The digits are a line, not a search: `row 1337` lights no match.
     let hl = app.palette().fill(Fill::Highlight);
     assert!(!render_buffer(&app).content.iter().any(|c| c.bg == hl), "no find highlight");
-
-    app.input_paste("src/elsewhere.rs:9");
-    let buf = render_buffer(&app);
-    let out = dump(&buf);
-    assert!(out.contains("src/elsewhere.rs isn't open"), "the refusal shows:\n{out}");
-    assert!(!footer_line(&out).contains("enter go"), "no `enter go` while refused:\n{out}");
-    let notice = cell_of(&buf, "isn't open");
-    assert_eq!(notice.fg, app.palette().ink(Ink::Warning, Fill::Base));
-
-    // In a narrow pane the reason keeps its end: the path's head elides, "isn't open" stays.
-    app.input_paste("/Users/someone/projects/deeply/nested/module/elsewhere.rs:9");
-    let narrow = render_at(&app, 60);
-    assert!(narrow.contains("elsewhere.rs isn't open"), "the reason survives:\n{narrow}");
 }

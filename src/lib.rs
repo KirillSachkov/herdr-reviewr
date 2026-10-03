@@ -1724,7 +1724,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     }
 
     // The line field takes digits or `$` and moves its caret; Enter jumps, Esc closes, and every
-    // other key is inert, so a digit never reaches the tab keys. An edit answers a refused paste.
+    // other key is inert, so a digit never reaches the tab keys.
     if app.line_open() {
         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
         match key.code {

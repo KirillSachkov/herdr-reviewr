@@ -2592,8 +2592,8 @@ fn cell_span(
 }
 
 /// The band at the read pane's foot: its label (`find` or `line`), the query with its block
-/// caret, and at the right find's match count or the file's line count — or the line field's
-/// refusal. The single-line query scrolls horizontally to keep the caret in view.
+/// caret, and at the right find's match count or the file's line count. The single-line query
+/// scrolls horizontally to keep the caret in view.
 fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let Some(f) = app.find.as_ref() else { return };
     let p = app.palette();
@@ -2602,22 +2602,17 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
     let (label, placeholder) =
         if line_field { ("line ", "Go to line…") } else { ("find ", "Find in file…") };
-    let (count, count_style) = if let Some(refused) = app.line_refusal() {
-        // The reason Enter waits keeps its end in a narrow pane: the path's head elides.
-        let room = width.saturating_sub(label.width() + f.query.width() + 2);
-        (elide_head(refused, room), Style::default().fg(p.ink(Ink::Warning, Fill::Base)))
-    } else if line_field {
-        (format!("of {}", app.line_count()), dim)
+    let count = if line_field {
+        format!("of {}", app.line_count())
     } else {
         // The count: `k/total` on a match, the total off a match, `no matches` when nothing
         // matches, blank while the query is empty.
-        let count = match app.find_count() {
+        match app.find_count() {
             None => String::new(),
             Some((_, 0)) => "no matches".to_string(),
             Some((Some(k), total)) => format!("{k}/{total}"),
             Some((None, total)) => total.to_string(),
-        };
-        (count, dim)
+        }
     };
 
     let count_w = count.width();
@@ -2635,7 +2630,7 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
         line.push_span(Span::raw(" ".repeat(pad)));
     }
     if !count.is_empty() {
-        line.push_span(Span::styled(count, count_style));
+        line.push_span(Span::styled(count, dim));
     }
     frame.render_widget(Paragraph::new(line), area);
     anchor_input_cursor(frame, area, label.width() + caret_cell_col, 0);

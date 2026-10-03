@@ -500,9 +500,8 @@ pub enum BandKind {
     #[default]
     Text,
     /// `:`: a line number, jumped to on Enter, in the file it opened over — another file or tab
-    /// closes it. `refused` says why Enter won't jump: a pasted location names another file. The
-    /// next edit answers it.
-    Line { refused: Option<String> },
+    /// closes it.
+    Line,
 }
 
 /// A found match in file order: how the cursor moves onto it.
@@ -3867,10 +3866,6 @@ impl App {
         if changed && self.mode == Mode::BasePick {
             self.refilter_base_picker(highlighted);
         }
-        // An edit in the line field answers its refusal: the number typed now is the request.
-        if changed && self.line_open() {
-            self.clear_line_refusal();
-        }
     }
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
@@ -4497,36 +4492,20 @@ impl App {
     pub fn open_line(&mut self) {
         self.open_find();
         if let Some(f) = self.find.as_mut() {
-            f.kind = BandKind::Line { refused: None };
+            f.kind = BandKind::Line;
         }
     }
 
     /// Whether the band open is the line field.
     pub fn line_open(&self) -> bool {
-        self.mode == Mode::Find
-            && self.find.as_ref().is_some_and(|f| matches!(f.kind, BandKind::Line { .. }))
-    }
-
-    /// Why Enter won't jump: a pasted location named another file.
-    pub fn line_refusal(&self) -> Option<&str> {
-        match &self.find.as_ref()?.kind {
-            BandKind::Line { refused } => refused.as_deref(),
-            BandKind::Text => None,
-        }
-    }
-
-    /// An edit in the line field answers its refusal: the number typed now is the request.
-    fn clear_line_refusal(&mut self) {
-        if let Some(Find { kind: BandKind::Line { refused }, .. }) = self.find.as_mut() {
-            *refused = None;
-        }
+        self.mode == Mode::Find && self.find.as_ref().is_some_and(|f| f.kind == BandKind::Line)
     }
 
     /// The line Enter jumps to: the typed number, `0` the first line and `$` the last as in
     /// vim, and past every file's end when it outgrows a `u32`. `None` on an empty field, where
-    /// Enter only closes, and while refused, where it waits.
+    /// Enter only closes.
     pub fn line_target(&self) -> Option<u32> {
-        let f = self.find.as_ref().filter(|_| self.line_open() && self.line_refusal().is_none())?;
+        let f = self.find.as_ref().filter(|_| self.line_open())?;
         match f.query.as_str() {
             "$" => Some(u32::MAX),
             digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
@@ -4550,11 +4529,8 @@ impl App {
     }
 
     /// `enter` in the line field: close it and jump to the typed line. An empty field only
-    /// closes; a refused paste holds the field open until an edit answers it.
+    /// closes.
     pub fn line_go(&mut self) {
-        if self.line_refusal().is_some() {
-            return;
-        }
         let target = self.line_target();
         self.close_find();
         if let Some(n) = target {
@@ -4582,39 +4558,16 @@ impl App {
         crate::marks::diff_lines(&self.visible).filter_map(side).max().unwrap_or(0) as usize
     }
 
-    /// Paste into the line field: one location or one number ([`parse_line_paste`]). A
-    /// location's path must name the open file — the same path, its tail (`app.rs`), the repo
-    /// root joined with it, or a GitHub blob URL to it — to give its line; one in another file
-    /// refuses and keeps the number. A longer relative path names another file: in a monorepo,
-    /// `docs/README.md` is not `README.md`.
+    /// Paste into the line field: a number, or `$`, replaces the field — quotes, backticks and
+    /// punctuation around it drop away. Anything else, a `path:line` included, leaves the field
+    /// as it was: whether a path means the open file is search's to resolve, not the field's.
     fn paste_line(&mut self, text: &str) {
-        let open = self.diff_path.clone().unwrap_or_default();
-        let absolute = self.repo.join(&open);
-        let names_open = |p: &str| {
-            // A GitHub blob URL's path past `/blob/<ref>/` is repo-relative.
-            let p = p
-                .split_once("/blob/")
-                .and_then(|(_, rest)| rest.split_once('/'))
-                .map_or(p, |(_, path)| path);
-            let p = std::path::Path::new(p.trim_start_matches("./"));
-            std::path::Path::new(&open).ends_with(p) || p == absolute
-        };
-        let pasted = parse_line_paste(text);
-        let Some(Find { kind: BandKind::Line { refused }, query, caret }) = self.find.as_mut()
-        else {
-            return;
-        };
-        match pasted {
-            LinePaste::At { path: Some(path), .. } if !names_open(&path) => {
-                *refused = Some(format!("{path} isn't open"));
-            }
-            LinePaste::At { line, .. } => {
-                *query = line.to_string();
-                *refused = None;
-            }
-            LinePaste::Nothing => {}
+        let word = text.trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '$');
+        let line = word == "$" || (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()));
+        if let Some(f) = self.find.as_mut().filter(|_| line) {
+            f.query = word.to_string();
+            f.caret = f.query.chars().count();
         }
-        *caret = query.chars().count();
     }
 
     /// `esc`: close the band, dropping the query. The cursor stays where the last step left it
@@ -5026,7 +4979,7 @@ impl App {
                 };
             }
             Mode::Find if self.line_open() => {
-                // Enter jumps only to a line: an empty field only closes, and a refusal waits.
+                // Enter jumps only to a line; an empty field only closes.
                 return if self.line_target().is_some() {
                     vec![(A::LineGo, Primary), (A::CloseFind, Do)]
                 } else {
@@ -6038,53 +5991,6 @@ fn anchor(selected: &[Row]) -> Option<(Side, u32, u32, String)> {
     let (side, (start, end)) =
         new.map(|range| (Side::New, range)).or_else(|| old.map(|range| (Side::Old, range)))?;
     Some((side, start, end, snippet))
-}
-
-/// What a paste into the line field holds.
-#[derive(Debug, PartialEq, Eq)]
-enum LinePaste {
-    /// A line, with the path it was written against when the text named one.
-    At { path: Option<String>, line: u32 },
-    /// No line: the field stays as it was.
-    Nothing,
-}
-
-/// Read a paste as one location or one number; text of more than one word (prose, a log line,
-/// a traceback) is neither, so a guess can never land in the wrong file. A location is the first
-/// `:`, `(` or `#L` directly followed by a digit: its line is that digit run, its path the run
-/// of path characters just before it — so quotes, brackets, a stack frame's method or a URL's
-/// scheme around the path drop away, and a column, a range or grep's match may follow. A `(`
-/// needs a path with a `.` or `/` (`foo.cpp(42)`, not `retry(3)`); a bare `1337:12` is a line.
-/// A line too long for a `u32` is past every file's end.
-fn parse_line_paste(text: &str) -> LinePaste {
-    let number = |s: &str| {
-        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| s.parse::<u32>().unwrap_or(u32::MAX))
-    };
-    let mut words = text.split_whitespace();
-    let (Some(word), None) = (words.next(), words.next()) else { return LinePaste::Nothing };
-    let is_path = |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | '\\');
-    let marks = word.match_indices([':', '(']).chain(word.match_indices("#L"));
-    let mut marks: Vec<(usize, &str)> = marks.collect();
-    marks.sort_unstable();
-    for (at, mark) in marks {
-        let rest = &word[at + mark.len()..];
-        let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
-        let Some(line) = number(digits) else { continue };
-        let head = &word[..at];
-        let path = &head[head.trim_end_matches(is_path).len()..];
-        if mark == "(" && !path.contains(['.', '/']) {
-            continue;
-        }
-        return match number(path) {
-            // `1337:12`: a line and a column, no path.
-            Some(bare) => LinePaste::At { path: None, line: bare },
-            None if path.is_empty() => LinePaste::At { path: None, line },
-            None => LinePaste::At { path: Some(path.to_string()), line },
-        };
-    }
-    number(word.trim_matches(|c: char| !c.is_alphanumeric()))
-        .map_or(LinePaste::Nothing, |line| LinePaste::At { path: None, line })
 }
 
 #[cfg(test)]
