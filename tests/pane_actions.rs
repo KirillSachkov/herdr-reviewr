@@ -431,8 +431,82 @@ fn manifest_runs_the_binary_directly_for_every_pane_action_and_event() {
     // No runtime command starts a shell: only the build step may.
     for section in ["panes", "actions", "events"] {
         for (_, command) in commands(section) {
-            assert!(!["bash", "sh"].contains(&command[0].as_str()), "{section}: {command:?}");
+            assert!(
+                !["bash", "sh", "powershell", "pwsh"].contains(&command[0].as_str()),
+                "{section}: {command:?}"
+            );
         }
+    }
+}
+
+#[test]
+fn manifest_builds_with_one_install_script_per_platform() {
+    let manifest: toml::Table =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("herdr-plugin.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+    let strings = |value: &toml::Value| -> Vec<String> {
+        value.as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(strings(&manifest["platforms"]), ["macos", "linux", "windows"]);
+
+    let builds: Vec<(Vec<String>, Vec<String>)> = manifest["build"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (strings(&entry["platforms"]), strings(&entry["command"])))
+        .collect();
+    let expected: [(&[&str], &[&str]); 2] = [
+        (&["macos", "linux"], &["bash", "herdr/install.sh"]),
+        (
+            &["windows"],
+            &[
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "herdr/install.ps1",
+            ],
+        ),
+    ];
+    assert_eq!(builds.len(), expected.len());
+    for ((platforms, command), (want_platforms, want_command)) in builds.iter().zip(expected) {
+        assert_eq!(platforms, want_platforms);
+        assert_eq!(command, want_command);
+    }
+    // herdr runs every build entry whose platforms match, so overlapping sets would run two
+    // installers. A `bash` entry matching Windows could reach the WSL launcher and fetch the
+    // Linux binary.
+    for platform in ["macos", "linux", "windows"] {
+        let matching: Vec<_> = builds
+            .iter()
+            .filter(|(platforms, _)| platforms.iter().any(|p| p == platform))
+            .collect();
+        assert_eq!(matching.len(), 1, "{platform}");
+        assert!(platform != "windows" || matching[0].1[0] != "bash");
+    }
+}
+
+/// PowerShell 5.1 reads a script without a BOM in the ANSI code page, so one non-ASCII byte (an
+/// em dash in a comment) can turn into a quote that ends a string early. The install step runs
+/// under 5.1, and so can the Windows CI scripts.
+#[test]
+fn every_powershell_script_is_ascii() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut scripts = vec![root.join("herdr/install.ps1")];
+    for entry in fs::read_dir(root.join("scripts")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|ext| ext == "ps1") {
+            scripts.push(path);
+        }
+    }
+    assert!(scripts.len() > 1, "{scripts:?}");
+    for script in scripts {
+        let bytes = fs::read(&script).unwrap();
+        let offending: Vec<usize> = (0..bytes.len()).filter(|&at| !bytes[at].is_ascii()).collect();
+        assert!(offending.is_empty(), "{}: non-ASCII bytes at {offending:?}", script.display());
     }
 }
 

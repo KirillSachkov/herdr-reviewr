@@ -68,3 +68,38 @@ jobs:
         with:
           name: herdr-reviewr-x86_64-pc-windows-msvc
           path: target/release/herdr-reviewr.exe
+
+  windows-plugin:
+    name: windows · install · herdr smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@1.97.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The release workflow's packaging step, minus the upload, so the fixture release below
+      # holds the exact zip and .sha256 sidecar a tag publishes.
+      - name: Package (release, dry run)
+        id: package
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: herdr-reviewr
+          target: x86_64-pc-windows-msvc
+          archive: $bin-$target
+          tar: unix
+          zip: windows
+          checksum: sha256
+          dry-run: true
+          dry-run-intended: true
+
+      # Under `powershell`, the 5.1 the manifest's build step runs.
+      - name: install.ps1 against a fixture release
+        shell: powershell
+        run: .\scripts\windows-install-check.ps1 -Archive "${{ steps.package.outputs.zip }}" -Checksum "${{ steps.package.outputs.sha256 }}"
+
+      - name: Toggle reviewr in a headless herdr
+        shell: powershell
+        run: .\scripts\windows-herdr-smoke.ps1 -Reviewr target\x86_64-pc-windows-msvc\release\herdr-reviewr.exe

@@ -10,7 +10,12 @@ Top-level: `id`, `name`, `version`, `min_herdr_version`, `platforms` (required);
 
 ```toml
 [[build]]                                   # run on `plugin install`, skipped by `plugin link`
+platforms = ["macos", "linux"]              # per entry; herdr runs every entry that matches
 command = ["bash", "herdr/install.sh"]
+
+[[build]]
+platforms = ["windows"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "herdr/install.ps1"]
 
 [[panes]]                                   # an openable pane entrypoint
 id = "pane"
@@ -37,7 +42,18 @@ resolve this way from 0.8.0, and panes from 0.9.0, which is why the manifest ask
 Before that, a pane command resolved against the pane's cwd (the repo under review). On
 Windows the extension-less `bin/herdr-reviewr` still finds `bin\herdr-reviewr.exe`: Rust's
 `Command` appends `.exe` for actions and events, and herdr's pty launcher tries `PATHEXT` for
-panes. Actions and events run with the plugin root as their cwd.
+panes. Actions and events run with the plugin root as their cwd. Seen working on
+`windows-latest` with herdr 0.9.3: toggle ran `bin/herdr-reviewr --action toggle`, and the
+pane it opened painted reviewr.
+
+**Build entries** (`run_plugin_build_commands` in `src/cli/plugin.rs`, 0.9.0). Each `[[build]]`
+entry takes its own `platforms`, falling back to the plugin's. herdr skips an entry whose
+platforms miss the current OS and runs the rest in order, with the checkout as cwd and the
+runtime env (`HERDR_SOCKET_PATH`, `HERDR_SESSION`, `HERDR_BIN_PATH`, `HERDR_PLUGIN_*`, ...)
+removed.
+
+**`plugin action invoke` answers before the action runs.** The reply carries a `log.log_id`.
+The action's exit code, stdout, and stderr land later in `herdr plugin log list`.
 
 **Plugin commands run concurrently** (herdr source, `start_plugin_command` in
 `src/app/api/plugins/runtime.rs`). Every action invoke, keybinding action, and event hook is
