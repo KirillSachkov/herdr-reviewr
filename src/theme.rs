@@ -9,7 +9,8 @@
 use ratatui::style::Color;
 use two_face::theme::EmbeddedThemeName;
 
-use crate::roles::{Cast, Fill, Overrides, Primitives, Roles};
+pub use crate::roles::Palette;
+use crate::roles::{Cast, Fill, Overrides, Primitives};
 
 /// The default theme name; the fallback for an unset CLI value.
 pub const DEFAULT: &str = "catppuccin";
@@ -38,9 +39,6 @@ pub const NAMES: [&str; 20] = [
     "everforest",
     "github-light",
 ];
-
-/// What every UI element paints with: the theme's roles, resolved per fill.
-pub type Palette = Roles;
 
 /// The syntax theme paired with a palette: a bundled `.tmTheme`'s vendored bytes (for themes
 /// `two-face` lacks, and for Catppuccin Mocha), or a theme from the `two-face` embedded set.
@@ -78,7 +76,7 @@ pub fn is_known(name: &str) -> bool {
 fn build(name: &str) -> Option<Theme> {
     let name = *NAMES.iter().find(|n| **n == name)?;
     let (syntax, primitives, fills) = entry(name)?;
-    Some(Theme { name, palette: Roles::derive(primitives, fills), syntax })
+    Some(Theme { name, palette: Palette::derive(primitives, fills), syntax })
 }
 
 /// A theme's syntax pairing, primitives, and the fills it sets itself.
@@ -304,13 +302,13 @@ mod tests {
         assert_eq!(p.legible(bright, Fill::AddedEmph), bright);
     }
 
-    /// A role color resolved on the background resolves as that role on a fill: rendered
+    /// A text tier resolved on the background resolves as that tier on a fill: rendered
     /// markdown's muted and secondary text keep their order on the cursor row.
     #[test]
-    fn a_role_color_resolves_as_its_role_on_a_fill() {
+    fn a_text_tier_resolves_as_its_tier_on_a_fill() {
         for name in NAMES {
             let p = resolve(Some(name)).palette;
-            for ink in [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Accent] {
+            for ink in [Ink::Text, Ink::TextSecondary, Ink::TextMuted] {
                 let on_base = p.ink(ink, Fill::Base);
                 assert_eq!(p.legible(on_base, Fill::Cursor), p.ink(ink, Fill::Cursor), "{name}");
             }
@@ -344,7 +342,7 @@ mod tests {
             ("catppuccin", 0x89b4fa, 0xfab387, 0xcba6f7),
             ("catppuccin-frappe", 0x8caaee, 0xef9f76, 0xca9ee6),
             ("catppuccin-macchiato", 0x8aadf4, 0xf5a97f, 0xc6a0f6),
-            ("catppuccin-latte", 0x1e66f5, 0xed5d0a, 0x8839ef),
+            ("catppuccin-latte", 0x1e66f5, 0xee5c00, 0x8839ef),
             ("tokyo-night", 0x7aa2f7, 0xff9e64, 0xbb9af7),
             ("tokyo-night-day", 0x2e7de9, 0xb15c00, 0x9854f1),
             ("dracula", 0xbd93f9, 0xffb86c, 0x8be9fd),
@@ -357,7 +355,7 @@ mod tests {
             ("solarized-light", 0x268bd2, 0xcb4b16, 0x6c71c4),
             ("monokai", 0x66d9ef, 0xfd971f, 0xae81ff),
             ("rose-pine", 0xc4a7e7, 0xebbcba, 0x31748f),
-            ("rose-pine-dawn", 0x907aa9, 0x286983, 0xc77875),
+            ("rose-pine-dawn", 0x907aa9, 0x286983, 0xca7773),
             ("ayu", 0x59c2ff, 0xff8f40, 0xd2a6ff),
             ("everforest", 0x7fbbb3, 0xe69875, 0xd699b6),
             ("github-light", 0x0969da, 0xbc4c00, 0x8250df),

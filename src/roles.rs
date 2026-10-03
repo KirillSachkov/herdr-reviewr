@@ -16,7 +16,7 @@
 //!   minimums, so the three tiers keep their order and a visible step on every fill.
 //! - A colored ink keeps its official color wherever it clears its floor, and lifts toward the
 //!   pole on the fills where it doesn't.
-//! - Roles that can appear side by side keep a minimum perceptual distance: the lower-priority
+//! - Palette that can appear side by side keep a minimum perceptual distance: the lower-priority
 //!   one takes the theme's next candidate hue.
 //! - Content colors (syntax, a theme's markdown headings) keep their hue on a fill and move in
 //!   lightness only, as far as legibility needs.
@@ -116,9 +116,9 @@ pub const FILLS: [Fill; 12] = [
     Fill::RemovedEmph,
 ];
 
-/// The fills in stacking order, bottom up. A fill can sit on any fill in a lower layer and reads
-/// as a layer over each of them; fills in one layer never stack on each other. A drag selection
-/// covers a match; the cursor row of a picked line range shows the cursor.
+/// The fills in layers, derived bottom up. Every fill stays visibly apart from every fill in
+/// another layer, so whatever the UI stacks — a match on a diff row, the cursor over a picked
+/// range, a selection over emphasis — reads as a layer. Fills in one layer never stack.
 pub const LAYERS: [&[Fill]; 7] = [
     &[Fill::Base],
     &[Fill::Bar, Fill::Code],
@@ -199,15 +199,15 @@ pub const FILL_SEP: f64 = 0.03;
 /// about two and a half just-noticeable differences.
 pub const INK_SEP: f64 = 0.05;
 
-/// Every role a theme paints, resolved.
+/// Every role a theme paints, resolved: what every UI element paints with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Roles {
+pub struct Palette {
     fills: [Color; FILLS.len()],
     text: [[Color; FILLS.len()]; INKS.len()],
     mark: [[Color; FILLS.len()]; INKS.len()],
 }
 
-impl Roles {
+impl Palette {
     /// The color of `fill`.
     #[must_use]
     pub fn fill(&self, fill: Fill) -> Color {
@@ -235,16 +235,18 @@ impl Roles {
     }
 
     /// A content color — syntax, a theme's markdown heading — painted on `on`, as legible there
-    /// as it is on the plain background (capped at [`TEXT_FLOOR`]), its hue kept. A color that
-    /// is a role's text resolved on the background resolves as that role's text on `on`.
-    /// Non-RGB colors are the terminal's own defaults and pass through.
+    /// as it is on the plain background (capped at [`TEXT_FLOOR`]), its hue kept. A text tier
+    /// resolved on the background resolves as that tier on `on`, so rendered markdown's body,
+    /// secondary and muted text keep their order there. Non-RGB colors are the terminal's own
+    /// defaults and pass through.
     #[must_use]
     pub fn legible(&self, fg: Color, on: Fill) -> Color {
         if on == Fill::Base || !matches!(fg, Color::Rgb(..)) {
             return fg;
         }
-        if let Some(ink) = INKS.into_iter().find(|&ink| self.ink(ink, Fill::Base) == fg) {
-            return self.ink(ink, on);
+        let tiers = [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Border];
+        if let Some(tier) = tiers.into_iter().find(|&tier| self.ink(tier, Fill::Base) == fg) {
+            return self.ink(tier, on);
         }
         self.lifted(fg, on, contrast(fg, self.fill(Fill::Base)).min(TEXT_FLOOR))
     }
@@ -314,9 +316,7 @@ impl Roles {
         for fill in FILLS {
             let bg = fills[fill as usize];
             let tiers = Tiers::on(&p, bg);
-            let colored = |hue: Color| {
-                (lift(hue, bg, pole_on(bg), TEXT_FLOOR), lift(hue, bg, pole_on(bg), MARK_FLOOR))
-            };
+            let colored = |hue: Color| (hued(hue, bg, TEXT_FLOOR), hued(hue, bg, MARK_FLOOR));
             for ink in INKS {
                 let (t, m) = match ink {
                     Ink::Text => (tiers.text, tiers.text),
@@ -334,7 +334,7 @@ impl Roles {
                 mark[ink as usize][fill as usize] = m;
             }
         }
-        Roles { fills, text, mark }
+        Palette { fills, text, mark }
     }
 }
 
@@ -367,10 +367,9 @@ impl Hues {
 }
 
 /// The first candidate at least [`INK_SEP`] from every `taken` color, compared as each paints
-/// on `base` (lifted to its text floor); when none is, the one farthest from its nearest taken
-/// color.
+/// on `base` as text; when none is, the one farthest from its nearest taken color.
 fn first_distinct(p: &Primitives, candidates: &[Color], taken: &[Color]) -> Color {
-    let paints = |c: Color| lift(c, p.base, pole(p.cast), TEXT_FLOOR);
+    let paints = |c: Color| hued(c, p.base, TEXT_FLOOR);
     let nearest = |c: Color| {
         taken.iter().map(|&t| oklab_distance(paints(c), paints(t))).fold(f64::MAX, f64::min)
     };
@@ -417,7 +416,7 @@ enum Recipe {
 /// as a layer over every fill below it; body text lifts on it instead.
 fn derive_fills(p: &Primitives, hues: &Hues, o: &Overrides) -> [Color; FILLS.len()] {
     let mut fills = [p.base; FILLS.len()];
-    for (depth, layer) in LAYERS.iter().enumerate().skip(1) {
+    for (depth, layer) in LAYERS.iter().enumerate() {
         for &fill in *layer {
             let below = || LAYERS[..depth].iter().flat_map(|l| l.iter());
             let distinct = |c: Color| {
@@ -478,9 +477,15 @@ fn pole_on(bg: Color) -> Color {
     if contrast(black, bg) >= contrast(white, bg) { black } else { white }
 }
 
+/// A colored role's `hue` on `bg`: its official color wherever it clears `floor`, else moved
+/// in lightness toward the pole that reads there, hue kept.
+fn hued(hue: Color, bg: Color, floor: f64) -> Color {
+    lift_lightness(hue, bg, pole_on(bg) != Color::Rgb(0, 0, 0), floor)
+}
+
 /// `fg` blended toward `toward` just far enough to clear `min` on `bg`; `fg` itself when it
 /// already does, `toward` when nothing short of it does.
-pub(crate) fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
+fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
     if contrast(fg, bg) >= min {
         return fg;
     }
@@ -552,7 +557,7 @@ fn in_gamut(lab: Oklab<f64>) -> Color {
 }
 
 /// Halfway between a hue and its colorful core, so a pastel tints `base` into a clear hue.
-pub(crate) fn saturated(c: Color) -> Color {
+fn saturated(c: Color) -> Color {
     let (r, g, b) = channels(c);
     let lo = r.min(g).min(b);
     let span = r.max(g).max(b) - lo;
@@ -564,7 +569,7 @@ pub(crate) fn saturated(c: Color) -> Color {
 }
 
 /// Linear per-channel blend: `t` of the way from `from` to `to`.
-pub(crate) fn blend(from: Color, to: Color, t: f64) -> Color {
+fn blend(from: Color, to: Color, t: f64) -> Color {
     let (fr, fg, fb) = channels(from);
     let (tr, tg, tb) = channels(to);
     let mix = |lhs: u8, rhs: u8| (f64::from(lhs) * (1.0 - t) + f64::from(rhs) * t).round() as u8;

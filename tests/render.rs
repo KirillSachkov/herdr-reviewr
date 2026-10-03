@@ -123,6 +123,26 @@ fn the_caret_block_sits_on_the_character_at_the_caret() {
     assert!(found, "the caret block highlights the character at the caret");
 }
 
+/// The character under the caret reads on its block in every theme: the light themes' accents
+/// are mid-tones, where the background color fell to 3.1:1.
+#[test]
+fn the_character_under_the_caret_reads_in_every_theme() {
+    for theme in herdr_reviewr::theme::NAMES {
+        let mut app = edited_app();
+        app.set_cli_theme(Some(theme.to_string()));
+        composing(&mut app);
+        app.input_push('a');
+        app.input_push('q');
+        app.caret_left();
+        let buf = render_buffer(&app);
+        let caret = buf.content.iter().find(|c| c.bg == app.palette().fill(Fill::Caret));
+        let caret = caret.unwrap_or_else(|| panic!("{theme}: the caret paints"));
+        assert_eq!(caret.symbol(), "q", "{theme}");
+        let ratio = herdr_reviewr::roles::contrast(caret.fg, caret.bg);
+        assert!(ratio >= 4.5, "{theme}: the caret's character {ratio:.2} < 4.5");
+    }
+}
+
 #[test]
 fn backspacing_a_wide_character_leaves_the_terminal_cursor_unpainted() {
     let mut app = edited_app();
@@ -4872,6 +4892,7 @@ fn syntax_on_the_cursor_row_keeps_its_legibility() {
     r.write("a.rs", "// quiet note\nfn y() {}\n");
     let mut app = app_on(&r);
     app.set_cli_theme(Some("tokyo-night-day".to_string()));
+    app.reload().unwrap(); // highlight with this theme's syntax colors
     app.focus = Focus::Diff;
     let p = *app.palette();
     let row_of = |app: &App, needle: &str| {
@@ -4887,4 +4908,50 @@ fn syntax_on_the_cursor_row_keeps_its_legibility() {
     let want = contrast(plain, p.fill(Fill::Base)).min(4.5) - 0.05;
     let got = contrast(lit.fg, lit.bg);
     assert!(got >= want, "{got:.2} on the cursor row, {want:.2} on the background");
+}
+
+/// A syntax token on the cursor row keeps its hue: nord's keyword blue and frappe's tokens move
+/// in lightness only, where a blend toward body text grayed them.
+#[test]
+fn syntax_on_the_cursor_row_keeps_its_hue() {
+    use palette::{IntoColor, Oklch, Srgb};
+    let polar = |c: ratatui::style::Color| {
+        let ratatui::style::Color::Rgb(r, g, b) = c else { panic!("{c:?}") };
+        let lch: Oklch<f64> = Srgb::new(r, g, b).into_format::<f64>().into_linear().into_color();
+        (lch.hue.into_positive_degrees(), lch.chroma)
+    };
+    for theme in ["nord", "catppuccin-frappe", "catppuccin"] {
+        let r = Repo::init();
+        r.write(
+            "a.rs",
+            "fn x() {}
+struct Item;
+",
+        );
+        r.commit_all("init");
+        r.write(
+            "a.rs",
+            "fn x() {}
+struct Item;
+// edit
+",
+        );
+        let mut app = app_on(&r);
+        app.set_cli_theme(Some(theme.to_string()));
+        app.reload().unwrap(); // highlight with this theme's syntax colors
+        app.focus = Focus::Diff;
+        let row_of = |app: &App, needle: &str| {
+            app.visible.iter().position(|row| row.text().contains(needle)).unwrap()
+        };
+        app.diff_cursor = row_of(&app, "edit");
+        let plain = cell_of(&render_buffer(&app), "struct").fg;
+        app.diff_cursor = row_of(&app, "struct");
+        let lit = cell_of(&render_buffer(&app), "struct").fg;
+        let ((hue, chroma), (lit_hue, lit_chroma)) = (polar(plain), polar(lit));
+        let turn = (hue - lit_hue).abs().min(360.0 - (hue - lit_hue).abs());
+        assert!(turn < 10.0, "{theme}: hue {hue:.0}° became {lit_hue:.0}°");
+        // A light cursor row can force a token to the edge of sRGB, where chroma must give;
+        // a blend toward body text loses far more.
+        assert!(lit_chroma >= chroma * 0.5, "{theme}: chroma {chroma:.3} fell to {lit_chroma:.3}");
+    }
 }
