@@ -40,13 +40,18 @@ qa-install:
     cargo build --release
     ./scripts/qa-install.sh
 
-# restore the released binary the last `just qa-install` replaced
+# restore the released binary and manifest the last `just qa-install` replaced
 qa-restore:
     #!/usr/bin/env sh
     set -eu
-    bin="$(ls -d "$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*/bin/herdr-reviewr | head -1)"
-    ./scripts/swap-binary.sh "$bin.release-backup" "$bin"
-    echo "restored release binary at $bin"
+    root="$(ls -d "$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-* | head -1)"
+    ./scripts/swap-binary.sh "$root/bin/herdr-reviewr.release-backup" "$root/bin/herdr-reviewr"
+    echo "restored release binary at $root/bin/herdr-reviewr"
+    if [ -f "$root/herdr-plugin.toml.release-backup" ]; then
+        cp "$root/herdr-plugin.toml.release-backup" "$root/herdr-plugin.toml.staging"
+        mv "$root/herdr-plugin.toml.staging" "$root/herdr-plugin.toml"
+        echo "restored release manifest at $root/herdr-plugin.toml"
+    fi
 
 # PTY smoke test of the editor path against a real release binary
 smoke-edit:

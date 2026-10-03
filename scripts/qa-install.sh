@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Swap a locally built herdr-reviewr into the GitHub-installed plugin for QA.
-# The full procedure and every known failure mode: docs/qa-install.md.
+# Swap a locally built herdr-reviewr, and this checkout's manifest, into the GitHub-installed
+# plugin for QA. The full procedure and every known failure mode: docs/qa-install.md.
 set -euo pipefail
 
 NEW="target/release/herdr-reviewr"
+MANIFEST="herdr-plugin.toml"
 [ -f "$NEW" ] || { echo "qa-install: build first (cargo build --release)" >&2; exit 1; }
 
 # Locate the managed plugin install. Exactly one is expected.
@@ -15,11 +16,22 @@ shopt -u nullglob
   printf '  %s\n' "${roots[@]:-none}" >&2
   exit 1
 }
-BIN_DIR="${roots[0]}/bin"
-BIN="$BIN_DIR/herdr-reviewr"
+ROOT="${roots[0]}"
+BIN="$ROOT/bin/herdr-reviewr"
+
+# herdr rereads the installed manifest on every plugin call, and a manifest asking for a newer
+# herdr than the one running marks the whole plugin unavailable: no pane, no action. Refuse
+# before touching anything rather than disable the user's panes.
+need=$(sed -n 's/^min_herdr_version = "\(.*\)"/\1/p' "$MANIFEST")
+have=$(herdr --version 2>/dev/null | awk '{print $2}') || have=""
+if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
+  echo "qa-install: this build's manifest needs herdr $need, found '${have:-none}'. Upgrade herdr first." >&2
+  exit 1
+fi
 
 # Keep one pristine release for rollback. Never overwrite an existing backup.
 [ -f "$BIN.release-backup" ] || cp "$BIN" "$BIN.release-backup"
+[ -f "$ROOT/$MANIFEST.release-backup" ] || cp "$ROOT/$MANIFEST" "$ROOT/$MANIFEST.release-backup"
 
 # The fresh-inode swap lives in one place (scripts/swap-binary.sh): an in-place overwrite
 # keeps the old inode and macOS then SIGKILLs the binary at every launch (exit 137).
@@ -33,10 +45,17 @@ BIN="$BIN_DIR/herdr-reviewr"
 }
 echo "installed: $BIN"
 
+# The manifest names the commands herdr runs for the pane and every action, so a build that
+# changes them is only exercised with its own manifest. Renamed into place, so herdr never
+# reads a half-written file.
+cp "$MANIFEST" "$ROOT/$MANIFEST.staging"
+mv "$ROOT/$MANIFEST.staging" "$ROOT/$MANIFEST"
+echo "installed: $ROOT/$MANIFEST"
+
 # Running panes keep executing the old binary image. Only a pane restart picks this up.
 live=$(pgrep -f "$BIN" || true)
 if [ -n "$live" ]; then
   echo "note: running reviewr panes still use the OLD binary (pids:" $live ")"
 fi
 echo "next: close and reopen each reviewr pane with the toggle keybinding inside herdr."
-echo "rollback: cp $BIN.release-backup <staging> && rm $BIN && mv <staging> $BIN"
+echo "rollback: just qa-restore"

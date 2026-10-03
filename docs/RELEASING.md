@@ -99,6 +99,6 @@ end-to-end test: it exercises the exact `herdr plugin install` path a user hits.
 - **QA against the installed plugin** uses `just qa-install`, never a bare `cp`. Overwriting the
   installed binary in place invalidates its cached code signature, macOS SIGKILLs every launch,
   and the pane opens dead with no error — the recipe replaces the inode and ad-hoc re-signs.
-  `just qa-restore` puts the released binary back.
+  `just qa-restore` puts the released binary and manifest back.
 - **`--verify-tag`** means the tag must exist on the remote before the Release is created — push
   the tag, don't create the Release by hand first.
