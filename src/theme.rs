@@ -367,19 +367,13 @@ const MIN_FILL_CONTRAST: f64 = 4.5;
 /// A fill is floored against body text only, so a dim syntax color — a code comment, above
 /// all — can drop far lower on the same fill. Holding each color to its own plain-background
 /// contrast keeps it as readable as it was, and keeps a comment dimmer than code. `toward` is
-/// the theme's text, so this lightens on a dark theme and darkens on a light one; a color
-/// already at its target comes back unchanged.
+/// the theme's text, which sets the direction: lighter on a dark theme, darker on a light one.
+/// Only lightness moves, so a token keeps its hue; a color already at its target comes back
+/// unchanged.
 pub fn legible(fg: Color, fill: Color, base: Color, toward: Color) -> Color {
     let target = contrast(fg, base).min(MIN_FILL_CONTRAST);
-    let mut t = 0.0;
-    while t < 1.0 {
-        let lifted = blend(fg, toward, t);
-        if contrast(lifted, fill) >= target {
-            return lifted;
-        }
-        t += 0.02;
-    }
-    toward
+    let lighter = crate::roles::luminance(toward) > crate::roles::luminance(fill);
+    crate::roles::lift_lightness(fg, fill, lighter, target)
 }
 
 #[cfg(test)]

@@ -460,7 +460,7 @@ fn linear(channel: u8) -> f64 {
 }
 
 /// WCAG relative luminance.
-fn luminance(color: Color) -> f64 {
+pub(crate) fn luminance(color: Color) -> f64 {
     let (r, g, b) = channels(color);
     0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
 }
@@ -488,9 +488,95 @@ fn oklab(color: Color) -> (f64, f64, f64) {
     )
 }
 
+/// `fg` moved in `OKLab` lightness only, lighter or darker, just far enough to clear `min` on
+/// `bg`. Its hue stays: chroma gives way only where the lighter color would leave sRGB. A pole
+/// blend washes a color toward gray instead, which is what a syntax token on a light cursor row
+/// can't afford.
+// OKLab names its channels L, a, b.
+#[allow(clippy::many_single_char_names)]
+pub(crate) fn lift_lightness(fg: Color, bg: Color, lighter: bool, min: f64) -> Color {
+    if contrast(fg, bg) >= min {
+        return fg;
+    }
+    let (l, a, b) = oklab(fg);
+    let end = if lighter { 1.0 } else { 0.0 };
+    let at = |lightness: f64| in_gamut(lightness, a, b);
+    if contrast(at(end), bg) < min {
+        return at(end);
+    }
+    let (mut short, mut far) = (l, end);
+    for _ in 0..24 {
+        let mid = f64::midpoint(short, far);
+        if contrast(at(mid), bg) >= min { far = mid } else { short = mid }
+    }
+    at(far)
+}
+
+/// The `OKLab` color at lightness `l` with the most of chroma `(a, b)` sRGB can show.
+#[allow(clippy::many_single_char_names)]
+fn in_gamut(l: f64, a: f64, b: f64) -> Color {
+    let fits = |k: f64| {
+        let (r, g, bl) = linear_rgb(l, a * k, b * k);
+        [r, g, bl].iter().all(|c| (-1e-4..=1.0 + 1e-4).contains(c))
+    };
+    let k = if fits(1.0) {
+        1.0
+    } else {
+        let (mut keep, mut lose) = (0.0_f64, 1.0_f64);
+        for _ in 0..20 {
+            let mid = f64::midpoint(keep, lose);
+            if fits(mid) { keep = mid } else { lose = mid }
+        }
+        keep
+    };
+    let (r, g, bl) = linear_rgb(l, a * k, b * k);
+    let encode = |c: f64| {
+        let c = c.clamp(0.0, 1.0);
+        let srgb = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (srgb * 255.0).round() as u8
+    };
+    Color::Rgb(encode(r), encode(g), encode(bl))
+}
+
+// The inverse `OKLab` matrices, by the same channel convention as [`oklab`].
+#[allow(clippy::many_single_char_names)]
+fn linear_rgb(l: f64, a: f64, b: f64) -> (f64, f64, f64) {
+    let l_ = l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
+    let m_ = l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
+    let s_ = l - 0.089_484_177_5 * a - 1.291_485_548_0 * b;
+    let (l3, m3, s3) = (l_.powi(3), m_.powi(3), s_.powi(3));
+    (
+        4.076_741_662_1 * l3 - 3.307_711_591_3 * m3 + 0.230_969_929_2 * s3,
+        -1.268_438_004_6 * l3 + 2.609_757_401_1 * m3 - 0.341_319_396_5 * s3,
+        -0.004_196_086_3 * l3 - 0.703_418_614_7 * m3 + 1.707_614_701_0 * s3,
+    )
+}
+
 fn channels(color: Color) -> (u8, u8, u8) {
     match color {
         Color::Rgb(r, g, b) => (r, g, b),
         _ => (0, 0, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Color, contrast, lift_lightness, oklab};
+
+    /// Catppuccin's red, lifted to 4.5:1 on its light cursor row, stays red: same hue, most of
+    /// its chroma. A blend toward body text reached the contrast by turning it pink-gray.
+    #[test]
+    #[allow(clippy::many_single_char_names)]
+    fn a_lifted_syntax_color_keeps_its_hue() {
+        let (red, cursor) = (Color::Rgb(0xf3, 0x8b, 0xa8), Color::Rgb(0x58, 0x5b, 0x70));
+        let lifted = lift_lightness(red, cursor, true, 4.5);
+        assert!(contrast(lifted, cursor) >= 4.5, "{lifted:?} reads on the cursor row");
+        let polar = |c: Color| {
+            let (_, a, b) = oklab(c);
+            (b.atan2(a).to_degrees(), a.hypot(b))
+        };
+        let ((hue, chroma), (lifted_hue, lifted_chroma)) = (polar(red), polar(lifted));
+        assert!((hue - lifted_hue).abs() < 8.0, "hue {hue:.1}° became {lifted_hue:.1}°");
+        assert!(lifted_chroma >= chroma * 0.5, "chroma {chroma:.3} fell to {lifted_chroma:.3}");
     }
 }
