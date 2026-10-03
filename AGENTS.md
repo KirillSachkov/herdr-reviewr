@@ -11,6 +11,7 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 - `just ci` — exactly what CI runs (fmt-check, lint, test, release build).
 - `just qa-install` — put a local build into the user's real herdr panes. See "QA install" below before using it.
 - `just smoke-edit` — PTY smoke test of the editor path (`e`) against a real release binary. Unit tests stop at the argv; everything after it is terminal state, so run this after any change to `run_editor`, the terminal mode stack, or the editor dialects. Not part of `just ci`: it drives a pty and takes about a minute.
+- `cargo run --example snapshot -- <out-dir>` — paints every theme's real frames, scene by scene, as HTML fragments for a side-by-side color review. Ad-hoc tooling for theme and color work, not a gate; run it with the herdr environment stripped.
 - `python3 scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture` — perceived-latency benchmark (keypress → painted frame, via PTY). Ad-hoc tooling, not a gate: run it when a change might feel slower. `cargo run --release --example bench_latency -- <repo>` attributes a slow number to its component calls. The one committed baseline is `scripts/bench-results/baseline.json` — replace it when a change moves the numbers, never add per-round runs. For an A/B, rebuild the old binary to a second target dir and interleave runs under the same system load — absolute numbers drift with background load.
 
 ## Invariants
@@ -34,6 +35,8 @@ The runtime is a single-threaded frame loop (`event_loop` in `src/lib.rs`): draw
 - `src/markdown.rs` — the markdown renderer. Every rendered line maps to its block's source range, and `silent` lists the source lines nothing renders.
 - `src/rendered.rs` — a file tab's `RenderedView` (choice, content, render, marks) and the `RenderedIndex` over its rows: unit runs, lead rows, and the one landing rule for a source line.
 - `src/marks.rs` — rendered change marks. An inserted line belongs to its new block, a deleted line to its block in the old document (the old side renders too), and markers stand for the rest.
+- `src/roles.rs` — the color roles. A theme's primitives derive every fill (a layer under text, stacked in `LAYERS`) and every ink (a text or glyph color), each resolved per fill so it reads there. Components paint roles, never a hue; `legible`/`readable` keep content colors (syntax, markdown headings) readable on any fill, hue kept.
+- `src/theme.rs` — the theme catalog: each built-in theme's primitives, syntax pairing, and the official fills it sets itself.
 - `src/ui.rs` — all rendering. Row heights and wrapping recompute per frame across the visible diff, so render cost scales with open-file size.
 - `src/forge.rs` + the `PrRefresh`/`PrCoordinator` state machines in `lib.rs` — the PR snapshot. Fetches are tagged with the input (repository identity, pinned HEAD and base, the branch's published heads and pin) that produced them, and a result paints only if a fresh probe proves the input still matches. This generation/input-tag pattern is the template for moving other derived state off-thread.
 - `src/gitlab.rs` / `src/azure_devops.rs` — the `glab` and `az` providers behind the forge boundary in `forge.rs`, each mapping its CLI's payloads onto the one `PrSnapshot` shape.

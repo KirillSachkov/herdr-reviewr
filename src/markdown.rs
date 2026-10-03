@@ -422,7 +422,7 @@ impl Renderer<'_> {
                 // syntax theme's code color where it sets one.
                 let fg = self.hl.markdown().inline_code.map_or_else(
                     || self.p.ink(Ink::Text, Fill::Code),
-                    |c| self.content(c, Fill::Code),
+                    |c| self.readable(c, Fill::Code),
                 );
                 let style = self.current_style().fg(fg).bg(self.p.fill(Fill::Code));
                 self.push_code_span(&t, &range, style);
@@ -514,8 +514,8 @@ impl Renderer<'_> {
                 let at = self.chunk_len();
                 self.urls.push(std::sync::Arc::from(dest_url.as_ref()));
                 self.links.push((self.urls.len() - 1, at));
-                let blue = self.p.ink(Ink::Accent, Fill::Base);
-                self.push_style(|s| s.fg(blue).add_modifier(Modifier::UNDERLINED));
+                let accent = self.p.ink(Ink::Accent, Fill::Base);
+                self.push_style(|s| s.fg(accent).add_modifier(Modifier::UNDERLINED));
             }
             Tag::Image { dest_url, .. } => {
                 let at = self.chunk_len();
@@ -682,14 +682,13 @@ impl Renderer<'_> {
             _ => Ink::TextSecondary,
         };
         let fg = self.hl.markdown().headings[level as usize - 1]
-            .map_or_else(|| self.p.ink(fallback, Fill::Base), |c| self.content(c, Fill::Base));
+            .map_or_else(|| self.p.ink(fallback, Fill::Base), |c| self.readable(c, Fill::Base));
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
     }
 
-    /// A syntax theme's content color, lifted to the text floor on `on`.
-    fn content(&self, (r, g, b): crate::diff::Rgb, on: Fill) -> Color {
-        let toward = self.p.ink(Ink::Text, on);
-        crate::roles::lift(Color::Rgb(r, g, b), self.p.fill(on), toward, crate::roles::TEXT_FLOOR)
+    /// A syntax theme's color, read as text on `on`.
+    fn readable(&self, (r, g, b): crate::diff::Rgb, on: Fill) -> Color {
+        self.p.readable(Color::Rgb(r, g, b), on)
     }
 
     /// Close a link: when its visible text differs from the destination, append the
@@ -1673,6 +1672,7 @@ fn char_width(c: char) -> usize {
 mod tests {
     use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
+    use crate::roles::{Fill, Ink};
     use crate::theme::{self, Palette};
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
@@ -1744,11 +1744,8 @@ mod tests {
         let t = theme::resolve(Some("one-dark"));
         let (hl, p) = (Highlighter::new(t.syntax), t.palette);
         let fg = |md: &str| render_lines(md, 80, &hl, &p)[0].spans[1].style.fg;
-        assert_eq!(fg("## Title"), Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
-        assert_eq!(
-            fg("#### Title"),
-            Some(p.ink(crate::roles::Ink::TextSecondary, crate::roles::Fill::Base))
-        );
+        assert_eq!(fg("## Title"), Some(p.ink(Ink::Text, Fill::Base)));
+        assert_eq!(fg("#### Title"), Some(p.ink(Ink::TextSecondary, Fill::Base)));
     }
 
     #[test]
@@ -1760,6 +1757,38 @@ mod tests {
         assert!(find("b").style.add_modifier.contains(Modifier::BOLD));
         assert!(find("c").style.add_modifier.contains(Modifier::ITALIC));
         assert!(find("d").style.add_modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    /// Headings and inline code read as text in every theme: each heading level and the code
+    /// chip clear 4.5:1, whatever the theme's own colors. Everforest colors each level apart;
+    /// ayu sets one heading color for all of them.
+    #[test]
+    fn markdown_colors_read_in_every_theme() {
+        use crate::roles::{TEXT_FLOOR, contrast};
+        let md = "# a\n\n## b\n\n### c\n\n#### d\n\n##### e\n\n###### f\n\nrun `x` now\n";
+        for name in theme::NAMES {
+            let t = theme::resolve(Some(name));
+            let (hl, p) = (Highlighter::new(t.syntax), t.palette);
+            let lines = render_lines(md, 80, &hl, &p);
+            let fg_of = |needle: &str| {
+                let span = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == needle);
+                span.unwrap_or_else(|| panic!("{name}: {needle:?}")).style
+            };
+            for h in ["a", "b", "c", "d", "e", "f"] {
+                let c = contrast(fg_of(h).fg.unwrap(), p.fill(Fill::Base));
+                assert!(c >= TEXT_FLOOR, "{name}: heading {h} {c:.2}");
+            }
+            let code = fg_of("x");
+            assert_eq!(code.bg, Some(p.fill(Fill::Code)), "{name}: the code chip");
+            let c = contrast(code.fg.unwrap(), p.fill(Fill::Code));
+            assert!(c >= TEXT_FLOOR, "{name}: inline code {c:.2}");
+            let level = |h| fg_of(h).fg;
+            match name {
+                "everforest" => assert_ne!(level("a"), level("b"), "everforest colors each level"),
+                "ayu" => assert!(["b", "c", "f"].iter().all(|&h| level(h) == level("a"))),
+                _ => {}
+            }
+        }
     }
 
     /// Inline code sits on the code chip in the theme's code color: Catppuccin's green on
@@ -1792,7 +1821,7 @@ mod tests {
         // `let` keyword takes a syntax color different from the plain text color.
         let colors: Vec<_> = lines[0].spans.iter().filter_map(|s| s.style.fg).collect();
         assert!(colors.len() > 2, "rust tokenizes into several colored spans: {colors:?}");
-        assert!(colors.iter().any(|c| Some(*c) != Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base))));
+        assert!(colors.iter().any(|&c| c != p.ink(Ink::Text, Fill::Base)));
     }
 
     #[test]
@@ -1812,10 +1841,7 @@ mod tests {
         let text = text_of(&lines[0]);
         assert_eq!(text, "see the run (https://ci.example/1)");
         let dest = lines[0].spans.iter().find(|s| s.content.contains("ci.example")).unwrap();
-        assert_eq!(
-            dest.style.fg,
-            Some(p.ink(crate::roles::Ink::TextMuted, crate::roles::Fill::Base))
-        );
+        assert_eq!(dest.style.fg, Some(p.ink(Ink::TextMuted, Fill::Base)));
         let label = lines[0].spans.iter().find(|s| s.content.contains("the run")).unwrap();
         assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -2463,10 +2489,7 @@ mod tests {
         assert!(!t.contains("<sub>"), "{t}");
         assert!(!t.contains("⧉"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P2").unwrap();
-        assert_eq!(
-            chip.style.fg,
-            Some(p.ink(crate::roles::Ink::Warning, crate::roles::Fill::Base))
-        );
+        assert_eq!(chip.style.fg, Some(p.ink(Ink::Warning, Fill::Base)));
         assert!(chip.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -2480,7 +2503,7 @@ mod tests {
         assert!(t.contains("Backfill misses live updates"), "{t}");
         assert!(!t.contains("<img"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P1").unwrap();
-        assert_eq!(chip.style.fg, Some(p.ink(crate::roles::Ink::Danger, crate::roles::Fill::Base)));
+        assert_eq!(chip.style.fg, Some(p.ink(Ink::Danger, Fill::Base)));
     }
 
     #[test]

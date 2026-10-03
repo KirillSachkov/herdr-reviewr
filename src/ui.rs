@@ -628,19 +628,15 @@ pub fn gutter_row_at(area: Rect, app: &App, col: u16, row: u16) -> Option<usize>
 }
 
 /// Paint one selected cell: the selection fill, with the cell's own color kept as legible on
-/// it as it was on the plain background.
+/// it as it was on the plain background. The selection covers a match or the caret, whose text
+/// was resolved for their solid block, so that text becomes body text.
 fn paint_selected(cell: &mut ratatui::buffer::Cell, p: &Palette) {
-    let fill = p.fill(Fill::Selection);
+    let on_solid = [Fill::Highlight, Fill::Caret].iter().any(|&f| cell.bg == p.fill(f));
     let fg = match cell.fg {
-        Color::Rgb(..) => crate::theme::legible(
-            cell.fg,
-            fill,
-            p.fill(Fill::Base),
-            p.ink(Ink::Text, Fill::Selection),
-        ),
+        Color::Rgb(..) if !on_solid => p.legible(cell.fg, Fill::Selection),
         _ => p.ink(Ink::Text, Fill::Selection),
     };
-    cell.set_bg(fill);
+    cell.set_bg(p.fill(Fill::Selection));
     cell.set_fg(fg);
 }
 
@@ -1121,9 +1117,9 @@ fn composer_lines(
         .collect()
 }
 
-/// The block-cursor style: the character under the caret shown dark-on-orange.
+/// The block-cursor style: the character under the caret on a solid accent block.
 fn caret_style(p: &Palette) -> Style {
-    Style::default().fg(p.fill(Fill::Base)).bg(p.mark(Ink::Accent, Fill::Base))
+    Style::default().fg(p.ink(Ink::Text, Fill::Caret)).bg(p.fill(Fill::Caret))
 }
 
 /// One box row with the caret block over the character at `col`.
@@ -1544,7 +1540,7 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
     // Right-align the suffix; at least one gap column when the bar overflows.
     let pad = (area.width as usize).saturating_sub(used).max(1);
 
-    // A quiet surface bar: the active tab in bright blue, the inactive one dimmed, the
+    // A quiet surface bar: the active tab in the accent, the inactive one dimmed, the
     // clickable scope control accented so it reads as a button.
     let p = app.palette();
     let bar = Style::default().bg(p.fill(Fill::Bar));
@@ -1832,7 +1828,7 @@ fn elide_head(name: &str, max: usize) -> String {
 }
 
 /// A saved comment as inline display lines: a quiet box titled with the comment's location
-/// (in the comment-yellow accent) holding its wrapped text. Spliced read-only under the
+/// (in your comment color) holding its wrapped text. Spliced read-only under the
 /// commented line so a submitted comment stays visible while reviewing.
 fn comment_card_lines(c: &Comment, width: usize, p: &Palette) -> Vec<Line<'static>> {
     const INDENT: usize = CARD_INDENT;
@@ -2144,25 +2140,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let RowState { commented, cursor, selected, hovered, lead } = state;
     // A commented line's number wears your comment color; others are muted.
     let num_ink = if commented { Ink::Comment } else { Ink::TextMuted };
-    // Syntax and markdown colors keep their plain-background legibility on a row's fill.
-    // Cells in a run share one color, so one memo spares the contrast walk per char.
-    let legible_on = |on: Fill| {
-        let (fill, base, text) = (pal.fill(on), pal.fill(Fill::Base), pal.ink(Ink::Text, on));
-        let mut last: Option<(Color, Color)> = None;
-        move |fg: Color| -> Color {
-            if on == Fill::Base || !matches!(fg, Color::Rgb(..)) {
-                return fg;
-            }
-            let lifted = match last {
-                Some((was, lifted)) if was == fg => lifted,
-                _ => crate::theme::legible(fg, fill, base, text),
-            };
-            last = Some((fg, lifted));
-            lifted
-        }
-    };
-    let highlight =
-        Style::default().bg(pal.fill(Fill::Highlight)).fg(pal.ink(Ink::Text, Fill::Highlight));
+    let highlight = match_style(pal);
     if let Row::Rendered { src, kind, .. } = row {
         let on = row_fill(cursor, selected, focused, Fill::Base);
         let (num_color, plus) = (pal.ink(num_ink, on), pal.ink(Ink::Comment, on));
@@ -2179,7 +2157,6 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         let code_width = width.saturating_sub(gutter_prefix_width(gutter_w));
         match kind {
             RenderedKind::Block { line, hides, bar, .. } => {
-                let mut readable = legible_on(on);
                 let body: Vec<Span<'static>> = rendered
                     .get(*line as usize)
                     .map(|l| l.spans.clone())
@@ -2187,7 +2164,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                     .into_iter()
                     .map(|mut sp| {
                         if let Some(fg) = sp.style.fg {
-                            sp.style = sp.style.fg(readable(fg));
+                            // Syntax and markdown colors keep their legibility on the row's fill.
+                            sp.style = sp.style.fg(pal.legible(fg, on));
                         }
                         // The cursor and selection stack above a code chip.
                         if on != Fill::Base {
@@ -2218,7 +2196,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         if let Some(pad) = width.checked_sub(out.width()).filter(|p| *p > 0) {
             out.push_span(Span::raw(" ".repeat(pad)));
         }
-        return vec![fill(out, fill_color(on, pal))];
+        return vec![fill(out, pal.bg(on))];
     }
     if let Row::Fold { .. } = row {
         let label = if cursor {
@@ -2226,7 +2204,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         } else {
             format!("  ⋯  {} unmodified lines", row.hidden())
         };
-        let on = if cursor { row_fill(true, false, focused, Fill::Bar) } else { Fill::Bar };
+        let on = row_fill(cursor, false, focused, Fill::Bar);
         let mut line =
             Line::from(Span::styled(label, Style::default().fg(pal.ink(Ink::TextSecondary, on))));
         if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
@@ -2248,7 +2226,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let on = row_fill(cursor, selected, focused, tint);
     let (bar_color, num_color) = (pal.mark(bar_ink, on), pal.ink(num_ink, on));
     let plus = pal.ink(Ink::Comment, on);
-    let row_bg = fill_color(on, pal);
+    let row_bg = pal.bg(on);
 
     // Word emphasis brightens the changed words, unless the row's fill is a cursor or
     // selection bg, which wins for readability.
@@ -2263,13 +2241,11 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
     let hl_ranges =
         find.map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs)).unwrap_or_default();
     let mut cells = code_cells(row, emph_on, &hl_ranges);
-    // A dim syntax color — a code comment above all — loses legibility on the emphasis fill,
-    // which `readable_tint` floors against `text` only. Lift the changed words' fg back to
-    // their own plain-background legibility (`theme::legible`). Find matches already reverse to
-    // their own colors.
-    let (mut on_row, mut on_emph) = (legible_on(on), legible_on(emph));
+    // A dim syntax color — a code comment above all — loses legibility on a row's fill or the
+    // emphasis under its changed words. It moves back to its plain-background legibility there.
+    // Find matches repaint in the match's own text color.
     for cell in cells.iter_mut().filter(|c| !c.hl) {
-        cell.fg = if cell.emph { on_emph(cell.fg) } else { on_row(cell.fg) };
+        cell.fg = pal.legible(cell.fg, if cell.emph { emph } else { on });
     }
 
     let prefix_w = gutter_prefix_width(gutter_w);
@@ -2299,11 +2275,7 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                 ]
             };
             let mut spans = gutter;
-            spans.extend(cells_to_spans(
-                chunk,
-                emph_bg,
-                HlStyle { bg: pal.fill(Fill::Highlight), fg: pal.ink(Ink::Text, Fill::Highlight) },
-            ));
+            spans.extend(cells_to_spans(chunk, emph_bg, highlight));
             let mut line = Line::from(spans);
             if let Some(pad) = width.checked_sub(line.width()).filter(|p| *p > 0) {
                 line.push_span(Span::raw(" ".repeat(pad)));
@@ -2314,8 +2286,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
 }
 
 /// A row's first gutter: the change bar cell, then the line-number field — or, under the
-/// pointer, the `[+]` button covering it, whole in the composer's accent
-/// (`render_composer`), so the button and the box it opens read as one gesture. The field is
+/// pointer, the `[+]` button covering it, whole in your comment color like the composer's
+/// border (`render_composer`), so the button and the box it opens read as one gesture. The field is
 /// at least 3 columns (`gutter_width`), so `[+]` always fits, right-aligned like the numbers
 /// it covers.
 fn gutter_spans(
@@ -2357,8 +2329,14 @@ fn marker_ink(kind: crate::diff::MarkerKind) -> Ink {
     }
 }
 
-/// The fill a row's text sits on, topmost first: the cursor's, else the selection's (a picked
-/// line range), else the row's own diff fill, else the terminal background.
+/// The fill a list row sits on: the cursor's on the cursor row, else the background.
+fn cursor_fill(on_cursor: bool) -> Fill {
+    if on_cursor { Fill::Cursor } else { Fill::Base }
+}
+
+/// The fill a diff row's text sits on, topmost first: the cursor's (so the cursor shows inside
+/// a picked range), else the selection's (a picked line range), else the row's own diff fill,
+/// else the terminal background.
 fn row_fill(cursor: bool, selected: bool, focused: bool, tint: Fill) -> Fill {
     match (cursor, selected, focused) {
         (true, _, true) => Fill::Cursor,
@@ -2366,11 +2344,6 @@ fn row_fill(cursor: bool, selected: bool, focused: bool, tint: Fill) -> Fill {
         (false, true, _) => Fill::Selection,
         _ => tint,
     }
-}
-
-/// The color a fill paints under a line: none for the terminal background.
-fn fill_color(on: Fill, pal: &Palette) -> Option<Color> {
-    (on != Fill::Base).then(|| pal.fill(on))
 }
 
 /// `line` under the fill `bg`, when there is one.
@@ -2571,8 +2544,8 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)]) -> Vec<Cell> {
 }
 
 /// Build spans from display cells, merging runs of equal color, emphasis, and find-highlight; a
-/// highlighted run takes `hl_bg` (the find match), else an emphasized run takes `emph_bg`.
-fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'static>> {
+/// highlighted run takes `hl` (the find match), else an emphasized run takes `emph_bg`.
+fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buf = String::new();
     let mut cur: Option<(Color, bool, bool)> = None;
@@ -2592,26 +2565,27 @@ fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'stat
     spans
 }
 
-/// The find match's colors: the solid highlight and the text resolved on it, so a match reads
-/// over any row tint, red or green.
-#[derive(Clone, Copy)]
-struct HlStyle {
-    bg: Color,
-    fg: Color,
+/// A find or search match: bold text in its resolved color on the solid highlight, so a match
+/// reads at a glance over any row tint, red or green.
+fn match_style(p: &Palette) -> Style {
+    Style::default()
+        .bg(p.fill(Fill::Highlight))
+        .fg(p.ink(Ink::Text, Fill::Highlight))
+        .add_modifier(Modifier::BOLD)
 }
 
-/// A run's span: a find match reverses to `hl.fg` on `hl.bg`; else word emphasis takes `emph_bg`;
-/// else the plain foreground.
+/// A run's span: a find match takes `hl`; else word emphasis takes `emph_bg`; else the plain
+/// foreground.
 fn cell_span(
     text: String,
     fg: Color,
     emph: bool,
     is_hl: bool,
     emph_bg: Color,
-    hl: HlStyle,
+    hl: Style,
 ) -> Span<'static> {
     let style = if is_hl {
-        Style::default().fg(hl.fg).bg(hl.bg).add_modifier(Modifier::BOLD)
+        hl
     } else if emph {
         Style::default().fg(fg).bg(emph_bg)
     } else {
@@ -3219,7 +3193,7 @@ fn render_comments_list(frame: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let on = if i == app.list_cursor { Fill::Cursor } else { Fill::Base };
+            let on = cursor_fill(i == app.list_cursor);
             let loc = Span::styled(
                 format!(" {}", c.location()),
                 Style::default().fg(p.ink(Ink::Comment, on)).add_modifier(Modifier::BOLD),
@@ -3364,7 +3338,7 @@ fn render_agent_picker(frame: &mut Frame, app: &App, area: Rect) {
         .take(inner.height as usize)
         .map(|(i, row)| {
             // Only the first nine rows carry a number, since no digit key reaches further.
-            let on = if i == app.picker_cursor { Fill::Cursor } else { Fill::Base };
+            let on = cursor_fill(i == app.picker_cursor);
             let lead = if i < 9 { format!(" {}  ", i + 1) } else { "    ".to_string() };
             let pad = name_width.saturating_sub(row.name.width());
             let spans = vec![
@@ -3538,7 +3512,7 @@ fn render_base_picker(frame: &mut Frame, app: &App, area: Rect) {
         .map(|(vi, row)| {
             // The name is the only part at full brightness, like the agent picker's rows.
             // The dim trail right-aligns to the row so every row's facts line up.
-            let on = if vi == bp.cursor { Fill::Cursor } else { Fill::Base };
+            let on = cursor_fill(vi == bp.cursor);
             let lead = BASE_ROW_LEAD;
             let (label, trail) = base_row_parts(row, width, now);
             let gap = if trail.is_empty() { 0 } else { BASE_TRAIL_GAP };
@@ -3721,7 +3695,7 @@ fn render_commit_picker(frame: &mut Frame, app: &App, area: Rect) {
     let author_w = commit_author_width(&parts);
     let mut items: Vec<ListItem> = (first..last)
         .map(|i| {
-            let on = if i == cp.cursor { Fill::Cursor } else { Fill::Base };
+            let on = cursor_fill(i == cp.cursor);
             let CommitRowParts { sha, subject, trail, author, age } = &parts[i];
             // The bar marks the run, the way the diff's selection bar marks a line range.
             let bar = if cp.in_run(i) { "▎" } else { " " };
@@ -3834,11 +3808,14 @@ fn search_row_pick(row: &SearchRow) -> Option<usize> {
 /// A pane's titled top rule: `─ label ─────`, brighter than the surrounding chrome so the
 /// two stacked panes read as separate regions.
 fn search_pane_rule(label: &str, width: usize, p: &Palette) -> Line<'static> {
-    let head = format!("─ {label} ");
-    let style = Style::default().fg(p.ink(Ink::TextSecondary, Fill::Base));
-    let mut line = Line::from(Span::styled(head.clone(), style));
-    if let Some(pad) = width.checked_sub(head.width()).filter(|w| *w > 0) {
-        line.push_span(Span::styled("─".repeat(pad), style));
+    let rule = Style::default().fg(p.mark(Ink::Border, Fill::Base));
+    let label = format!(" {label} ");
+    let mut line = Line::from(vec![
+        Span::styled("─", rule),
+        Span::styled(label.clone(), Style::default().fg(p.ink(Ink::TextSecondary, Fill::Base))),
+    ]);
+    if let Some(pad) = width.checked_sub(label.width() + 1).filter(|w| *w > 0) {
+        line.push_span(Span::styled("─".repeat(pad), rule));
     }
     line
 }
@@ -3901,7 +3878,7 @@ fn render_search(frame: &mut Frame, app: &App, body: Rect) {
     let p = app.palette();
     let l = search_layout(body, app);
 
-    // The input band: the query with the comment editor's orange prompt and block caret,
+    // The input band: the query with an accent prompt and the block caret,
     // then the mode chips `files │ code` — the active one lit like the active header tab,
     // the inactive one quiet, its count the hint that the other mode has hits. The footer
     // owns the `tab` flip key, so the chips carry no glyph.
@@ -4028,7 +4005,7 @@ fn render_search_results(
             ))),
             SearchRow::File(i) => {
                 let hit = &s.results.files[*i];
-                let on = if s.pick == *i { Fill::Cursor } else { Fill::Base };
+                let on = cursor_fill(s.pick == *i);
                 file_row_item(
                     &FileRowSpec {
                         indent: "",
@@ -4044,7 +4021,7 @@ fn render_search_results(
             }
             SearchRow::Code(i) => {
                 let hit = &s.results.code[*i];
-                let on = if s.pick == *i { Fill::Cursor } else { Fill::Base };
+                let on = cursor_fill(s.pick == *i);
                 search_code_row(hit, width, on, p)
             }
         })
@@ -4137,11 +4114,8 @@ fn search_preview_line(
 ) -> Line<'static> {
     let num = row.new_no().map_or(String::new(), |n| n.to_string());
     // The hit line sits on the cursor fill, so its colors resolve there.
-    let on = if hit.is_some() { Fill::Cursor } else { Fill::Base };
-    let syntax = |c| {
-        let base = p.fill(Fill::Base);
-        crate::theme::legible(c, p.fill(on), base, p.ink(Ink::Text, on))
-    };
+    let on = cursor_fill(hit.is_some());
+    let syntax = |c| p.legible(c, on);
     let mut spans =
         vec![Span::styled(format!("{num:>gw$} "), Style::default().fg(p.ink(Ink::TextMuted, on)))];
     match hit {
@@ -4275,11 +4249,10 @@ fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
     (out, spans)
 }
 
-/// The search screen's match highlight: matched text in `text` on the solid highlight, bold,
-/// the same block find paints.
+/// The search screen's match highlight: the same block find paints.
 fn search_hl(p: &Palette) -> impl Fn(Style) -> Style {
-    let (bg, fg) = (p.fill(Fill::Highlight), p.ink(Ink::Text, Fill::Highlight));
-    move |style| style.bg(bg).fg(fg).add_modifier(Modifier::BOLD)
+    let hl = match_style(p);
+    move |style| style.patch(hl)
 }
 
 /// Split `text` into spans, restyling the matched byte ranges by `hl` on top of the
@@ -4379,18 +4352,17 @@ fn text_style(p: &Palette, on: Fill) -> Style {
     Style::default().fg(p.ink(Ink::Text, on))
 }
 
-/// A list row, highlighted with the shared selection fill (`surface2` + bold, full
-/// width) when `selected` — the same treatment the diff cursor uses, so every cursor
-/// in the UI reads the same. The fill is applied per span (with a trailing pad) so it
-/// spans the full width under the `List` widget, matching the diff's `Paragraph` rows.
+/// A list row on the fill `on`, which its spans' colors were resolved on: a cursor row paints
+/// it bold across the full width, the same treatment the diff cursor gets, so every cursor in
+/// the UI reads the same. The fill is applied per span (with a trailing pad) so it spans the
+/// full width under the `List` widget, matching the diff's `Paragraph` rows.
 fn selectable_row(
     p: &Palette,
     mut spans: Vec<Span<'static>>,
     width: usize,
     on: Fill,
 ) -> ListItem<'static> {
-    if on != Fill::Base {
-        let bg = p.fill(on);
+    if let Some(bg) = p.bg(on) {
         let used: usize = spans.iter().map(Span::width).sum();
         if width > used {
             spans.push(Span::raw(" ".repeat(width - used)));
@@ -4476,7 +4448,7 @@ fn pr_status_word(s: &forge::PrSnapshot) -> &'static str {
     }
 }
 
-/// The status chip word and its theme accent, by lifecycle.
+/// The status chip word and its color, by lifecycle.
 fn pr_status_chip(p: &Palette, s: &forge::PrSnapshot) -> (&'static str, Color) {
     let color = match s.state {
         forge::PrState::Merged => p.ink(Ink::Merged, Fill::Bar),
@@ -4566,7 +4538,7 @@ fn render_pr_nav(frame: &mut Frame, app: &App, area: Rect) {
         .take(viewport)
         .map(|row| {
             let selected = row.cursor == Some(app.pr_cursor);
-            selectable_row(p, row.spans, width, if selected { Fill::Cursor } else { Fill::Base })
+            selectable_row(p, row.spans, width, cursor_fill(selected))
         })
         .collect();
     frame.render_widget(List::new(items), inner);
@@ -4584,7 +4556,7 @@ fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNav
     let p = app.palette();
     let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
     // A row the cursor is on sits on the cursor fill, so its colors resolve there.
-    let on = |cursor: usize| if cursor == app.pr_cursor { Fill::Cursor } else { Fill::Base };
+    let on = |cursor: usize| cursor_fill(cursor == app.pr_cursor);
     let mut rows = Vec::new();
     if app.pr_has_description() {
         rows.push(PrNavRow {
@@ -4595,7 +4567,7 @@ fn pr_nav_rows(app: &App, width: usize, now: std::time::SystemTime) -> Vec<PrNav
     }
     rows.push(PrNavRow { spans: vec![Span::styled(pr_checks_header(s), dim)], cursor: None });
     for check in &s.checks {
-        let (glyph, color) = check_glyph(p, check.status, Fill::Base);
+        let (glyph, color) = check_glyph(p, check.status);
         rows.push(PrNavRow {
             spans: vec![
                 Span::styled(format!(" {glyph} "), Style::default().fg(color)),
@@ -5055,7 +5027,8 @@ pub fn pr_nav_cursor_at(app: &App, row: usize) -> Option<usize> {
 
 /// The status glyph and its color for a check. Running and queued checks are yellow, like
 /// herdr's working dot and GitHub's pending checks.
-fn check_glyph(p: &Palette, status: forge::CheckStatus, on: Fill) -> (&'static str, Color) {
+fn check_glyph(p: &Palette, status: forge::CheckStatus) -> (&'static str, Color) {
+    let on = Fill::Base;
     match status {
         forge::CheckStatus::Success => ("✓", p.mark(Ink::Success, on)),
         forge::CheckStatus::Failure => ("✗", p.mark(Ink::Danger, on)),
@@ -5068,7 +5041,7 @@ fn check_glyph(p: &Palette, status: forge::CheckStatus, on: Fill) -> (&'static s
 // --- helpers -------------------------------------------------------------------
 
 fn bordered(title: &str, focused: bool, p: &Palette) -> Block<'static> {
-    // A focused pane gets a blue border; an unfocused one recedes to a surface tone.
+    // A focused pane's border is the accent; an unfocused one recedes to the border tone.
     let color =
         if focused { p.mark(Ink::Accent, Fill::Base) } else { p.mark(Ink::Border, Fill::Base) };
     Block::default()
@@ -5087,7 +5060,7 @@ fn dim_paragraph<'a>(text: &'a str, p: &Palette) -> Paragraph<'a> {
     Paragraph::new(text).style(Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)))
 }
 
-/// The theme accent for a change marker, matched to the diff's add/remove hues.
+/// A change marker's color: the diff's added, removed or modified hue.
 fn kind_color(p: &Palette, kind: ChangeKind, on: Fill) -> Color {
     match kind {
         ChangeKind::Added | ChangeKind::Untracked => p.ink(Ink::Added, on),

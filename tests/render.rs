@@ -10,6 +10,7 @@ use herdr_reviewr::diff::{Bar, MarkerKind};
 use herdr_reviewr::herdr::AgentChoice;
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
+use herdr_reviewr::roles::{Fill, Ink};
 use herdr_reviewr::ui::{self, HeaderHit};
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::Terminal;
@@ -52,8 +53,8 @@ fn render_size(app: &App, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
-/// Catppuccin surface2 — the shared selection/cursor fill.
-const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5b, 0x70);
+/// Catppuccin surface2 — the focused cursor row's fill, in the diff and in every list.
+const CURSOR_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5b, 0x70);
 /// Catppuccin's accent (herdr's blue): the caret block and the footer's keys.
 const ACCENT: ratatui::style::Color = ratatui::style::Color::Rgb(0x89, 0xb4, 0xfa);
 
@@ -353,15 +354,20 @@ fn an_expanded_directory_nests_its_children() {
 
 /// First painted column of `token` in `buf` at or after `x0`. Panics if it never appears.
 fn token_x(buf: &Buffer, token: &str, x0: u16) -> u16 {
+    token_at(buf, token, x0).0
+}
+
+/// Where `token` first paints at or right of column `x0`, scanning rows top down.
+fn token_at(buf: &Buffer, token: &str, x0: u16) -> (u16, u16) {
     let chars: Vec<char> = token.chars().collect();
     let n = chars.len() as u16;
     for y in 0..buf.area.height {
-        for x in x0..buf.area.width.saturating_sub(n) {
+        for x in x0..=buf.area.width.saturating_sub(n) {
             let hit = (0..n).all(|i| {
                 buf.cell((x + i, y)).is_some_and(|c| c.symbol() == chars[i as usize].to_string())
             });
             if hit {
-                return x;
+                return (x, y);
             }
         }
     }
@@ -537,7 +543,7 @@ fn the_diff_cursor_row_is_marked_from_either_pane() {
         (1..40u16).filter(|&x| buf.cell((x, y)).is_some_and(|c| c.bg == bg)).count()
     };
 
-    assert!(fill(&app, SELECTION_BG) > 10, "the focused diff fills its cursor row with surface2");
+    assert!(fill(&app, CURSOR_BG) > 10, "the focused diff fills its cursor row with surface2");
 
     app.focus = Focus::Files;
     assert!(
@@ -547,13 +553,13 @@ fn the_diff_cursor_row_is_marked_from_either_pane() {
 }
 
 #[test]
-fn the_selected_file_row_fills_with_the_shared_selection_color() {
+fn the_selected_file_row_fills_with_the_shared_cursor_color() {
     let app = edited_app(); // one file, file_cursor = 0, Files focused
     let buf = render_buffer(&app);
     // Files pane: right 32% of 140 cols; its border is at y=1, first content row at y=2.
     let files_x0 = 140 - 140 * 32 / 100 + 1;
     let selected =
-        (files_x0..139).filter(|&x| buf.cell((x, 2)).is_some_and(|c| c.bg == SELECTION_BG)).count();
+        (files_x0..139).filter(|&x| buf.cell((x, 2)).is_some_and(|c| c.bg == CURSOR_BG)).count();
     assert!(selected > 10, "the selected file row fills wide with surface2: {selected} cells");
 }
 
@@ -565,9 +571,7 @@ fn a_hidden_navigator_gives_the_read_pane_the_whole_body() {
     let cursor_y = 2 + app.diff_cursor as u16;
     let fill = |app: &App| {
         let buf = render_buffer(app);
-        (1..139u16)
-            .filter(|&x| buf.cell((x, cursor_y)).is_some_and(|c| c.bg == SELECTION_BG))
-            .count()
+        (1..139u16).filter(|&x| buf.cell((x, cursor_y)).is_some_and(|c| c.bg == CURSOR_BG)).count()
     };
     let visible_fill = fill(&app);
     let out = render(&app);
@@ -1270,20 +1274,18 @@ fn pr_focus_border_tracks_tab_between_navigator_and_read_pane() {
     let read_x = (body.x..body.x + body.width)
         .find(|&x| ui::in_diff_pane(AREA, &app, x, body.y + 4))
         .unwrap();
-    let (blue, surface2) = (
-        app.palette().mark(herdr_reviewr::roles::Ink::Accent, herdr_reviewr::roles::Fill::Base),
-        app.palette().mark(herdr_reviewr::roles::Ink::Border, herdr_reviewr::roles::Fill::Base),
-    );
+    let (accent, border) =
+        (app.palette().mark(Ink::Accent, Fill::Base), app.palette().mark(Ink::Border, Fill::Base));
 
     let focused_nav = render_buffer(&app);
-    assert_eq!(focused_nav.cell((nav_x, body.y + 4)).unwrap().fg, blue);
-    assert_eq!(focused_nav.cell((read_x, body.y + 4)).unwrap().fg, surface2);
+    assert_eq!(focused_nav.cell((nav_x, body.y + 4)).unwrap().fg, accent);
+    assert_eq!(focused_nav.cell((read_x, body.y + 4)).unwrap().fg, border);
 
     handle_key(&mut app, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), AREA, &Keymap::default())
         .unwrap();
     let focused_read = render_buffer(&app);
-    assert_eq!(focused_read.cell((nav_x, body.y + 4)).unwrap().fg, surface2);
-    assert_eq!(focused_read.cell((read_x, body.y + 4)).unwrap().fg, blue);
+    assert_eq!(focused_read.cell((nav_x, body.y + 4)).unwrap().fg, border);
+    assert_eq!(focused_read.cell((read_x, body.y + 4)).unwrap().fg, accent);
 }
 
 #[test]
@@ -1476,11 +1478,10 @@ fn renders_a_light_theme_without_panic() {
     let mut app = edited_app();
     app.set_cli_theme(Some("catppuccin-latte".to_string()));
     // Driving the full render path with a derived light palette must not panic, and a Latte
-    // color (the focused pane's blue border) reaches the painted buffer.
+    // color (the focused pane's accent border) reaches the painted buffer.
     let buf = render_buffer(&app);
     let latte = herdr_reviewr::theme::resolve(Some("catppuccin-latte")).palette;
-    let latte_blue =
-        latte.mark(herdr_reviewr::roles::Ink::Accent, herdr_reviewr::roles::Fill::Base);
+    let latte_blue = latte.mark(Ink::Accent, Fill::Base);
     let painted = (0..40)
         .flat_map(|y| (0..140).map(move |x| (x, y)))
         .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.fg == latte_blue));
@@ -2427,9 +2428,8 @@ fn the_find_band_and_match_highlight_paint() {
     assert!(out.contains("1/2"), "the band shows the cursor's ordinal over the total:\n{out}");
 
     // A matched character reverses to the bright fill with dark text, so it reads over any row.
-    let fill = app.palette().fill(herdr_reviewr::roles::Fill::Highlight);
-    let ink =
-        app.palette().ink(herdr_reviewr::roles::Ink::Text, herdr_reviewr::roles::Fill::Highlight);
+    let fill = app.palette().fill(Fill::Highlight);
+    let ink = app.palette().ink(Ink::Text, Fill::Highlight);
     let highlighted = (0..40u16).flat_map(|y| (0..140u16).map(move |x| (x, y))).any(|(x, y)| {
         buf.cell((x, y)).is_some_and(|c| c.symbol() == "t" && c.bg == fill && c.fg == ink)
     });
@@ -2438,7 +2438,7 @@ fn the_find_band_and_match_highlight_paint() {
 
 // Search screen rendering.
 mod search_screen_render {
-    use super::{common, dump, render, render_size};
+    use super::{Fill, common, dump, render, render_size};
     use common::{Repo, app_on, enter_tab};
     use herdr_reviewr::app::{App, Mode, Tab};
     use herdr_reviewr::keymap::default_keymap;
@@ -2691,7 +2691,7 @@ mod search_screen_render {
         let style = buf.cell((x, y)).expect("cell").style();
         assert_eq!(
             style.bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the hit's matched span wears the match highlight: {style:?}"
         );
         assert!(!out.contains(" 1 line_1\n"), "the hit is centered, not previewed from the top");
@@ -2749,14 +2749,14 @@ mod search_screen_render {
         let rx = line.find("resolve").unwrap() as u16;
         assert_eq!(
             buf.cell((rx, y)).unwrap().style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the highlight lands on the match under indentation",
         );
         // The indentation and the preceding `fn ` keep the cursor band, not the match highlight.
         let fx = line.find("fn ").unwrap() as u16;
         assert_ne!(
             buf.cell((fx, y)).unwrap().style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the highlight did not slide left into the un-trimmed indentation",
         );
     }
@@ -2826,7 +2826,7 @@ mod search_screen_render {
         let tx = line.find("target").unwrap() as u16;
         assert_eq!(
             buf.cell((tx, y)).unwrap().style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the match highlight survives the head-elision on the visible tail",
         );
     }
@@ -2876,7 +2876,7 @@ mod search_screen_render {
         let x = row.find("a.rs").unwrap() as u16;
         assert_eq!(
             buf.cell((x, y)).expect("cell").style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the match highlight lands on the matched path character",
         );
     }
@@ -2917,7 +2917,7 @@ mod search_screen_render {
 
 // Style-level emphasis coverage for the match rows.
 mod search_row_emphasis {
-    use super::{common, dump, render_size};
+    use super::{Fill, common, dump, render_size};
     use common::{Repo, app_on, enter_tab};
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::handle_key;
@@ -2969,7 +2969,7 @@ mod search_row_emphasis {
         let x = row[..byte].chars().count() as u16;
         assert_eq!(
             buf.cell((x, y)).expect("cell").style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the matched span wears the match highlight",
         );
         // A cell in the clipped `…x` head keeps the selection fill, not the match highlight —
@@ -2978,7 +2978,7 @@ mod search_row_emphasis {
         let head_x = row[..ell].chars().count() as u16 + 1;
         assert_ne!(
             buf.cell((head_x, y)).expect("cell").style().bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the clipped head is not highlighted",
         );
     }
@@ -3014,7 +3014,7 @@ mod search_row_emphasis {
         let style = buf.cell((x, y as u16)).expect("cell").style();
         assert_eq!(
             style.bg,
-            Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight)),
+            Some(app.palette().fill(Fill::Highlight)),
             "the highlight tracks the word past the expanded tabs: {style:?}"
         );
     }
@@ -3054,7 +3054,7 @@ mod search_row_emphasis {
         let hx = (0..buf.area.width)
             .find(|&x| {
                 buf.cell((x, y)).expect("cell").style().bg
-                    == Some(app.palette().fill(herdr_reviewr::roles::Fill::Highlight))
+                    == Some(app.palette().fill(Fill::Highlight))
             })
             .expect("the match is highlighted");
         assert_eq!(
@@ -3905,7 +3905,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     let (_repo, mut app) = selection_app();
     let area = Rect::new(0, 0, 140, 40);
     let inner = ui::read_inner_rect(area, &app);
-    let sel_bg = app.palette().fill(herdr_reviewr::roles::Fill::Selection);
+    let sel_bg = app.palette().fill(Fill::Selection);
     // The selection fill is its own slot, distinct by hue from the cursor fills, so a
     // selection reads inside a cursor row. Park the cursor on the fully
     // selected middle row so its cells still assert the selection fill won.
@@ -4528,8 +4528,7 @@ fn a_hovered_rendered_row_shows_the_plus_button_and_a_commented_block_its_accent
     let num = buf.cell((inner.x + 3, inner.y)).unwrap();
     assert_eq!(num.symbol(), "1");
     // The cursor sits on it, so the comment color resolves on the cursor fill.
-    let comment =
-        app.palette().ink(herdr_reviewr::roles::Ink::Comment, herdr_reviewr::roles::Fill::Cursor);
+    let comment = app.palette().ink(Ink::Comment, Fill::Cursor);
     assert_eq!(num.fg, comment, "the commented block's number wears your comment color");
 }
 
@@ -4568,21 +4567,13 @@ fn rendered_change_marks_paint_bars_and_marker_rows() {
         let cell = buf.cell((inner.x, row_of(needle))).unwrap();
         (cell.symbol().to_string(), cell.fg)
     };
-    let ink = |ink| pal.mark(ink, herdr_reviewr::roles::Fill::Base);
+    let ink = |ink| pal.mark(ink, Fill::Base);
     let bar_cell = |b: Bar| {
-        let i = if b == Bar::Added {
-            herdr_reviewr::roles::Ink::Added
-        } else {
-            herdr_reviewr::roles::Ink::Modified
-        };
+        let i = if b == Bar::Added { Ink::Added } else { Ink::Modified };
         ("▌".to_string(), ink(i))
     };
     let marker_cell = |k: MarkerKind| {
-        let i = if k == MarkerKind::Removed {
-            herdr_reviewr::roles::Ink::Removed
-        } else {
-            herdr_reviewr::roles::Ink::Modified
-        };
+        let i = if k == MarkerKind::Removed { Ink::Removed } else { Ink::Modified };
         ("▌".to_string(), ink(i))
     };
     assert_eq!(bar("new words"), bar_cell(Bar::Modified), "a modified block is amber");
@@ -4625,7 +4616,7 @@ fn find_lights_its_matches_on_rendered_rows() {
         .flat_map(|y| (inner.x..inner.x + inner.width).map(move |x| (x, y)))
         .filter_map(|(x, y)| {
             buf.cell((x, y))
-                .filter(|c| c.bg == pal.fill(herdr_reviewr::roles::Fill::Highlight))
+                .filter(|c| c.bg == pal.fill(Fill::Highlight))
                 .map(|c| c.symbol().to_string())
         })
         .collect();
@@ -4743,7 +4734,6 @@ fn a_trimmed_modal_row_always_shows_its_ellipsis() {
 /// color, the footer's status message is plain text, in every theme.
 #[test]
 fn chrome_paints_roles_by_meaning() {
-    use herdr_reviewr::roles::{Fill, Ink};
     let any_fg = |buf: &Buffer, color| {
         (0..buf.area.height)
             .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
@@ -4763,7 +4753,11 @@ fn chrome_paints_roles_by_meaning() {
 
         // The comment list is a popup: its border is the accent.
         app.open_list();
-        assert!(any_fg(&render_buffer(&app), p.mark(Ink::Accent, Fill::Base)), "{theme}");
+        let buf = render_buffer(&app);
+        // The border cell just left of the popup's title: the footer's keys are the accent too.
+        let (x, y) = token_at(&buf, "Comments", 0);
+        let border = buf.cell((x - 2, y)).unwrap();
+        assert_eq!(border.fg, p.mark(Ink::Accent, Fill::Base), "{theme}: {:?}", border.symbol());
         app.close_list();
 
         // The status message reports in plain text on the footer bar.
@@ -4783,7 +4777,6 @@ fn chrome_paints_roles_by_meaning() {
 /// picked for a comment paints the selection fill, never the unfocused cursor's.
 #[test]
 fn fills_stack_in_one_order() {
-    use herdr_reviewr::roles::Fill;
     let mut app = edited_app();
     let p = *app.palette();
     on_changed_line(&mut app);
@@ -4815,21 +4808,13 @@ fn fills_stack_in_one_order() {
 
 /// The buffer cell where `needle` first paints.
 fn cell_of<'a>(buf: &'a Buffer, needle: &str) -> &'a ratatui::buffer::Cell {
-    for y in 0..buf.area.height {
-        let row: String = (0..buf.area.width).map(|x| buf.cell((x, y)).unwrap().symbol()).collect();
-        if let Some(byte) = row.find(needle) {
-            let x = u16::try_from(row[..byte].chars().count()).unwrap();
-            return buf.cell((x, y)).unwrap();
-        }
-    }
-    panic!("{needle:?} is not painted");
+    buf.cell(token_at(buf, needle, 0)).unwrap()
 }
 
 /// Inline code in rendered markdown sits on the code chip; the cursor row's fill stacks above
 /// it.
 #[test]
 fn inline_code_wears_its_chip_under_everything_but_the_cursor() {
-    use herdr_reviewr::roles::Fill;
     let r = Repo::init();
     r.write("doc.md", "# Head\n\nalpha\n");
     r.commit_all("init");
@@ -4853,7 +4838,6 @@ fn inline_code_wears_its_chip_under_everything_but_the_cursor() {
 fn running_checks_are_yellow_and_a_draft_is_muted() {
     use herdr_reviewr::app::Tab;
     use herdr_reviewr::forge::{Check, CheckStatus, PrSnapshot, PrView};
-    use herdr_reviewr::roles::{Fill, Ink};
     let r = Repo::init();
     r.write("x.rs", "y\n");
     r.commit_all("init");
@@ -4875,4 +4859,32 @@ fn running_checks_are_yellow_and_a_draft_is_muted() {
         assert!(yellow.contains(&fg), "{row:?} paints {fg:?}, not yellow");
     }
     assert_eq!(cell_of(&buf, "draft").fg, p.ink(Ink::TextMuted, Fill::Bar));
+}
+
+/// A syntax token on the cursor row keeps the legibility it has on the plain background:
+/// tokyo-night-day's dim comment, which its cursor fill would otherwise wash out.
+#[test]
+fn syntax_on_the_cursor_row_keeps_its_legibility() {
+    use herdr_reviewr::roles::contrast;
+    let r = Repo::init();
+    r.write("a.rs", "// quiet note\nfn x() {}\n");
+    r.commit_all("init");
+    r.write("a.rs", "// quiet note\nfn y() {}\n");
+    let mut app = app_on(&r);
+    app.set_cli_theme(Some("tokyo-night-day".to_string()));
+    app.focus = Focus::Diff;
+    let p = *app.palette();
+    let row_of = |app: &App, needle: &str| {
+        app.visible.iter().position(|row| row.text().contains(needle)).unwrap()
+    };
+
+    app.diff_cursor = row_of(&app, "fn y");
+    let plain = cell_of(&render_buffer(&app), "quiet").fg;
+    app.diff_cursor = row_of(&app, "quiet");
+    let buf = render_buffer(&app);
+    let lit = cell_of(&buf, "quiet");
+    assert_eq!(lit.bg, p.fill(Fill::Cursor), "the comment sits on the cursor row");
+    let want = contrast(plain, p.fill(Fill::Base)).min(4.5) - 0.05;
+    let got = contrast(lit.fg, lit.bg);
+    assert!(got >= want, "{got:.2} on the cursor row, {want:.2} on the background");
 }

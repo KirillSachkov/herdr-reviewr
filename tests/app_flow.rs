@@ -9545,3 +9545,36 @@ fn quitting_with_unsent_comments_asks_first() {
     press(&mut app, &keymap, KeyCode::Char('q'));
     assert!(!app.confirming_quit && !app.should_quit);
 }
+
+/// A drag over a find match covers the match's block: its text becomes body text on the
+/// selection and reads there in every theme, dark or light.
+#[test]
+fn a_selected_find_match_reads_on_the_selection() {
+    use herdr_reviewr::roles::{Fill, contrast};
+    for theme in ["catppuccin", "dracula", "tokyo-night-day", "github-light"] {
+        let repo = selection_repo();
+        let mut app = app_on(&repo);
+        app.set_cli_theme(Some(theme.to_string()));
+        app.open_find();
+        for ch in "beta".chars() {
+            app.input_push(ch);
+        }
+        let (from_col, from_row) = sel_cell(&app, 0, 4);
+        let (to_col, to_row) = sel_cell(&app, 0, 10);
+        sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), from_col, from_row);
+        sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), to_col, to_row);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+            SEL_AREA.width,
+            SEL_AREA.height,
+        ))
+        .unwrap();
+        terminal.draw(|f| herdr_reviewr::ui::render(f, &app)).unwrap();
+        let (x, y) = sel_cell(&app, 0, 7);
+        let cell = terminal.backend().buffer().cell((x, y)).unwrap().clone();
+        let p = app.palette();
+        assert_eq!(cell.symbol(), "e", "{theme}: inside `beta`");
+        assert_eq!(cell.bg, p.fill(Fill::Selection), "{theme}: the selection covers the match");
+        let ratio = contrast(cell.fg, cell.bg);
+        assert!(ratio >= 4.5, "{theme}: selected match text {ratio:.2} < 4.5");
+    }
+}

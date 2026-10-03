@@ -7,8 +7,8 @@
 //! alone. Rules, in order:
 //!
 //! - A fill is a step or a tint off `base`. It softens toward `base` until body text reads on it,
-//!   but never into `base`: it stays visibly a fill. The match highlight is the one solid fill:
-//!   it must be found at a glance, so it never softens.
+//!   but never into `base`: it stays visibly a layer over every fill beneath it. The match
+//!   highlight and the caret are solid: they must be found at a glance, so they never soften.
 //! - Body text that still falls short lifts toward the contrast pole, on that fill only. On a
 //!   fill bright enough that the theme's background reads better than its text, text takes the
 //!   background's side and the opposite pole.
@@ -18,7 +18,15 @@
 //!   pole on the fills where it doesn't.
 //! - Roles that can appear side by side keep a minimum perceptual distance: the lower-priority
 //!   one takes the theme's next candidate hue.
+//! - Content colors (syntax, a theme's markdown headings) keep their hue on a fill and move in
+//!   lightness only, as far as legibility needs.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use palette::color_difference::{EuclideanDistance, Wcag21RelativeContrast};
+use palette::convert::IntoColorUnclamped;
+use palette::{Clamp, IntoColor, IsWithinBounds, LinSrgb, Oklab, Srgb};
 use ratatui::style::Color;
 
 /// A color text or a glyph paints with, by what it means.
@@ -64,12 +72,11 @@ pub const INKS: [Ink; 13] = [
     Ink::Border,
 ];
 
-/// A layer text sits on. Fills stack in one order (topmost first): selection, highlight,
-/// cursor, word emphasis, diff row, bar or code chip, the terminal background. A selection is text you
-/// dragged over or a line range you picked for a comment: one fill, one meaning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A layer text sits on. A selection is text you dragged over or a line range you picked for a
+/// comment: one fill, one meaning. [`LAYERS`] holds the order they stack in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Fill {
-    /// The terminal's own background, which the theme's `base` stands for.
+    /// The terminal's own background, which the theme's `base` stands for. Never painted.
     Base,
     /// Header, footer and fold rows.
     Bar,
@@ -83,6 +90,8 @@ pub enum Fill {
     Selection,
     /// A find or search match: a solid block of the highlight hue.
     Highlight,
+    /// The block caret in a text input: a solid block of the accent.
+    Caret,
     Added,
     Removed,
     /// Changed words inside an added row.
@@ -92,7 +101,7 @@ pub enum Fill {
 }
 
 /// Every fill, in table order.
-pub const FILLS: [Fill; 11] = [
+pub const FILLS: [Fill; 12] = [
     Fill::Base,
     Fill::Bar,
     Fill::Code,
@@ -100,10 +109,24 @@ pub const FILLS: [Fill; 11] = [
     Fill::Cursor,
     Fill::Selection,
     Fill::Highlight,
+    Fill::Caret,
     Fill::Added,
     Fill::Removed,
     Fill::AddedEmph,
     Fill::RemovedEmph,
+];
+
+/// The fills in stacking order, bottom up. A fill can sit on any fill in a lower layer and reads
+/// as a layer over each of them; fills in one layer never stack on each other. A drag selection
+/// covers a match; the cursor row of a picked line range shows the cursor.
+pub const LAYERS: [&[Fill]; 7] = [
+    &[Fill::Base],
+    &[Fill::Bar, Fill::Code],
+    &[Fill::Added, Fill::Removed],
+    &[Fill::AddedEmph, Fill::RemovedEmph],
+    &[Fill::Cursor, Fill::CursorInactive],
+    &[Fill::Highlight, Fill::Caret],
+    &[Fill::Selection],
 ];
 
 /// A theme's cast, which sets the direction steps and lifts move in.
@@ -124,7 +147,7 @@ pub struct Primitives {
     pub orange: Color,
     pub purple: Color,
     pub blue: Color,
-    /// The theme's UI accent: focus, selection, primary UI in its own ports.
+    /// The theme's UI accent: herdr's pick for the themes it ships, upstream's otherwise.
     pub accent: Color,
     pub cast: Cast,
 }
@@ -137,8 +160,14 @@ pub struct Overrides {
 }
 
 impl Overrides {
+    /// Set `fill` as given. Only tinted fills take an override: `base` is the terminal's, and a
+    /// solid fill is its hue.
     #[must_use]
     pub fn fill(mut self, fill: Fill, color: Color) -> Self {
+        debug_assert!(
+            !matches!(fill, Fill::Base | Fill::Highlight | Fill::Caret),
+            "{fill:?} is not a tinted fill"
+        );
         self.fills[fill as usize] = Some(color);
         self
     }
@@ -156,6 +185,8 @@ const TEXT_TARGET: f64 = TEXT_FLOOR * TIER_STEP + 0.05;
 /// How far a fill may soften, as a share of its starting strength. Below it a fill stops
 /// reading as its own layer, so body text lifts instead.
 const MIN_STRENGTH: f64 = 0.6;
+/// The strongest a tinted fill may get while making room over the fills beneath it.
+const MAX_STRENGTH: f64 = 0.6;
 /// The secondary tier's share of body text's contrast.
 const SECONDARY_SHARE: f64 = 0.70;
 /// The muted tier's share of body text's contrast.
@@ -171,7 +202,6 @@ pub const INK_SEP: f64 = 0.05;
 /// Every role a theme paints, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Roles {
-    primitives: Primitives,
     fills: [Color; FILLS.len()],
     text: [[Color; FILLS.len()]; INKS.len()],
     mark: [[Color; FILLS.len()]; INKS.len()],
@@ -184,23 +214,94 @@ impl Roles {
         self.fills[fill as usize]
     }
 
+    /// The background to paint for `fill`: none for `base`, the terminal's own.
+    #[must_use]
+    pub fn bg(&self, fill: Fill) -> Option<Color> {
+        (fill != Fill::Base).then(|| self.fill(fill))
+    }
+
     /// `ink` painting text on `on`: clears [`TEXT_FLOOR`] there ([`MARK_FLOOR`] for the muted
-    /// tier).
+    /// tier and the border, which are never body text).
     #[must_use]
     pub fn ink(&self, ink: Ink, on: Fill) -> Color {
         self.text[ink as usize][on as usize]
     }
 
-    /// `ink` painting a glyph, a sign or a border on `on`: clears [`MARK_FLOOR`] there.
+    /// `ink` painting a glyph, a sign or a border on `on`: clears [`MARK_FLOOR`] there. The text
+    /// tiers and the border resolve the same either way.
     #[must_use]
     pub fn mark(&self, ink: Ink, on: Fill) -> Color {
         self.mark[ink as usize][on as usize]
     }
 
-    /// The primitives these roles were derived from, unchanged.
+    /// A content color — syntax, a theme's markdown heading — painted on `on`, as legible there
+    /// as it is on the plain background (capped at [`TEXT_FLOOR`]), its hue kept. A color that
+    /// is a role's text resolved on the background resolves as that role's text on `on`.
+    /// Non-RGB colors are the terminal's own defaults and pass through.
     #[must_use]
-    pub fn primitives(&self) -> Primitives {
-        self.primitives
+    pub fn legible(&self, fg: Color, on: Fill) -> Color {
+        if on == Fill::Base || !matches!(fg, Color::Rgb(..)) {
+            return fg;
+        }
+        if let Some(ink) = INKS.into_iter().find(|&ink| self.ink(ink, Fill::Base) == fg) {
+            return self.ink(ink, on);
+        }
+        self.lifted(fg, on, contrast(fg, self.fill(Fill::Base)).min(TEXT_FLOOR))
+    }
+
+    /// A content color that is read as text — a markdown heading, inline code — painted on
+    /// `on`: it clears [`TEXT_FLOOR`] there, its hue kept.
+    #[must_use]
+    pub fn readable(&self, fg: Color, on: Fill) -> Color {
+        if !matches!(fg, Color::Rgb(..)) {
+            return fg;
+        }
+        self.lifted(fg, on, TEXT_FLOOR)
+    }
+
+    /// `fg` moved in lightness toward body text's side of `on` until it clears `target`. The
+    /// answer depends only on the colors, so it is memoized: a frame repaints the same few
+    /// syntax colors on the same few fills thousands of times.
+    fn lifted(&self, fg: Color, on: Fill, target: f64) -> Color {
+        thread_local! {
+            static MEMO: RefCell<HashMap<(Color, Color, Color, u64), Color>> =
+                RefCell::new(HashMap::new());
+        }
+        let (bg, text) = (self.fill(on), self.ink(Ink::Text, on));
+        let key = (fg, bg, text, target.to_bits());
+        MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if let Some(&known) = memo.get(&key) {
+                return known;
+            }
+            // Bounded: a theme switch leaves the old palette's entries behind.
+            if memo.len() > 4096 {
+                memo.clear();
+            }
+            // Toward body text's side first; on a mid-tone fill that side can run out of room
+            // before the target, so the other side gets a try and the better one wins.
+            let lighter = luminance(text) > luminance(bg);
+            let near = lift_lightness(fg, bg, lighter, target);
+            let lifted = if contrast(near, bg) >= target {
+                near
+            } else {
+                let far = lift_lightness(fg, bg, !lighter, target);
+                if contrast(far, bg) > contrast(near, bg) { far } else { near }
+            };
+            memo.insert(key, lifted);
+            lifted
+        })
+    }
+
+    /// Recede a painted color behind an open modal: halfway to `base`, so the modal owns the
+    /// eye while the page behind stays recognizable. Non-RGB colors are the terminal's own
+    /// defaults, which have no known distance to `base`; they pass through.
+    #[must_use]
+    pub fn scrim(&self, color: Color) -> Color {
+        match color {
+            Color::Rgb(..) => blend(color, self.fill(Fill::Base), 0.5),
+            other => other,
+        }
     }
 
     /// Derive every role from `p`, taking `o`'s fills as given.
@@ -213,25 +314,27 @@ impl Roles {
         for fill in FILLS {
             let bg = fills[fill as usize];
             let tiers = Tiers::on(&p, bg);
+            let colored = |hue: Color| {
+                (lift(hue, bg, pole_on(bg), TEXT_FLOOR), lift(hue, bg, pole_on(bg), MARK_FLOOR))
+            };
             for ink in INKS {
                 let (t, m) = match ink {
                     Ink::Text => (tiers.text, tiers.text),
                     Ink::TextSecondary => (tiers.secondary, tiers.secondary),
                     Ink::TextMuted => (tiers.muted, tiers.muted),
                     Ink::Border => (tiers.border, tiers.border),
-                    colored => {
-                        let hue = hues.of(colored);
-                        (
-                            lift(hue, bg, pole_on(bg), TEXT_FLOOR),
-                            lift(hue, bg, pole_on(bg), MARK_FLOOR),
-                        )
-                    }
+                    Ink::Accent => colored(hues.accent),
+                    Ink::Comment => colored(hues.comment),
+                    Ink::Merged => colored(hues.merged),
+                    Ink::Added | Ink::Success => colored(hues.added),
+                    Ink::Removed | Ink::Danger => colored(hues.removed),
+                    Ink::Modified | Ink::Warning => colored(hues.modified),
                 };
                 text[ink as usize][fill as usize] = t;
                 mark[ink as usize][fill as usize] = m;
             }
         }
-        Roles { primitives: p, fills, text, mark }
+        Roles { fills, text, mark }
     }
 }
 
@@ -248,30 +351,18 @@ struct Hues {
 impl Hues {
     /// Resolve in priority order: the diff and status hues are fixed, then `comment`, then
     /// `accent`, then `merged`, each taking its first candidate that keeps [`INK_SEP`] from
-    /// every higher role it can appear beside. `comment` also steers clear of the theme's own
-    /// accent, so a comment never takes the color that marks focus.
+    /// every role it can appear beside. `comment` also steers clear of the theme's own accent,
+    /// so your comments never wear the color that marks focus; the accent then moves only when
+    /// it collides with a diff hue. `merged` stands apart from the PR number's accent and from
+    /// your pending comments in the footer.
     fn resolve(p: &Primitives) -> Self {
         let (added, removed, modified) = (p.green, p.red, p.yellow);
         let pick = |candidates: &[Color], taken: &[Color]| first_distinct(p, candidates, taken);
         let comment = pick(&[p.orange, p.blue, p.purple], &[added, removed, modified, p.accent]);
         let accent =
             pick(&[p.accent, p.blue, p.purple, p.orange], &[added, removed, modified, comment]);
-        // A PR is open, merged or closed, never two at once, so `merged` only has to stand
-        // apart from the accent of the PR number chip beside it.
-        let merged = pick(&[p.purple, p.blue, p.orange], &[accent]);
+        let merged = pick(&[p.purple, p.blue, p.orange], &[accent, comment]);
         Hues { accent, comment, merged, added, removed, modified }
-    }
-
-    fn of(&self, ink: Ink) -> Color {
-        match ink {
-            Ink::Accent => self.accent,
-            Ink::Comment => self.comment,
-            Ink::Merged => self.merged,
-            Ink::Added | Ink::Success => self.added,
-            Ink::Removed | Ink::Danger => self.removed,
-            Ink::Modified | Ink::Warning => self.modified,
-            _ => unreachable!("tier inks resolve in Tiers"),
-        }
     }
 }
 
@@ -312,76 +403,68 @@ impl Tiers {
     }
 }
 
-/// Which fills each fill can sit on, in stacking order bottom up: a fill must read as a layer
-/// over every one of them.
-pub const STACKING: [(Fill, &[Fill]); 10] = [
-    (Fill::Bar, &[Fill::Base]),
-    (Fill::Code, &[Fill::Base]),
-    (Fill::CursorInactive, &[Fill::Base]),
-    (Fill::Added, &[Fill::Base]),
-    (Fill::Removed, &[Fill::Base]),
-    (Fill::AddedEmph, &[Fill::Added]),
-    (Fill::RemovedEmph, &[Fill::Removed]),
-    (Fill::Cursor, &[Fill::Base, Fill::Added, Fill::Removed]),
-    (Fill::Highlight, &[Fill::Base, Fill::Cursor, Fill::Added, Fill::Removed]),
-    (Fill::Selection, &[Fill::Base, Fill::Cursor, Fill::Highlight, Fill::Added, Fill::Removed]),
-];
+/// How a fill comes from the theme.
+enum Recipe {
+    /// Painted as this color: found at a glance, never softened.
+    Solid(Color),
+    /// `base` blended `start` of the way toward `toward`, then softened and strengthened.
+    Tint { toward: Color, start: f64 },
+}
 
-/// The strongest a derived fill may get while making room over the fills beneath it.
-const MAX_STRENGTH: f64 = 0.6;
-
-/// Every fill: overrides as given, the rest derived bottom up. A derived fill starts at its
-/// strength and softens toward `base` until body text clears its target, no further than
-/// [`MIN_STRENGTH`] of the start. Then it strengthens, if it must, until it reads as a layer
-/// over every fill it can sit on; body text lifts on it instead.
+/// Every fill: overrides as given, the rest derived layer by layer, bottom up. A tinted fill
+/// starts at its strength and softens toward `base` until body text clears its target, no
+/// further than [`MIN_STRENGTH`] of the start. Then it strengthens, if it must, until it reads
+/// as a layer over every fill below it; body text lifts on it instead.
 fn derive_fills(p: &Primitives, hues: &Hues, o: &Overrides) -> [Color; FILLS.len()] {
     let mut fills = [p.base; FILLS.len()];
-    for (fill, unders) in STACKING {
-        if let Some(given) = o.fills[fill as usize] {
-            fills[fill as usize] = given;
-            continue;
+    for (depth, layer) in LAYERS.iter().enumerate().skip(1) {
+        for &fill in *layer {
+            let below = || LAYERS[..depth].iter().flat_map(|l| l.iter());
+            let distinct = |c: Color| {
+                below().all(|&under| oklab_distance(c, fills[under as usize]) >= FILL_SEP)
+            };
+            let color = match (o.fills[fill as usize], recipe(p, hues, fill)) {
+                (Some(given), _) => given,
+                (None, Recipe::Solid(color)) => color,
+                (None, Recipe::Tint { toward, start }) => {
+                    let at = |t: f64| blend(p.base, toward, t);
+                    let mut t = start;
+                    while t - 0.01 >= start * MIN_STRENGTH && contrast(p.text, at(t)) < TEXT_TARGET
+                    {
+                        t -= 0.01;
+                    }
+                    while !distinct(at(t)) && t + 0.01 <= MAX_STRENGTH {
+                        t += 0.01;
+                    }
+                    at(t)
+                }
+            };
+            fills[fill as usize] = color;
         }
-        // A match must be found at a glance, so it paints the highlight hue solid; its text
-        // takes whichever side reads on it.
-        if fill == Fill::Highlight {
-            fills[fill as usize] = hues.modified;
-            continue;
-        }
-        let (toward, start) = recipe(p, hues, fill);
-        let at = |t: f64| blend(p.base, toward, t);
-        let mut t = start;
-        while t - 0.01 >= start * MIN_STRENGTH && contrast(p.text, at(t)) < TEXT_TARGET {
-            t -= 0.01;
-        }
-        let distinct = |c: Color| {
-            unders.iter().all(|&under| oklab_distance(c, fills[under as usize]) >= FILL_SEP)
-        };
-        while !distinct(at(t)) && t + 0.01 <= MAX_STRENGTH {
-            t += 0.01;
-        }
-        fills[fill as usize] = at(t);
     }
     fills
 }
 
-/// What a derived fill blends `base` toward, and how far it starts.
-fn recipe(p: &Primitives, hues: &Hues, fill: Fill) -> (Color, f64) {
+/// How each fill comes from the theme's hues.
+fn recipe(p: &Primitives, hues: &Hues, fill: Fill) -> Recipe {
     let dark = p.cast == Cast::Dark;
+    let tint = |toward: Color, start: f64| Recipe::Tint { toward, start };
     match fill {
-        Fill::Base => (p.base, 0.0),
-        Fill::Bar | Fill::Code => (pole(p.cast), 0.045),
-        Fill::CursorInactive => (pole(p.cast), 0.09),
-        Fill::Cursor => (pole(p.cast), 0.14),
-        Fill::Selection => (saturated(hues.accent), if dark { 0.38 } else { 0.22 }),
-        Fill::Highlight => (hues.modified, 1.0),
-        Fill::Added => (hues.added, if dark { 0.20 } else { 0.12 }),
-        Fill::Removed => (hues.removed, if dark { 0.20 } else { 0.12 }),
-        Fill::AddedEmph => (hues.added, if dark { 0.38 } else { 0.22 }),
-        Fill::RemovedEmph => (hues.removed, if dark { 0.38 } else { 0.22 }),
+        Fill::Base => Recipe::Solid(p.base),
+        Fill::Highlight => Recipe::Solid(hues.modified),
+        Fill::Caret => Recipe::Solid(hues.accent),
+        Fill::Bar | Fill::Code => tint(pole(p.cast), 0.045),
+        Fill::CursorInactive => tint(pole(p.cast), 0.09),
+        Fill::Cursor => tint(pole(p.cast), 0.14),
+        Fill::Selection => tint(saturated(hues.accent), if dark { 0.38 } else { 0.22 }),
+        Fill::Added => tint(hues.added, if dark { 0.20 } else { 0.12 }),
+        Fill::Removed => tint(hues.removed, if dark { 0.20 } else { 0.12 }),
+        Fill::AddedEmph => tint(hues.added, if dark { 0.38 } else { 0.22 }),
+        Fill::RemovedEmph => tint(hues.removed, if dark { 0.38 } else { 0.22 }),
     }
 }
 
-/// The contrast pole a theme lifts toward: white on a dark theme, black on a light one.
+/// The contrast pole a theme steps toward: white on a dark theme, black on a light one.
 fn pole(cast: Cast) -> Color {
     match cast {
         Cast::Dark => Color::Rgb(0xff, 0xff, 0xff),
@@ -396,20 +479,21 @@ fn pole_on(bg: Color) -> Color {
 }
 
 /// `fg` blended toward `toward` just far enough to clear `min` on `bg`; `fg` itself when it
-/// already does. A `Color::Reset` target means "as is".
+/// already does, `toward` when nothing short of it does.
 pub(crate) fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
-    if toward == Color::Reset || contrast(fg, bg) >= min {
+    if contrast(fg, bg) >= min {
         return fg;
     }
-    let mut t = 0.0;
-    while t < 1.0 {
-        let lifted = blend(fg, toward, t);
-        if contrast(lifted, bg) >= min {
-            return lifted;
-        }
-        t += 0.01;
+    if contrast(toward, bg) < min {
+        return toward;
     }
-    toward
+    // One crossing from failing to passing along the blend, so bisect for the nearest pass.
+    let (mut short, mut far) = (0.0_f64, 1.0_f64);
+    for _ in 0..16 {
+        let mid = f64::midpoint(short, far);
+        if contrast(blend(fg, toward, mid), bg) >= min { far = mid } else { short = mid }
+    }
+    blend(fg, toward, far)
 }
 
 /// `fg` blended toward `bg` as far as it can go while keeping `target` contrast on it.
@@ -424,6 +508,47 @@ fn fade(fg: Color, bg: Color, target: f64) -> Color {
         if contrast(blend(fg, bg, mid), bg) >= target { keep = mid } else { lose = mid }
     }
     blend(fg, bg, keep)
+}
+
+/// `fg` moved in `OKLab` lightness only, lighter or darker, just far enough to clear `min` on
+/// `bg`. Its hue stays: chroma gives way only where the lighter color would leave sRGB. A pole
+/// blend washes a color toward gray instead, which a syntax token on a light cursor row can't
+/// afford.
+fn lift_lightness(fg: Color, bg: Color, lighter: bool, min: f64) -> Color {
+    if contrast(fg, bg) >= min {
+        return fg;
+    }
+    let lab = oklab(fg);
+    let end = if lighter { 1.0 } else { 0.0 };
+    let at = |lightness: f64| in_gamut(Oklab::new(lightness, lab.a, lab.b));
+    if contrast(at(end), bg) < min {
+        return at(end);
+    }
+    let (mut short, mut far) = (lab.l, end);
+    for _ in 0..20 {
+        let mid = f64::midpoint(short, far);
+        if contrast(at(mid), bg) >= min { far = mid } else { short = mid }
+    }
+    at(far)
+}
+
+/// `lab` with the most of its chroma sRGB can show at its lightness.
+fn in_gamut(lab: Oklab<f64>) -> Color {
+    // Unclamped: the clamping conversion would report every color as in gamut.
+    let with =
+        |k: f64| -> LinSrgb<f64> { Oklab::new(lab.l, lab.a * k, lab.b * k).into_color_unclamped() };
+    let k = if with(1.0).is_within_bounds() {
+        1.0
+    } else {
+        let (mut keep, mut lose) = (0.0_f64, 1.0_f64);
+        for _ in 0..20 {
+            let mid = f64::midpoint(keep, lose);
+            if with(mid).is_within_bounds() { keep = mid } else { lose = mid }
+        }
+        keep
+    };
+    let rgb: Srgb<u8> = Srgb::<f64>::from_linear(with(k)).clamp().into_format();
+    Color::Rgb(rgb.red, rgb.green, rgb.blue)
 }
 
 /// Halfway between a hue and its colorful core, so a pastel tints `base` into a clear hue.
@@ -446,110 +571,30 @@ pub(crate) fn blend(from: Color, to: Color, t: f64) -> Color {
     Color::Rgb(mix(fr, tr), mix(fg, tg), mix(fb, tb))
 }
 
-/// The WCAG contrast ratio between two colors (1.0 .. 21.0).
+/// The WCAG 2.1 contrast ratio between two colors (1.0 .. 21.0).
 #[must_use]
 pub fn contrast(fg: Color, bg: Color) -> f64 {
-    let (lf, lb) = (luminance(fg), luminance(bg));
-    let (hi, lo) = if lf >= lb { (lf, lb) } else { (lb, lf) };
-    (hi + 0.05) / (lo + 0.05)
-}
-
-fn linear(channel: u8) -> f64 {
-    let srgb = f64::from(channel) / 255.0;
-    if srgb <= 0.040_45 { srgb / 12.92 } else { ((srgb + 0.055) / 1.055).powf(2.4) }
+    srgb(fg).relative_contrast(srgb(bg))
 }
 
 /// WCAG relative luminance.
-pub(crate) fn luminance(color: Color) -> f64 {
-    let (r, g, b) = channels(color);
-    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+fn luminance(color: Color) -> f64 {
+    srgb(color).relative_luminance().luma
 }
 
 /// Euclidean distance in `OKLab`: how different two colors look.
 #[must_use]
 pub fn oklab_distance(a: Color, b: Color) -> f64 {
-    let (l1, a1, b1) = oklab(a);
-    let (l2, a2, b2) = oklab(b);
-    ((l1 - l2).powi(2) + (a1 - a2).powi(2) + (b1 - b2).powi(2)).sqrt()
+    oklab(a).distance(oklab(b))
 }
 
-// The OKLab matrices name their channels by convention: l, m, s and L, a, b.
-#[allow(clippy::many_single_char_names)]
-fn oklab(color: Color) -> (f64, f64, f64) {
+fn oklab(color: Color) -> Oklab<f64> {
+    srgb(color).into_linear().into_color()
+}
+
+fn srgb(color: Color) -> Srgb<f64> {
     let (r, g, b) = channels(color);
-    let (r, g, b) = (linear(r), linear(g), linear(b));
-    let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
-    let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
-    let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
-    (
-        0.210_454_255_3 * l + 0.793_617_785_0 * m - 0.004_072_046_8 * s,
-        1.977_998_495_1 * l - 2.428_592_205_0 * m + 0.450_593_709_9 * s,
-        0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766_0 * s,
-    )
-}
-
-/// `fg` moved in `OKLab` lightness only, lighter or darker, just far enough to clear `min` on
-/// `bg`. Its hue stays: chroma gives way only where the lighter color would leave sRGB. A pole
-/// blend washes a color toward gray instead, which is what a syntax token on a light cursor row
-/// can't afford.
-// OKLab names its channels L, a, b.
-#[allow(clippy::many_single_char_names)]
-pub(crate) fn lift_lightness(fg: Color, bg: Color, lighter: bool, min: f64) -> Color {
-    if contrast(fg, bg) >= min {
-        return fg;
-    }
-    let (l, a, b) = oklab(fg);
-    let end = if lighter { 1.0 } else { 0.0 };
-    let at = |lightness: f64| in_gamut(lightness, a, b);
-    if contrast(at(end), bg) < min {
-        return at(end);
-    }
-    let (mut short, mut far) = (l, end);
-    for _ in 0..24 {
-        let mid = f64::midpoint(short, far);
-        if contrast(at(mid), bg) >= min { far = mid } else { short = mid }
-    }
-    at(far)
-}
-
-/// The `OKLab` color at lightness `l` with the most of chroma `(a, b)` sRGB can show.
-#[allow(clippy::many_single_char_names)]
-fn in_gamut(l: f64, a: f64, b: f64) -> Color {
-    let fits = |k: f64| {
-        let (r, g, bl) = linear_rgb(l, a * k, b * k);
-        [r, g, bl].iter().all(|c| (-1e-4..=1.0 + 1e-4).contains(c))
-    };
-    let k = if fits(1.0) {
-        1.0
-    } else {
-        let (mut keep, mut lose) = (0.0_f64, 1.0_f64);
-        for _ in 0..20 {
-            let mid = f64::midpoint(keep, lose);
-            if fits(mid) { keep = mid } else { lose = mid }
-        }
-        keep
-    };
-    let (r, g, bl) = linear_rgb(l, a * k, b * k);
-    let encode = |c: f64| {
-        let c = c.clamp(0.0, 1.0);
-        let srgb = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-        (srgb * 255.0).round() as u8
-    };
-    Color::Rgb(encode(r), encode(g), encode(bl))
-}
-
-// The inverse `OKLab` matrices, by the same channel convention as [`oklab`].
-#[allow(clippy::many_single_char_names)]
-fn linear_rgb(l: f64, a: f64, b: f64) -> (f64, f64, f64) {
-    let l_ = l + 0.396_337_777_4 * a + 0.215_803_757_3 * b;
-    let m_ = l - 0.105_561_345_8 * a - 0.063_854_172_8 * b;
-    let s_ = l - 0.089_484_177_5 * a - 1.291_485_548_0 * b;
-    let (l3, m3, s3) = (l_.powi(3), m_.powi(3), s_.powi(3));
-    (
-        4.076_741_662_1 * l3 - 3.307_711_591_3 * m3 + 0.230_969_929_2 * s3,
-        -1.268_438_004_6 * l3 + 2.609_757_401_1 * m3 - 0.341_319_396_5 * s3,
-        -0.004_196_086_3 * l3 - 0.703_418_614_7 * m3 + 1.707_614_701_0 * s3,
-    )
+    Srgb::new(r, g, b).into_format()
 }
 
 fn channels(color: Color) -> (u8, u8, u8) {
@@ -561,22 +606,48 @@ fn channels(color: Color) -> (u8, u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Color, contrast, lift_lightness, oklab};
+    use super::{Cast, Color, Primitives, contrast, first_distinct, lift_lightness, oklab};
+
+    #[test]
+    fn contrast_black_white_is_max() {
+        let c = contrast(Color::Rgb(0, 0, 0), Color::Rgb(0xff, 0xff, 0xff));
+        assert!((c - 21.0).abs() < 1e-6, "{c}");
+    }
 
     /// Catppuccin's red, lifted to 4.5:1 on its light cursor row, stays red: same hue, most of
     /// its chroma. A blend toward body text reached the contrast by turning it pink-gray.
     #[test]
-    #[allow(clippy::many_single_char_names)]
     fn a_lifted_syntax_color_keeps_its_hue() {
         let (red, cursor) = (Color::Rgb(0xf3, 0x8b, 0xa8), Color::Rgb(0x58, 0x5b, 0x70));
         let lifted = lift_lightness(red, cursor, true, 4.5);
         assert!(contrast(lifted, cursor) >= 4.5, "{lifted:?} reads on the cursor row");
         let polar = |c: Color| {
-            let (_, a, b) = oklab(c);
-            (b.atan2(a).to_degrees(), a.hypot(b))
+            let lab = oklab(c);
+            (lab.b.atan2(lab.a).to_degrees(), lab.a.hypot(lab.b))
         };
         let ((hue, chroma), (lifted_hue, lifted_chroma)) = (polar(red), polar(lifted));
         assert!((hue - lifted_hue).abs() < 8.0, "hue {hue:.1}° became {lifted_hue:.1}°");
         assert!(lifted_chroma >= chroma * 0.5, "chroma {chroma:.3} fell to {lifted_chroma:.3}");
+    }
+
+    /// With no candidate far enough from every taken hue, the pick is the one farthest from its
+    /// nearest.
+    #[test]
+    fn with_no_distinct_candidate_the_farthest_wins() {
+        let gray = Color::Rgb(0x80, 0x80, 0x80);
+        let p = Primitives {
+            base: Color::Rgb(0x10, 0x10, 0x10),
+            text: Color::Rgb(0xe0, 0xe0, 0xe0),
+            red: gray,
+            green: gray,
+            yellow: gray,
+            orange: gray,
+            purple: gray,
+            blue: gray,
+            accent: gray,
+            cast: Cast::Dark,
+        };
+        let (near, nearer) = (Color::Rgb(0x84, 0x80, 0x80), Color::Rgb(0x81, 0x80, 0x80));
+        assert_eq!(first_distinct(&p, &[nearer, near], &[gray]), near);
     }
 }

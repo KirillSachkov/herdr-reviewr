@@ -20,6 +20,7 @@ use herdr_reviewr::forge::{
 };
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::model::Scope;
+use herdr_reviewr::theme::NAMES;
 use herdr_reviewr::{handle_key, handle_mouse, ui};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -34,29 +35,6 @@ const W: u16 = 120;
 const H: u16 = 34;
 /// The markdown showcase is tall enough to show every element at once.
 const TALL: u16 = 63;
-
-const THEMES: &[&str] = &[
-    "catppuccin",
-    "catppuccin-frappe",
-    "catppuccin-macchiato",
-    "catppuccin-latte",
-    "tokyo-night",
-    "tokyo-night-day",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "gruvbox-light",
-    "one-dark",
-    "one-light",
-    "solarized",
-    "solarized-light",
-    "github-light",
-    "monokai",
-    "rose-pine",
-    "rose-pine-dawn",
-    "ayu",
-    "everforest",
-];
 
 /// A scene: its name, and how to build its app on the fixture repo for one theme.
 type Scene = (&'static str, fn(&Path, &str) -> App);
@@ -75,7 +53,7 @@ const SCENES: &[Scene] = &[
 fn main() {
     let out = PathBuf::from(std::env::args().nth(1).expect("usage: snapshot <out-dir>"));
     let repo = fixture_repo();
-    for theme in THEMES {
+    for theme in NAMES {
         let dir = out.join(theme);
         std::fs::create_dir_all(&dir).expect("out dir");
         for (name, scene) in SCENES {
@@ -84,7 +62,7 @@ fn main() {
             std::fs::write(dir.join(format!("{name}.html")), html).expect("write fragment");
         }
     }
-    println!("{} themes × {} scenes → {}", THEMES.len(), SCENES.len(), out.display());
+    println!("{} themes × {} scenes → {}", NAMES.len(), SCENES.len(), out.display());
 }
 
 /// A temp repo with a Rust file and a README, both edited since the commit: modified, added and

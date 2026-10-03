@@ -54,9 +54,10 @@ pub struct MarkdownColors {
 impl MarkdownColors {
     /// Ask the theme directly, under both scope schemes theme ports target: VS Code's
     /// (`heading.N.markdown`, `markup.inline.raw.string.markdown`) and `TextMate`'s
-    /// (`markup.heading.N`, `markup.raw.inline`). Highlighting a sample can't answer this:
-    /// the bundled grammar tags only H1 and H2 with a level, and tags heading text as a section
-    /// name that many themes color like a function name.
+    /// (`markup.heading.N.markdown`, `markup.raw.inline.markdown`, which a `markup.heading.N`
+    /// rule matches by prefix). Highlighting a sample can't answer this: the bundled grammar
+    /// tags only H1 and H2 with a level, and tags heading text as a section name that many
+    /// themes color like a function name.
     fn of(theme: &Theme) -> Self {
         let hl = syntect::highlighting::Highlighter::new(theme);
         let fg = |stack: &[&str]| -> Option<Rgb> {
@@ -70,7 +71,6 @@ impl MarkdownColors {
             let n = i + 1;
             probe(&format!("heading.{n}.markdown"))
                 .or_else(|| probe(&format!("markup.heading.{n}.markdown")))
-                .or_else(|| probe(&format!("markup.heading.{n}")))
                 .or_else(|| probe("markup.heading.markdown"))
         });
         let inline_code = probe("markup.inline.raw.string.markdown")
