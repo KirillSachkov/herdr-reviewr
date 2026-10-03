@@ -9901,9 +9901,11 @@ fn the_line_field_takes_a_pasted_number_only() {
     for (pasted, want) in [("42", "42"), ("`1337`\n", "1337"), (" 21, ", "21"), ("$", "$")] {
         app.input_paste(pasted);
         assert_eq!(query(&app), want, "{pasted:?}");
+        let caret = app.find.as_ref().unwrap().caret;
+        assert_eq!(caret, want.chars().count(), "{pasted:?}: the caret ends the number");
     }
     app.input_paste("7");
-    for pasted in ["src/m.rs:12", "see line 21", "1,337", "v2", "src/n.rs#L5", ""] {
+    for pasted in ["src/m.rs:12", "see line 21", "1,337", "v2", "src/n.rs#L5", "-1", "+3", ""] {
         app.input_paste(pasted);
         assert_eq!(query(&app), "7", "{pasted:?} leaves the field");
     }

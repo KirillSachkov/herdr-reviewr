@@ -3962,7 +3962,7 @@ impl App {
     /// Insert pasted `text` at the caret as one unit, normalizing `\r\n`/`\r` to `\n`. The
     /// single-line search and find queries take a newline as a space; the
     /// base picker's filter drops it, so a branch name pasted with the newline it was copied
-    /// with still matches its branch. The line field reads a location from it instead.
+    /// with still matches its branch. The line field takes a number or `$` from it instead.
     pub fn input_paste(&mut self, text: &str) {
         if self.line_open() {
             self.paste_line(text);
@@ -4562,7 +4562,10 @@ impl App {
     /// punctuation around it drop away. Anything else, a `path:line` included, leaves the field
     /// as it was: whether a path means the open file is search's to resolve, not the field's.
     fn paste_line(&mut self, text: &str) {
-        let word = text.trim().trim_matches(|c: char| !c.is_alphanumeric() && c != '$');
+        // Quotes, brackets and trailing punctuation drop; a sign stays and makes it no line.
+        let wrap =
+            ['`', '\'', '"', '“', '”', '‘', '’', '(', ')', '[', ']', '<', '>', ':', '.', ',', ';'];
+        let word = text.trim().trim_matches(wrap);
         let line = word == "$" || (!word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()));
         if let Some(f) = self.find.as_mut().filter(|_| line) {
             f.query = word.to_string();
