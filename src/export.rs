@@ -151,7 +151,10 @@ mod clipboard {
     }
 
     /// The text outlives the handle: Windows keeps clipboard data after its writer lets go.
+    /// Line breaks go in as CRLF, the clipboard's own convention, so an edit control that
+    /// splits only on CRLF still shows the review's lines.
     pub(super) fn write(text: &str) -> Result<()> {
+        let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
         arboard::Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(text))
             .context("writing the Windows clipboard")
@@ -223,8 +226,9 @@ mod tests {
         );
     }
 
-    /// Windows needs no tool on `PATH`, and the text lands as Unicode: `clip.exe` would mangle
-    /// everything past ASCII. Whatever the clipboard held before is put back.
+    /// Windows needs no tool on `PATH`, and the text lands as Unicode with CRLF line breaks:
+    /// `clip.exe` would mangle everything past ASCII. Whatever the clipboard held before is put
+    /// back.
     #[cfg(windows)]
     #[test]
     fn a_windows_copy_lands_on_the_clipboard_with_non_ascii_intact() {
@@ -234,7 +238,7 @@ mod tests {
         if let Some(before) = before {
             let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(before));
         }
-        assert_eq!(copied, "src/café.rs:3\n+let 日本 = 1;\nnaming 👍");
+        assert_eq!(copied, "src/café.rs:3\r\n+let 日本 = 1;\r\nnaming 👍");
     }
 
     #[test]
