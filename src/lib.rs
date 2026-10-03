@@ -29,6 +29,7 @@ pub(crate) mod marks;
 pub mod model;
 pub mod proc;
 pub(crate) mod rendered;
+pub mod roles;
 pub mod search;
 pub mod selection;
 pub mod snippet;

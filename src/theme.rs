@@ -13,6 +13,8 @@
 use ratatui::style::Color;
 use two_face::theme::EmbeddedThemeName;
 
+use crate::roles::{Cast, Fill, Overrides, Primitives, Roles};
+
 /// The default theme name; the fallback for an unset CLI value.
 pub const DEFAULT: &str = "catppuccin";
 
@@ -69,6 +71,8 @@ pub struct Palette {
     /// The text-selection highlight, live and settled: a cool fill distinct by hue from the
     /// `surface1`/`surface2` row fills, so a selection reads inside a cursor row in any pane
     pub sel_bg: Color,
+    /// The semantic roles: what components paint with, resolved per fill.
+    pub roles: Roles,
 }
 
 impl Palette {
@@ -198,7 +202,34 @@ struct Anchors {
     orange: Color,
     purple: Color,
     blue: Color,
+    /// The theme's UI accent: herdr's pick for the themes it ships, upstream's otherwise.
+    accent: Color,
 }
+
+impl Anchors {
+    fn primitives(self, appearance: Appearance) -> Primitives {
+        Primitives {
+            base: self.base,
+            text: self.text,
+            red: self.red,
+            green: self.green,
+            yellow: self.yellow,
+            orange: self.orange,
+            purple: self.purple,
+            blue: self.blue,
+            accent: self.accent,
+            cast: match appearance {
+                Appearance::Dark => Cast::Dark,
+                Appearance::Light => Cast::Light,
+            },
+        }
+    }
+}
+
+/// Catppuccin Mocha's anchors: its canonical values, with herdr's blue as the accent.
+const MOCHA: Anchors = anchors(
+    0x1e1e2e, 0xcdd6f4, 0xf38ba8, 0xa6e3a1, 0xf9e2af, 0xfab387, 0xcba6f7, 0xb4befe, 0x89b4fa,
+);
 
 /// Catppuccin Mocha: pinned to its canonical values so it renders identically to the
 /// pre-theming palette.
@@ -226,6 +257,20 @@ fn catppuccin() -> Theme {
             emph_ins_bg: Color::Rgb(0x30, 0x55, 0x3f),
             match_hl: Color::Rgb(0x5c, 0x51, 0x2b),
             sel_bg: Color::Rgb(0x35, 0x3d, 0x7d),
+            // Catppuccin ships its own surfaces and fills, so they enter the roles as given.
+            roles: Roles::derive(
+                MOCHA.primitives(Appearance::Dark),
+                Overrides::default()
+                    .fill(Fill::Bar, Color::Rgb(0x31, 0x32, 0x44))
+                    .fill(Fill::CursorInactive, Color::Rgb(0x45, 0x47, 0x5a))
+                    .fill(Fill::Cursor, Color::Rgb(0x58, 0x5b, 0x70))
+                    .fill(Fill::Removed, Color::Rgb(0x45, 0x23, 0x2f))
+                    .fill(Fill::Added, Color::Rgb(0x1f, 0x3a, 0x2a))
+                    .fill(Fill::RemovedEmph, Color::Rgb(0x6e, 0x34, 0x46))
+                    .fill(Fill::AddedEmph, Color::Rgb(0x30, 0x55, 0x3f))
+                    .fill(Fill::Highlight, Color::Rgb(0x5c, 0x51, 0x2b))
+                    .fill(Fill::Selection, Color::Rgb(0x35, 0x3d, 0x7d)),
+            ),
         },
         syntax: SyntaxChoice::Bundled(MOCHA_TM),
     }
@@ -258,7 +303,17 @@ const EVERFOREST_TM: &[u8] = include_bytes!("../assets/everforest.tmTheme");
 fn everforest() -> Theme {
     let derived = bundled("everforest", Appearance::Dark, EVERFOREST_TM, EVERFOREST);
     Theme {
-        palette: Palette { ins_bg: hex(0x3c4841), del_bg: hex(0x493b40), ..derived.palette },
+        palette: Palette {
+            ins_bg: hex(0x3c4841),
+            del_bg: hex(0x493b40),
+            roles: Roles::derive(
+                EVERFOREST.primitives(Appearance::Dark),
+                Overrides::default()
+                    .fill(Fill::Added, hex(0x3c4841))
+                    .fill(Fill::Removed, hex(0x493b40)),
+            ),
+            ..derived.palette
+        },
         ..derived
     }
 }
@@ -274,50 +329,69 @@ fn catppuccin_latte() -> Theme {
     )
 }
 
-const CATPPUCCIN_LATTE: Anchors =
-    anchors(0xeff1f5, 0x4c4f69, 0xd20f39, 0x40a02b, 0xdf8e1d, 0xfe640b, 0x8839ef, 0x7287fd);
+const CATPPUCCIN_LATTE: Anchors = anchors(
+    0xeff1f5, 0x4c4f69, 0xd20f39, 0x40a02b, 0xdf8e1d, 0xfe640b, 0x8839ef, 0x7287fd, 0x1e66f5,
+);
 
 /// Canonical anchors for the derived themes. base, text, then the six accents
 /// (red, green, yellow, orange, purple, blue); surfaces and diff fills are derived.
-const DRACULA: Anchors =
-    anchors(0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd);
-const NORD: Anchors =
-    anchors(0x2e3440, 0xd8dee9, 0xbf616a, 0xa3be8c, 0xebcb8b, 0xd08770, 0xb48ead, 0x81a1c1);
-const GRUVBOX: Anchors =
-    anchors(0x282828, 0xebdbb2, 0xfb4934, 0xb8bb26, 0xfabd2f, 0xfe8019, 0xd3869b, 0x83a598);
-const GRUVBOX_LIGHT: Anchors =
-    anchors(0xfbf1c7, 0x3c3836, 0x9d0006, 0x79740e, 0xb57614, 0xaf3a03, 0x8f3f71, 0x076678);
-const ONE_DARK: Anchors =
-    anchors(0x282c34, 0xabb2bf, 0xe06c75, 0x98c379, 0xe5c07b, 0xd19a66, 0xc678dd, 0x61afef);
-const ONE_LIGHT: Anchors =
-    anchors(0xfafafa, 0x383a42, 0xe45649, 0x50a14f, 0xc18401, 0x986801, 0xa626a4, 0x4078f2);
-const SOLARIZED: Anchors =
-    anchors(0x002b36, 0x93a1a1, 0xdc322f, 0x859900, 0xb58900, 0xcb4b16, 0x6c71c4, 0x268bd2);
-const SOLARIZED_LIGHT: Anchors =
-    anchors(0xfdf6e3, 0x586e75, 0xdc322f, 0x859900, 0xb58900, 0xcb4b16, 0x6c71c4, 0x268bd2);
-const FRAPPE: Anchors =
-    anchors(0x303446, 0xc6d0f5, 0xe78284, 0xa6d189, 0xe5c890, 0xef9f76, 0xca9ee6, 0xbabbf1);
-const MACCHIATO: Anchors =
-    anchors(0x24273a, 0xcad3f5, 0xed8796, 0xa6da95, 0xeed49f, 0xf5a97f, 0xc6a0f6, 0xb7bdf8);
-const GITHUB_LIGHT: Anchors =
-    anchors(0xffffff, 0x1f2328, 0xcf222e, 0x1a7f37, 0x9a6700, 0xbc4c00, 0x8250df, 0x0969da);
-const MONOKAI: Anchors =
-    anchors(0x272822, 0xf8f8f2, 0xf92672, 0xa6e22e, 0xe6db74, 0xfd971f, 0xae81ff, 0x66d9ef);
-const TOKYO_NIGHT: Anchors =
-    anchors(0x1a1b26, 0xc0caf5, 0xf7768e, 0x9ece6a, 0xe0af68, 0xff9e64, 0xbb9af7, 0x7aa2f7);
-const TOKYO_NIGHT_DAY: Anchors =
-    anchors(0xe1e2e7, 0x3760bf, 0xf52a65, 0x587539, 0x8c6c3e, 0xb15c00, 0x9854f1, 0x2e7de9);
-const ROSE_PINE: Anchors =
-    anchors(0x191724, 0xe0def4, 0xeb6f92, 0x9ccfd8, 0xf6c177, 0xebbcba, 0xc4a7e7, 0x31748f);
-const ROSE_PINE_DAWN: Anchors =
-    anchors(0xfaf4ed, 0x575279, 0xb4637a, 0x56949f, 0xea9d34, 0xd7827e, 0x907aa9, 0x286983);
+const DRACULA: Anchors = anchors(
+    0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd, 0xbd93f9,
+);
+const NORD: Anchors = anchors(
+    0x2e3440, 0xd8dee9, 0xbf616a, 0xa3be8c, 0xebcb8b, 0xd08770, 0xb48ead, 0x81a1c1, 0x88c0d0,
+);
+const GRUVBOX: Anchors = anchors(
+    0x282828, 0xebdbb2, 0xfb4934, 0xb8bb26, 0xfabd2f, 0xfe8019, 0xd3869b, 0x83a598, 0xd79921,
+);
+const GRUVBOX_LIGHT: Anchors = anchors(
+    0xfbf1c7, 0x3c3836, 0x9d0006, 0x79740e, 0xb57614, 0xaf3a03, 0x8f3f71, 0x076678, 0x076678,
+);
+const ONE_DARK: Anchors = anchors(
+    0x282c34, 0xabb2bf, 0xe06c75, 0x98c379, 0xe5c07b, 0xd19a66, 0xc678dd, 0x61afef, 0x61afef,
+);
+const ONE_LIGHT: Anchors = anchors(
+    0xfafafa, 0x383a42, 0xe45649, 0x50a14f, 0xc18401, 0x986801, 0xa626a4, 0x4078f2, 0x4078f2,
+);
+const SOLARIZED: Anchors = anchors(
+    0x002b36, 0x93a1a1, 0xdc322f, 0x859900, 0xb58900, 0xcb4b16, 0x6c71c4, 0x268bd2, 0x268bd2,
+);
+const SOLARIZED_LIGHT: Anchors = anchors(
+    0xfdf6e3, 0x586e75, 0xdc322f, 0x859900, 0xb58900, 0xcb4b16, 0x6c71c4, 0x268bd2, 0x268bd2,
+);
+const FRAPPE: Anchors = anchors(
+    0x303446, 0xc6d0f5, 0xe78284, 0xa6d189, 0xe5c890, 0xef9f76, 0xca9ee6, 0xbabbf1, 0x8caaee,
+);
+const MACCHIATO: Anchors = anchors(
+    0x24273a, 0xcad3f5, 0xed8796, 0xa6da95, 0xeed49f, 0xf5a97f, 0xc6a0f6, 0xb7bdf8, 0x8aadf4,
+);
+const GITHUB_LIGHT: Anchors = anchors(
+    0xffffff, 0x1f2328, 0xcf222e, 0x1a7f37, 0x9a6700, 0xbc4c00, 0x8250df, 0x0969da, 0x0969da,
+);
+const MONOKAI: Anchors = anchors(
+    0x272822, 0xf8f8f2, 0xf92672, 0xa6e22e, 0xe6db74, 0xfd971f, 0xae81ff, 0x66d9ef, 0x66d9ef,
+);
+const TOKYO_NIGHT: Anchors = anchors(
+    0x1a1b26, 0xc0caf5, 0xf7768e, 0x9ece6a, 0xe0af68, 0xff9e64, 0xbb9af7, 0x7aa2f7, 0x7aa2f7,
+);
+const TOKYO_NIGHT_DAY: Anchors = anchors(
+    0xe1e2e7, 0x3760bf, 0xf52a65, 0x587539, 0x8c6c3e, 0xb15c00, 0x9854f1, 0x2e7de9, 0x2e7de9,
+);
+const ROSE_PINE: Anchors = anchors(
+    0x191724, 0xe0def4, 0xeb6f92, 0x9ccfd8, 0xf6c177, 0xebbcba, 0xc4a7e7, 0x31748f, 0xc4a7e7,
+);
+const ROSE_PINE_DAWN: Anchors = anchors(
+    0xfaf4ed, 0x575279, 0xb4637a, 0x56949f, 0xea9d34, 0xd7827e, 0x907aa9, 0x286983, 0x907aa9,
+);
 /// ayu Dark from `ayu-colors` 9.1: the `ui.bg` base (the terminal background ayu's own
 /// ports use), the `editor.fg` text, and its syntax palette for the accents.
-const AYU: Anchors =
-    anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
+const AYU: Anchors = anchors(
+    0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff, 0xe6b450,
+);
 /// Everforest dark, hard background: `bg0`, `fg` and the accents from `autoload/everforest.vim`.
-const EVERFOREST: Anchors =
-    anchors(0x272e33, 0xd3c6aa, 0xe67e80, 0xa7c080, 0xdbbc7f, 0xe69875, 0xd699b6, 0x7fbbb3);
+const EVERFOREST: Anchors = anchors(
+    0x272e33, 0xd3c6aa, 0xe67e80, 0xa7c080, 0xdbbc7f, 0xe69875, 0xd699b6, 0x7fbbb3, 0xa7c080,
+);
 
 /// Build `Anchors` from `0xRRGGBB` hex literals, so a palette reads as one compact row.
 /// One argument per anchor slot — the count is the palette's shape, not accidental.
@@ -331,6 +405,7 @@ const fn anchors(
     orange: u32,
     purple: u32,
     blue: u32,
+    accent: u32,
 ) -> Anchors {
     Anchors {
         base: hex(base),
@@ -341,6 +416,7 @@ const fn anchors(
         orange: hex(orange),
         purple: hex(purple),
         blue: hex(blue),
+        accent: hex(accent),
     }
 }
 
@@ -379,6 +455,7 @@ fn derive(a: Anchors, appearance: Appearance) -> Palette {
         emph_ins_bg: readable_tint(a.green, a.base, a.text, appearance, true),
         match_hl: readable_tint(a.yellow, a.base, a.text, appearance, true),
         sel_bg: readable_tint(saturated(a.blue), a.base, a.text, appearance, true),
+        roles: Roles::derive(a.primitives(appearance), Overrides::default()),
     }
 }
 
@@ -667,6 +744,116 @@ mod tests {
         ("ayu", false),
         ("everforest", false),
     ];
+
+    /// The spec's accent table: herdr's pick for the themes it ships, upstream's otherwise.
+    #[test]
+    fn every_theme_has_its_accent() {
+        let accents = [
+            ("catppuccin", 0x89b4fa),
+            ("catppuccin-latte", 0x1e66f5),
+            ("catppuccin-frappe", 0x8caaee),
+            ("catppuccin-macchiato", 0x8aadf4),
+            ("tokyo-night", 0x7aa2f7),
+            ("tokyo-night-day", 0x2e7de9),
+            ("dracula", 0xbd93f9),
+            ("nord", 0x88c0d0),
+            ("gruvbox", 0xd79921),
+            ("gruvbox-light", 0x076678),
+            ("one-dark", 0x61afef),
+            ("one-light", 0x4078f2),
+            ("solarized", 0x268bd2),
+            ("solarized-light", 0x268bd2),
+            ("rose-pine", 0xc4a7e7),
+            ("rose-pine-dawn", 0x907aa9),
+            ("ayu", 0xe6b450),
+            ("everforest", 0xa7c080),
+            ("github-light", 0x0969da),
+            ("monokai", 0x66d9ef),
+        ];
+        assert_eq!(accents.len(), NAMED.len(), "every theme names its accent");
+        for (name, accent) in accents {
+            let roles = resolve(Some(name)).palette.roles;
+            assert_eq!(roles.primitives().accent, super::hex(accent), "{name}");
+        }
+    }
+
+    /// The spec's guarantees 2-6, measured on every theme, role and fill. Collects every
+    /// failure before asserting, so one run shows the whole picture.
+    #[test]
+    fn every_role_reads_on_every_fill() {
+        use crate::roles::{
+            FILL_SEP, FILLS, Fill, INK_SEP, INKS, Ink, MARK_FLOOR, STACKING, TEXT_FLOOR, TIER_STEP,
+            contrast, oklab_distance,
+        };
+        let mut failures = Vec::new();
+        for &(name, _) in NAMED {
+            let theme = resolve(Some(name));
+            let roles = theme.palette.roles;
+            // 8: the primitives come back exact.
+            let prim = roles.primitives();
+            if prim.base != theme.palette.base || prim.text != theme.palette.text {
+                failures.push(format!("{name}: primitives changed"));
+            }
+            for on in FILLS {
+                let bg = roles.fill(on);
+                // 2: syntax colors keep their plain-background legibility on every fill. A dim
+                // comment-like gray is the hardest case.
+                let gray = super::blend(prim.text, prim.base, 0.45);
+                let lifted = legible(gray, bg, prim.base, prim.text);
+                let want = contrast(gray, prim.base).min(TEXT_FLOOR) - 0.05;
+                if contrast(lifted, bg) < want {
+                    failures.push(format!("{name}: syntax gray on {on:?} below {want:.2}"));
+                }
+                // 2: text floors; 3: glyph floors.
+                for ink in INKS {
+                    let floor = match ink {
+                        Ink::TextMuted | Ink::Pending | Ink::Border => MARK_FLOOR,
+                        _ => TEXT_FLOOR,
+                    };
+                    let c = contrast(roles.ink(ink, on), bg);
+                    if c < floor - 0.005 {
+                        failures.push(format!("{name}: {ink:?} text on {on:?} {c:.2} < {floor}"));
+                    }
+                    let m = contrast(roles.mark(ink, on), bg);
+                    if m < MARK_FLOOR - 0.005 {
+                        failures.push(format!("{name}: {ink:?} mark on {on:?} {m:.2} < 3"));
+                    }
+                }
+                // 4: the tiers keep their order and a visible step.
+                let tier = |ink| contrast(roles.ink(ink, on), bg);
+                let (t, s, m) = (tier(Ink::Text), tier(Ink::TextSecondary), tier(Ink::TextMuted));
+                if t < s * TIER_STEP - 0.01 || s < m * TIER_STEP - 0.01 {
+                    failures.push(format!("{name}: tiers on {on:?} {t:.2} / {s:.2} / {m:.2}"));
+                }
+            }
+            // 5: every fill reads as a fill over what it can sit on.
+            for (top, unders) in STACKING {
+                for &under in unders {
+                    let d = oklab_distance(roles.fill(top), roles.fill(under));
+                    if d < FILL_SEP - 0.0005 {
+                        failures.push(format!("{name}: {top:?} over {under:?} ΔE {d:.3}"));
+                    }
+                }
+            }
+            // 6: inks that appear side by side read as different.
+            let beside: &[(Ink, &[Ink])] = &[
+                (
+                    Ink::Accent,
+                    &[Ink::Added, Ink::Removed, Ink::Modified, Ink::Comment, Ink::Merged],
+                ),
+                (Ink::Comment, &[Ink::Added, Ink::Removed, Ink::Modified]),
+            ];
+            for &(a, others) in beside {
+                for &b in others {
+                    let d = oklab_distance(roles.ink(a, Fill::Base), roles.ink(b, Fill::Base));
+                    if d < INK_SEP - 0.0005 {
+                        failures.push(format!("{name}: {a:?} beside {b:?} ΔE {d:.3}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    }
 
     #[test]
     fn every_named_theme_resolves_to_itself() {
