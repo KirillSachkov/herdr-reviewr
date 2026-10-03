@@ -76,6 +76,21 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// The color of `fill`.
+    pub fn fill(&self, fill: Fill) -> Color {
+        self.roles.fill(fill)
+    }
+
+    /// `ink` painting text on `on`.
+    pub fn ink(&self, ink: crate::roles::Ink, on: Fill) -> Color {
+        self.roles.ink(ink, on)
+    }
+
+    /// `ink` painting a glyph, sign or border on `on`.
+    pub fn mark(&self, ink: crate::roles::Ink, on: Fill) -> Color {
+        self.roles.mark(ink, on)
+    }
+
     /// The cursor-row fill: the strongest-contrast surface (`surface2`) in the focused pane, a
     /// step softer (`surface1`) when not, so which pane holds the cursor reads at a glance.
     /// ("Strongest", not "brightest": light themes step surfaces toward black, not white.)

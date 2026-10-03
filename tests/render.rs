@@ -54,7 +54,9 @@ fn render_size(app: &App, width: u16, height: u16) -> Buffer {
 
 /// Catppuccin surface2 — the shared selection/cursor fill.
 const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5b, 0x70);
-/// Catppuccin orange — the comment-editor caret block.
+/// Catppuccin's accent (herdr's blue): the caret block and the footer's keys.
+const ACCENT: ratatui::style::Color = ratatui::style::Color::Rgb(0x89, 0xb4, 0xfa);
+/// Catppuccin's comment color (peach): your comments' numbers and borders.
 const PEACH: ratatui::style::Color = ratatui::style::Color::Rgb(0xfa, 0xb3, 0x87);
 
 /// The right `100-pct`% of every frame row, for pane-scoped assertions — one home for
@@ -114,7 +116,7 @@ fn the_caret_block_sits_on_the_character_at_the_caret() {
     let mut found = false;
     for y in 0..40 {
         for x in 0..140 {
-            if buf.cell((x, y)).is_some_and(|c| c.bg == PEACH && c.symbol() == "b") {
+            if buf.cell((x, y)).is_some_and(|c| c.bg == ACCENT && c.symbol() == "b") {
                 found = true;
             }
         }
@@ -1270,7 +1272,10 @@ fn pr_focus_border_tracks_tab_between_navigator_and_read_pane() {
     let read_x = (body.x..body.x + body.width)
         .find(|&x| ui::in_diff_pane(AREA, &app, x, body.y + 4))
         .unwrap();
-    let (blue, surface2) = (app.palette().blue, app.palette().surface2);
+    let (blue, surface2) = (
+        app.palette().mark(herdr_reviewr::roles::Ink::Accent, herdr_reviewr::roles::Fill::Base),
+        app.palette().mark(herdr_reviewr::roles::Ink::Border, herdr_reviewr::roles::Fill::Base),
+    );
 
     let focused_nav = render_buffer(&app);
     assert_eq!(focused_nav.cell((nav_x, body.y + 4)).unwrap().fg, blue);
@@ -1475,7 +1480,9 @@ fn renders_a_light_theme_without_panic() {
     // Driving the full render path with a derived light palette must not panic, and a Latte
     // color (the focused pane's blue border) reaches the painted buffer.
     let buf = render_buffer(&app);
-    let latte_blue = herdr_reviewr::theme::resolve(Some("catppuccin-latte")).palette.blue;
+    let latte = herdr_reviewr::theme::resolve(Some("catppuccin-latte")).palette;
+    let latte_blue =
+        latte.mark(herdr_reviewr::roles::Ink::Accent, herdr_reviewr::roles::Fill::Base);
     let painted = (0..40)
         .flat_map(|y| (0..140).map(move |x| (x, y)))
         .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.fg == latte_blue));
@@ -3131,7 +3138,7 @@ fn an_open_picker_dims_the_view_behind_it_but_never_the_footer() {
     // The footer is the picker's own key bar, so its primary hint keeps full brightness.
     let footer_y = dimmed.area.height - 1;
     let bright =
-        (0..dimmed.area.width).any(|x| dimmed.cell((x, footer_y)).is_some_and(|c| c.fg == PEACH));
+        (0..dimmed.area.width).any(|x| dimmed.cell((x, footer_y)).is_some_and(|c| c.fg == ACCENT));
     assert!(bright, "the footer's primary key hint stays at full brightness");
 }
 
@@ -4708,5 +4715,45 @@ fn a_trimmed_modal_row_always_shows_its_ellipsis() {
             }
         }
         app.confirming_quit = false;
+    }
+}
+
+/// Chrome paints by meaning: a popup's border is the accent, the composer's is your comment
+/// color, the footer's status message is plain text, in every theme.
+#[test]
+fn chrome_paints_roles_by_meaning() {
+    use herdr_reviewr::roles::{Fill, Ink};
+    let any_fg = |buf: &Buffer, color| {
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.fg == color))
+    };
+    for theme in ["catppuccin", "ayu"] {
+        let mut app = edited_app();
+        app.set_cli_theme(Some(theme.to_string()));
+        let p = *app.palette();
+        on_changed_line(&mut app);
+
+        // The composer's border wears your comment color.
+        app.start_comment();
+        assert!(any_fg(&render_buffer(&app), p.mark(Ink::Comment, Fill::Base)), "{theme}");
+        app.input_push('x');
+        app.submit_comment();
+
+        // The comment list is a popup: its border is the accent.
+        app.open_list();
+        assert!(any_fg(&render_buffer(&app), p.mark(Ink::Accent, Fill::Base)), "{theme}");
+        app.close_list();
+
+        // The status message reports in plain text on the footer bar.
+        app.status = "comment added".to_string();
+        let buf = render_buffer(&app);
+        let footer_y = buf.area.height - 1;
+        let row: String =
+            (0..buf.area.width).map(|x| buf.cell((x, footer_y)).unwrap().symbol()).collect();
+        let byte = row.find("comment added").expect("the status shows");
+        let at = u16::try_from(row[..byte].chars().count()).unwrap();
+        let status = buf.cell((at, footer_y)).map(|c| c.fg);
+        assert_eq!(status, Some(p.ink(Ink::Text, Fill::Bar)), "{theme}: the status is plain text");
     }
 }
