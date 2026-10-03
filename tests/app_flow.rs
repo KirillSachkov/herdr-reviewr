@@ -9892,6 +9892,12 @@ fn the_line_field_takes_the_line_from_a_pasted_location() {
         ("src/m.rs(15)", took("15")),
         ("src/m.rs:3000000000", took("3000000000")),
         ("src/m.rs:99999999999", took("4294967295")),
+        ("src/m.rs(42): error C2065", took("42")),
+        ("\u{201c}src/m.rs:43\u{201d}", took("43")),
+        ("at com.x.Foo.bar(m.rs:44)", took("44")),
+        ("C:/proj/src/m.rs:45", took("45")),
+        ("call `retry(3)` in src/m.rs:46", took("46")),
+        ("error at line 12: expected 3 args", took("12")),
         ("see line 21, please", took("21")),
     ] {
         app.input_paste(pasted);

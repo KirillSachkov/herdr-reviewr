@@ -3867,6 +3867,10 @@ impl App {
         if changed && self.mode == Mode::BasePick {
             self.refilter_base_picker(highlighted);
         }
+        // An edit in the line field answers its refusal: the number typed now is the request.
+        if changed && self.line_open() {
+            self.clear_line_refusal();
+        }
     }
 
     /// Re-seat the base picker's highlight after a filter edit: it follows its own row into
@@ -4512,7 +4516,7 @@ impl App {
     }
 
     /// An edit in the line field answers its refusal: the number typed now is the request.
-    pub fn clear_line_refusal(&mut self) {
+    fn clear_line_refusal(&mut self) {
         if let Some(Find { kind: BandKind::Line { refused }, .. }) = self.find.as_mut() {
             *refused = None;
         }
@@ -6019,50 +6023,39 @@ enum LinePaste {
     Nothing,
 }
 
-/// Read a pasted location, word by word, each unwrapped from backticks, quotes, brackets and
-/// trailing punctuation: the first word that holds `path:line` (a column, a range or grep's
-/// matched text may follow the line) or `path(line)` gives its line, and a word with a path ends
-/// the search. A bare `line:col` is a line. Else the first word that is only a number; a number
-/// inside a word (`v2` in a path) is no line. A line too long for a `u32` is past every file's
-/// end. `fff`'s location parser reads lines as `i32` and rejects text after the line, so the
-/// words are read here.
+/// Read a pasted location. In each word, the first `:` or `(` directly followed by a digit marks
+/// one: its line is that digit run, its path the run of path characters just before it — so
+/// quotes, brackets, a stack frame's method or a drive letter around the path drop away, and a
+/// column, a range or grep's match may follow. A `(` needs a path with a `.` or `/` (`foo.cpp(42)`,
+/// not a call like `retry(3)`); a bare `1337:12` is a line. The first location ends the search.
+/// Else the first word that is only a number once its punctuation drops; a number inside a word
+/// (`v2` in a path) is no line. A line too long for a `u32` is past every file's end.
 fn parse_line_paste(text: &str) -> LinePaste {
     let number = |s: &str| {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
             .then(|| s.parse::<u32>().unwrap_or(u32::MAX))
     };
-    // The digits a word's line starts with, after `at`.
-    let line_at = |word: &str, at: usize| {
-        let digits: String = word[at..].chars().take_while(char::is_ascii_digit).collect();
-        number(&digits)
-    };
-    let words: Vec<&str> = text
-        .split_whitespace()
-        .map(|w| {
-            let w = w.trim_matches(['`', '\'', '"', '<', '>', '[', ']']);
-            let w = w.trim_end_matches([',', '.', ';', '!', '?', '`', '\'', '"']);
-            let w = w.strip_prefix('(').unwrap_or(w);
-            if w.contains('(') { w } else { w.trim_end_matches(')') }
-        })
-        .collect();
-    for word in &words {
-        let found = word
-            .find(':')
-            .and_then(|colon| line_at(word, colon + 1).map(|line| (&word[..colon], line)))
-            .or_else(|| {
-                let open = word.find('(')?;
-                word.ends_with(')').then_some((&word[..open], line_at(word, open + 1)?))
-            });
-        let Some((path, line)) = found else { continue };
-        return match number(path) {
-            // `1337:12`: a line and a column, no path.
-            Some(bare) => LinePaste::At { path: None, line: bare },
-            None if path.is_empty() => LinePaste::At { path: None, line },
-            None => LinePaste::At { path: Some(path.to_string()), line },
-        };
+    let is_path = |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | '\\');
+    for word in text.split_whitespace() {
+        for (at, mark) in word.char_indices().filter(|&(_, c)| c == ':' || c == '(') {
+            let rest = &word[at + 1..];
+            let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+            let Some(line) = number(digits) else { continue };
+            let head = &word[..at];
+            let path = &head[head.trim_end_matches(is_path).len()..];
+            if mark == '(' && !path.contains(['.', '/']) {
+                continue;
+            }
+            return match number(path) {
+                // `1337:12`: a line and a column, no path.
+                Some(bare) => LinePaste::At { path: None, line: bare },
+                None if path.is_empty() => LinePaste::At { path: None, line },
+                None => LinePaste::At { path: Some(path.to_string()), line },
+            };
+        }
     }
-    words
-        .into_iter()
+    text.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
         .find_map(number)
         .map_or(LinePaste::Nothing, |line| LinePaste::At { path: None, line })
 }
