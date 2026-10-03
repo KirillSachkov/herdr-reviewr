@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.43.0] — 2026-10-03
+
 ### Changed
 - **Colors by meaning**: each theme focuses in its own accent, like herdr's frame, and every color reads on what sits behind it.
   Running checks are yellow, like herdr's working dot.
