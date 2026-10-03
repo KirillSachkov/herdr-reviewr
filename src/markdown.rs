@@ -14,8 +14,8 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::highlight::Highlighter;
+use crate::roles::Palette;
 use crate::roles::{Fill, Ink};
-use crate::theme::Palette;
 
 /// Block indents (quote bars, list levels) deeper than this render at the cap, so
 /// pathological nesting can never squeeze the content column to nothing.
@@ -1672,8 +1672,9 @@ fn char_width(c: char) -> usize {
 mod tests {
     use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
+    use crate::roles::Palette;
     use crate::roles::{Fill, Ink};
-    use crate::theme::{self, Palette};
+    use crate::theme;
     use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use std::collections::HashSet;

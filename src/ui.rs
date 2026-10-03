@@ -28,9 +28,9 @@ use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
 use crate::model::{ChangeKind, Comment};
+use crate::roles::Palette;
 use crate::roles::{Fill, Ink};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
-use crate::theme::Palette;
 use std::fmt::Write as _;
 
 pub fn render(frame: &mut Frame, app: &App) {

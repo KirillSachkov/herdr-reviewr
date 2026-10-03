@@ -9,8 +9,7 @@
 use ratatui::style::Color;
 use two_face::theme::EmbeddedThemeName;
 
-pub use crate::roles::Palette;
-use crate::roles::{Cast, Fill, Overrides, Primitives};
+use crate::roles::{Cast, Fill, Overrides, Palette, Primitives};
 
 /// The default theme name; the fallback for an unset CLI value.
 pub const DEFAULT: &str = "catppuccin";

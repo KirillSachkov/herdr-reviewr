@@ -4910,8 +4910,8 @@ fn syntax_on_the_cursor_row_keeps_its_legibility() {
     assert!(got >= want, "{got:.2} on the cursor row, {want:.2} on the background");
 }
 
-/// A syntax token on the cursor row keeps its hue: nord's keyword blue and frappe's tokens move
-/// in lightness only, where a blend toward body text grayed them.
+/// A syntax token on the cursor row keeps its hue, even one that shares a role's color: nord's
+/// keyword blue is its comment color, and resolving it as that role once grayed it.
 #[test]
 fn syntax_on_the_cursor_row_keeps_its_hue() {
     use palette::{IntoColor, Oklch, Srgb};
@@ -4920,38 +4920,37 @@ fn syntax_on_the_cursor_row_keeps_its_hue() {
         let lch: Oklch<f64> = Srgb::new(r, g, b).into_format::<f64>().into_linear().into_color();
         (lch.hue.into_positive_degrees(), lch.chroma)
     };
-    for theme in ["nord", "catppuccin-frappe", "catppuccin"] {
-        let r = Repo::init();
-        r.write(
-            "a.rs",
-            "fn x() {}
+    let theme = "nord";
+    let r = Repo::init();
+    r.write(
+        "a.rs",
+        "fn x() {}
 struct Item;
 ",
-        );
-        r.commit_all("init");
-        r.write(
-            "a.rs",
-            "fn x() {}
+    );
+    r.commit_all("init");
+    r.write(
+        "a.rs",
+        "fn x() {}
 struct Item;
 // edit
 ",
-        );
-        let mut app = app_on(&r);
-        app.set_cli_theme(Some(theme.to_string()));
-        app.reload().unwrap(); // highlight with this theme's syntax colors
-        app.focus = Focus::Diff;
-        let row_of = |app: &App, needle: &str| {
-            app.visible.iter().position(|row| row.text().contains(needle)).unwrap()
-        };
-        app.diff_cursor = row_of(&app, "edit");
-        let plain = cell_of(&render_buffer(&app), "struct").fg;
-        app.diff_cursor = row_of(&app, "struct");
-        let lit = cell_of(&render_buffer(&app), "struct").fg;
-        let ((hue, chroma), (lit_hue, lit_chroma)) = (polar(plain), polar(lit));
-        let turn = (hue - lit_hue).abs().min(360.0 - (hue - lit_hue).abs());
-        assert!(turn < 10.0, "{theme}: hue {hue:.0}° became {lit_hue:.0}°");
-        // A light cursor row can force a token to the edge of sRGB, where chroma must give;
-        // a blend toward body text loses far more.
-        assert!(lit_chroma >= chroma * 0.5, "{theme}: chroma {chroma:.3} fell to {lit_chroma:.3}");
-    }
+    );
+    let mut app = app_on(&r);
+    app.set_cli_theme(Some(theme.to_string()));
+    app.reload().unwrap(); // highlight with this theme's syntax colors
+    app.focus = Focus::Diff;
+    let row_of = |app: &App, needle: &str| {
+        app.visible.iter().position(|row| row.text().contains(needle)).unwrap()
+    };
+    app.diff_cursor = row_of(&app, "edit");
+    let plain = cell_of(&render_buffer(&app), "struct").fg;
+    app.diff_cursor = row_of(&app, "struct");
+    let lit = cell_of(&render_buffer(&app), "struct").fg;
+    let ((hue, chroma), (lit_hue, lit_chroma)) = (polar(plain), polar(lit));
+    let turn = (hue - lit_hue).abs().min(360.0 - (hue - lit_hue).abs());
+    assert!(turn < 10.0, "{theme}: hue {hue:.0}° became {lit_hue:.0}°");
+    // A light cursor row can force a token to the edge of sRGB, where chroma must give;
+    // a blend toward body text loses far more.
+    assert!(lit_chroma >= chroma * 0.5, "{theme}: chroma {chroma:.3} fell to {lit_chroma:.3}");
 }

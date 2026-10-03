@@ -22,7 +22,8 @@ use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines};
 use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
-use crate::theme::{self, Palette};
+use crate::roles::Palette;
+use crate::theme;
 use crate::world::{PickStatus, PickVerdict};
 
 /// Navigator shares and bounds, as percentages of the body's split axis.

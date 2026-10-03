@@ -16,7 +16,7 @@
 //!   minimums, so the three tiers keep their order and a visible step on every fill.
 //! - A colored ink keeps its official color wherever it clears its floor, and lifts toward the
 //!   pole on the fills where it doesn't.
-//! - Palette that can appear side by side keep a minimum perceptual distance: the lower-priority
+//! - Roles that can appear side by side keep a minimum perceptual distance: the lower-priority
 //!   one takes the theme's next candidate hue.
 //! - Content colors (syntax, a theme's markdown headings) keep their hue on a fill and move in
 //!   lightness only, as far as legibility needs.
@@ -72,8 +72,11 @@ pub const INKS: [Ink; 13] = [
     Ink::Border,
 ];
 
+/// The inks that resolve as text tiers off body text rather than from a hue.
+const TIERS: [Ink; 4] = [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Border];
+
 /// A layer text sits on. A selection is text you dragged over or a line range you picked for a
-/// comment: one fill, one meaning. [`LAYERS`] holds the order they stack in.
+/// comment: one fill, one meaning. [`LAYERS`] keeps every stack the UI paints readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Fill {
     /// The terminal's own background, which the theme's `base` stands for. Never painted.
@@ -237,15 +240,14 @@ impl Palette {
     /// A content color — syntax, a theme's markdown heading — painted on `on`, as legible there
     /// as it is on the plain background (capped at [`TEXT_FLOOR`]), its hue kept. A text tier
     /// resolved on the background resolves as that tier on `on`, so rendered markdown's body,
-    /// secondary and muted text keep their order there. Non-RGB colors are the terminal's own
+    /// secondary and muted text and its rules keep their order there. Non-RGB colors are the terminal's own
     /// defaults and pass through.
     #[must_use]
     pub fn legible(&self, fg: Color, on: Fill) -> Color {
         if on == Fill::Base || !matches!(fg, Color::Rgb(..)) {
             return fg;
         }
-        let tiers = [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Border];
-        if let Some(tier) = tiers.into_iter().find(|&tier| self.ink(tier, Fill::Base) == fg) {
+        if let Some(tier) = TIERS.into_iter().find(|&tier| self.ink(tier, Fill::Base) == fg) {
             return self.ink(tier, on);
         }
         self.lifted(fg, on, contrast(fg, self.fill(Fill::Base)).min(TEXT_FLOOR))
@@ -261,16 +263,16 @@ impl Palette {
         self.lifted(fg, on, TEXT_FLOOR)
     }
 
-    /// `fg` moved in lightness toward body text's side of `on` until it clears `target`. The
-    /// answer depends only on the colors, so it is memoized: a frame repaints the same few
-    /// syntax colors on the same few fills thousands of times.
+    /// `fg` lifted on `on` to `target`, the way every colored role is ([`hued`]). The answer
+    /// depends only on the colors, so it is memoized: a frame repaints the same few syntax
+    /// colors on the same few fills thousands of times.
     fn lifted(&self, fg: Color, on: Fill, target: f64) -> Color {
         thread_local! {
-            static MEMO: RefCell<HashMap<(Color, Color, Color, u64), Color>> =
+            static MEMO: RefCell<HashMap<(Color, Color, u64), Color>> =
                 RefCell::new(HashMap::new());
         }
-        let (bg, text) = (self.fill(on), self.ink(Ink::Text, on));
-        let key = (fg, bg, text, target.to_bits());
+        let bg = self.fill(on);
+        let key = (fg, bg, target.to_bits());
         MEMO.with(|memo| {
             let mut memo = memo.borrow_mut();
             if let Some(&known) = memo.get(&key) {
@@ -280,16 +282,7 @@ impl Palette {
             if memo.len() > 4096 {
                 memo.clear();
             }
-            // Toward body text's side first; on a mid-tone fill that side can run out of room
-            // before the target, so the other side gets a try and the better one wins.
-            let lighter = luminance(text) > luminance(bg);
-            let near = lift_lightness(fg, bg, lighter, target);
-            let lifted = if contrast(near, bg) >= target {
-                near
-            } else {
-                let far = lift_lightness(fg, bg, !lighter, target);
-                if contrast(far, bg) > contrast(near, bg) { far } else { near }
-            };
+            let lifted = hued(fg, bg, target);
             memo.insert(key, lifted);
             lifted
         })
@@ -580,11 +573,6 @@ fn blend(from: Color, to: Color, t: f64) -> Color {
 #[must_use]
 pub fn contrast(fg: Color, bg: Color) -> f64 {
     srgb(fg).relative_contrast(srgb(bg))
-}
-
-/// WCAG relative luminance.
-fn luminance(color: Color) -> f64 {
-    srgb(color).relative_luminance().luma
 }
 
 /// Euclidean distance in `OKLab`: how different two colors look.
