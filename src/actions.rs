@@ -310,11 +310,18 @@ fn is_review_ui(process: &Process) -> bool {
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 
-/// An executable path's base name, split on `/` or `\`, with a trailing `.exe` dropped. herdr
-/// on Windows reports a path like `C:\…\bin\herdr-reviewr.exe`.
+/// An executable path's base name, split on `/` or `\`, with a trailing `.exe` dropped in any
+/// case. herdr on Windows reports a path like `C:\…\bin\herdr-reviewr.exe`, and its pty layer
+/// resolves an extension-less command through PATHEXT, whose entries are uppercase: the same
+/// binary can arrive as `herdr-reviewr.EXE`.
 fn executable_name(path: &str) -> &str {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    base.strip_suffix(".exe").unwrap_or(base)
+    match base.len().checked_sub(".exe".len()) {
+        Some(stem) if base.is_char_boundary(stem) && base[stem..].eq_ignore_ascii_case(".exe") => {
+            &base[..stem]
+        }
+        _ => base,
+    }
 }
 
 /// Close every pane in `existing`, with plain `pane close` (see [`herdr::close_pane`]).
@@ -503,7 +510,10 @@ mod tests {
     fn an_executable_name_drops_the_directory_on_either_separator_and_the_exe_suffix() {
         assert_eq!(executable_name("target/debug/herdr-reviewr"), "herdr-reviewr");
         assert_eq!(executable_name(r"C:\Users\me\plugin\bin\herdr-reviewr.exe"), "herdr-reviewr");
+        assert_eq!(executable_name(r"C:\plugin\bin\herdr-reviewr.EXE"), "herdr-reviewr");
         assert_eq!(executable_name("herdr-reviewr"), "herdr-reviewr");
         assert_eq!(executable_name("/usr/bin/herdr-reviewr-helper"), "herdr-reviewr-helper");
+        assert_eq!(executable_name("é.exe"), "é");
+        assert_eq!(executable_name("exe"), "exe");
     }
 }

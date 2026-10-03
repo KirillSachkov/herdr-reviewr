@@ -547,15 +547,19 @@ fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
 fn a_windows_pane_counts_through_its_one_reported_process() {
     let dir = tempfile::tempdir().unwrap();
     // herdr on Windows reports exactly one process per pane, with a backslashed path and the
-    // `.exe` suffix.
-    let exe =
-        r"C:\Users\me\.config\herdr\plugins\github\persiyanov.reviewr-1a2b\bin\herdr-reviewr.exe";
-    procinfo(dir.path(), "w1:p1", &json!([process(exe, &[exe])]));
+    // `.exe` suffix. The suffix arrives in either case: herdr's pty layer resolves the manifest's
+    // extension-less command through PATHEXT, whose entries are uppercase.
+    for exe in [
+        r"C:\Users\me\.config\herdr\plugins\github\persiyanov.reviewr-1a2b\bin\herdr-reviewr.exe",
+        r"C:\Users\me\.config\herdr\plugins\github\persiyanov.reviewr-1a2b\bin\herdr-reviewr.EXE",
+    ] {
+        procinfo(dir.path(), "w1:p1", &json!([process(exe, &[exe])]));
 
-    let output = run("open", dir.path());
+        let output = run("open", dir.path());
 
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "reviewr: already open (w1:p1) in workspace-1\n");
+        assert!(output.status.success(), "{exe}: {}", stderr(&output));
+        assert_eq!(stdout(&output), "reviewr: already open (w1:p1) in workspace-1\n", "{exe}");
+    }
 }
 
 #[test]
