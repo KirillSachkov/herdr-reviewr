@@ -9624,14 +9624,13 @@ fn goto_line_lands_on_the_new_sides_line_in_the_changes_diff() {
     app.goto_line(999);
     assert_eq!(app.diff_cursor, app.visible.len() - 1);
 
-    // A jump drops a line-range pick; `0` does nothing at all.
+    // A jump drops a line-range pick; `0` is the first line, as in vim.
     app.diff_cursor = 0;
     app.toggle_select();
     app.goto_line(5);
     assert_eq!(app.select_anchor, None, "a jump is navigation, not a pick extend");
-    let (cursor, len) = (app.diff_cursor, app.visible.len());
     app.goto_line(0);
-    assert_eq!((app.diff_cursor, app.visible.len()), (cursor, len));
+    assert_eq!(new_no(&app), Some(1));
 }
 
 /// A file with no new-side lines numbers by its old side, its count too.
@@ -9730,6 +9729,26 @@ fn goto_line_in_rendered_markdown_lands_on_its_block_and_opens_details() {
     assert_eq!(app.line_count(), 13, "the source's lines");
 }
 
+/// Past the end means the file's last line, so a last line inside a collapsed `<details>` opens
+/// it like any line that hides there.
+#[test]
+fn goto_line_past_the_end_opens_a_last_details() {
+    let r = Repo::init();
+    let doc =
+        "# Title\n\nintro\n\n<details>\n<summary>More</summary>\n\nhidden line\n\n</details>\n";
+    r.write("doc.md", doc);
+    r.commit_all("init");
+    r.write("doc.md", &doc.replace("intro", "intro, edited"));
+    let mut app = app_on_rendered(&r);
+    assert!(app.rendered_active());
+    assert!(!app.visible.iter().any(|row| row.text().contains("hidden line")), "collapsed");
+    for line in [u32::MAX, 999] {
+        app.goto_line(line);
+        let text = app.visible[app.diff_cursor].text();
+        assert!(text.contains("hidden line"), "{line}: {text}");
+    }
+}
+
 /// A line inside nested collapsed `<details>` opens every one that hides it; the same jump
 /// works rendered in All files.
 #[test]
@@ -9771,8 +9790,8 @@ fn line_field_repo() -> Repo {
 
 /// The line field's event table: `:` opens it in a file tab with content and drops a pick;
 /// digits append, other keys are inert (a digit never switches tab), Backspace edits; Enter
-/// jumps and closes; Enter on nothing or `0` and Esc close with nothing moved; a refresh keeps
-/// the number; a tab switch and an invalid config close it.
+/// jumps and closes; an empty Enter and Esc close with nothing moved; `:0` and `:$` are the
+/// first and last lines; a refresh keeps the number; a tab switch and an invalid config close it.
 #[test]
 fn the_line_field_follows_its_event_table() {
     use herdr_reviewr::app::Tab;
@@ -9962,8 +9981,8 @@ fn the_line_field_lands_past_the_end_on_the_last_new_line() {
     assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
 }
 
-/// The line field holds only digits: an alt chord types nothing, and the footer offers `enter
-/// go` only for a line Enter would jump to.
+/// The line field holds digits or `$`: an alt chord types nothing, `$` replaces the number
+/// wherever the caret is, and the footer offers `enter go` only for a line Enter would jump to.
 #[test]
 fn the_line_field_holds_digits_and_offers_enter_only_for_a_line() {
     use herdr_reviewr::app::FooterAction;
@@ -9983,6 +10002,10 @@ fn the_line_field_holds_digits_and_offers_enter_only_for_a_line() {
     assert!(!go(&app), "an empty field closes on Enter, so the footer offers only esc");
     find_type(&mut app, &keymap, "$");
     assert!(go(&app), "`$` goes to the last line");
+    find_type(&mut app, &keymap, "12");
+    press(&mut app, &keymap, KeyCode::Left);
+    find_type(&mut app, &keymap, "$");
+    assert_eq!(app.find.as_ref().unwrap().query, "$", "`$` stands alone, caret anywhere");
 }
 
 /// The field is typed for the file and tab it opened over: opening another file, or any tab,

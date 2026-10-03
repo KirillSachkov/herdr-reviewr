@@ -4523,14 +4523,14 @@ impl App {
     }
 
     /// The line Enter jumps to: the typed number, `0` the first line and `$` the last as in
-    /// vim, and past every file's end when it outgrows a `u32`. `None` — Enter only closes — on
-    /// an empty field, and while refused.
+    /// vim, and past every file's end when it outgrows a `u32`. `None` on an empty field, where
+    /// Enter only closes, and while refused, where it waits.
     pub fn line_target(&self) -> Option<u32> {
         let f = self.find.as_ref().filter(|_| self.line_open() && self.line_refusal().is_none())?;
         match f.query.as_str() {
             "$" => Some(u32::MAX),
             digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
-                Some(digits.parse::<u32>().unwrap_or(u32::MAX).max(1))
+                Some(digits.parse::<u32>().unwrap_or(u32::MAX))
             }
             _ => None,
         }
@@ -4627,13 +4627,15 @@ impl App {
 
     /// `:N`: land the read cursor on line `n` of the open file — the new side's line, or the old
     /// side's in a file with no new-side lines; in rendered markdown the block holding source
-    /// line `n`. A fold or a collapsed `<details>` hiding the line opens; a line past the end
-    /// lands on the last. A jump is navigation, so a line-range pick drops. Off screen, the
-    /// line lands centered. Inert with nothing to land on, or `n == 0`.
+    /// line `n`. `0` is the first line and anything past the end the last, so a fold or a
+    /// collapsed `<details>` hiding either opens like any other. A jump is navigation, so a
+    /// line-range pick drops. Off screen, the line lands centered. Inert with nothing to land on.
     pub fn goto_line(&mut self, n: u32) {
-        if n == 0 || !self.find_available() {
+        if !self.find_available() {
             return;
         }
+        let last = u32::try_from(self.line_count()).unwrap_or(u32::MAX).max(1);
+        let n = n.clamp(1, last);
         self.clear_selection();
         self.focus = Focus::Diff;
         if self.rendered_active() {
@@ -5024,7 +5026,7 @@ impl App {
                 };
             }
             Mode::Find if self.line_open() => {
-                // Enter jumps only to a line; on nothing, `0` or a refusal it only closes.
+                // Enter jumps only to a line: an empty field only closes, and a refusal waits.
                 return if self.line_target().is_some() {
                     vec![(A::LineGo, Primary), (A::CloseFind, Do)]
                 } else {
