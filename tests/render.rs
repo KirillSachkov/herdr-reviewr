@@ -4812,3 +4812,67 @@ fn fills_stack_in_one_order() {
     let painted = bgs(&app);
     assert!(painted.contains(&p.fill(Fill::Selection)), "the range wears the selection fill");
 }
+
+/// The buffer cell where `needle` first paints.
+fn cell_of<'a>(buf: &'a Buffer, needle: &str) -> &'a ratatui::buffer::Cell {
+    for y in 0..buf.area.height {
+        let row: String = (0..buf.area.width).map(|x| buf.cell((x, y)).unwrap().symbol()).collect();
+        if let Some(byte) = row.find(needle) {
+            let x = u16::try_from(row[..byte].chars().count()).unwrap();
+            return buf.cell((x, y)).unwrap();
+        }
+    }
+    panic!("{needle:?} is not painted");
+}
+
+/// Inline code in rendered markdown sits on the code chip; the cursor row's fill stacks above
+/// it.
+#[test]
+fn inline_code_wears_its_chip_under_everything_but_the_cursor() {
+    use herdr_reviewr::roles::Fill;
+    let r = Repo::init();
+    r.write("doc.md", "# Head\n\nalpha\n");
+    r.commit_all("init");
+    r.write("doc.md", "# Head\n\nrun `cargo test` now\n\nomega\n");
+    let mut app = app_on_rendered(&r);
+    app.focus = Focus::Diff;
+    let p = *app.palette();
+    let row_of = |app: &App, needle: &str| {
+        app.visible.iter().position(|row| row.text().contains(needle)).unwrap()
+    };
+
+    app.diff_cursor = row_of(&app, "omega");
+    assert_eq!(cell_of(&render_buffer(&app), "cargo").bg, p.fill(Fill::Code));
+    app.diff_cursor = row_of(&app, "cargo");
+    assert_eq!(cell_of(&render_buffer(&app), "cargo").bg, p.fill(Fill::Cursor));
+}
+
+/// Running and queued checks are yellow, like herdr's working dot and GitHub's pending checks;
+/// a draft PR's chip is muted.
+#[test]
+fn running_checks_are_yellow_and_a_draft_is_muted() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{Check, CheckStatus, PrSnapshot, PrView};
+    use herdr_reviewr::roles::{Fill, Ink};
+    let r = Repo::init();
+    r.write("x.rs", "y\n");
+    r.commit_all("init");
+    let mut app = app_on(&r);
+    let p = *app.palette();
+    app.set_tab(Tab::Pr).unwrap();
+    let check = |name: &str, status| Check { name: name.into(), status };
+    app.pr = PrView::Pr(Box::new(PrSnapshot {
+        is_draft: true,
+        checks: vec![check("ci", CheckStatus::Running), check("lint", CheckStatus::Pending)],
+        ..common::pr_snapshot()
+    }));
+    let buf = render_buffer(&app);
+    let yellow = [Fill::Base, Fill::Bar, Fill::Cursor, Fill::CursorInactive]
+        .map(|on| p.mark(Ink::Warning, on));
+    // Each check row's glyph; the one-line rollup is plain text for every status.
+    for row in ["● ci", "○ lint"] {
+        let fg = cell_of(&buf, row).fg;
+        assert!(yellow.contains(&fg), "{row:?} paints {fg:?}, not yellow");
+    }
+    assert_eq!(cell_of(&buf, "draft").fg, p.ink(Ink::TextMuted, Fill::Bar));
+}

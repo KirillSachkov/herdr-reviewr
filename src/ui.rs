@@ -2189,6 +2189,10 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
                         if let Some(fg) = sp.style.fg {
                             sp.style = sp.style.fg(readable(fg));
                         }
+                        // The cursor and selection stack above a code chip.
+                        if on != Fill::Base {
+                            sp.style.bg = None;
+                        }
                         sp
                     })
                     .collect();
@@ -2254,8 +2258,8 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         _ => Fill::AddedEmph,
     };
     let emph_bg = pal.fill(emph);
-    // The find highlight lays `match_hl` behind the query's matches on this row, char-indexed
-    // like word emphasis.
+    // The find highlight lays the solid highlight behind the query's matches on this row,
+    // char-indexed like word emphasis.
     let hl_ranges =
         find.map(|(q, cs)| crate::app::find_match_ranges(&row.text(), q, cs)).unwrap_or_default();
     let mut cells = code_cells(row, emph_on, &hl_ranges);
@@ -2588,8 +2592,8 @@ fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'stat
     spans
 }
 
-/// The find match's reverse-highlight colors: a bright fill and the dark text drawn on it, so a
-/// match reads over any row tint, red or green.
+/// The find match's colors: the solid highlight and the text resolved on it, so a match reads
+/// over any row tint, red or green.
 #[derive(Clone, Copy)]
 struct HlStyle {
     bg: Color,
@@ -4271,19 +4275,20 @@ fn expand_tabs(text: &str, spans: &[(u32, u32)]) -> (String, Vec<(u32, u32)>) {
     (out, spans)
 }
 
-/// Split `text` into spans, restyling the matched byte ranges by `hl` on top of the
-/// position-dependent base style — the search's calm highlight ([`search_hl`]) reads over
-/// plain text, syntax color, and the preview's banded hit line alike.
-///
-/// `base` is called once per character with the byte index, in strictly increasing order, so
-/// a caller that resolves a position-dependent color may advance a forward cursor instead of
-/// re-scanning per byte.
-/// The search screen's match highlight: `match_hl` behind the matched text, bold.
+/// The search screen's match highlight: matched text in `text` on the solid highlight, bold,
+/// the same block find paints.
 fn search_hl(p: &Palette) -> impl Fn(Style) -> Style {
     let (bg, fg) = (p.fill(Fill::Highlight), p.ink(Ink::Text, Fill::Highlight));
     move |style| style.bg(bg).fg(fg).add_modifier(Modifier::BOLD)
 }
 
+/// Split `text` into spans, restyling the matched byte ranges by `hl` on top of the
+/// position-dependent base style — the search's highlight ([`search_hl`]) reads over plain
+/// text, syntax color, and the preview's banded hit line alike.
+///
+/// `base` is called once per character with the byte index, in strictly increasing order, so
+/// a caller that resolves a position-dependent color may advance a forward cursor instead of
+/// re-scanning per byte.
 fn emphasized_spans(
     text: &str,
     ranges: &[(u32, u32)],
@@ -4476,7 +4481,8 @@ fn pr_status_chip(p: &Palette, s: &forge::PrSnapshot) -> (&'static str, Color) {
     let color = match s.state {
         forge::PrState::Merged => p.ink(Ink::Merged, Fill::Bar),
         forge::PrState::Closed => p.ink(Ink::Danger, Fill::Bar),
-        forge::PrState::Open if s.is_draft => p.ink(Ink::Pending, Fill::Bar),
+        // A draft is not ready for review yet: muted, the way GitHub greys it.
+        forge::PrState::Open if s.is_draft => p.ink(Ink::TextMuted, Fill::Bar),
         forge::PrState::Open => p.ink(Ink::Success, Fill::Bar),
     };
     (pr_status_word(s), color)
@@ -5047,13 +5053,14 @@ pub fn pr_nav_cursor_at(app: &App, row: usize) -> Option<usize> {
     pr_nav_rows(app, usize::MAX, std::time::SystemTime::now()).get(row)?.cursor
 }
 
-/// The status glyph and Catppuccin accent for a check.
+/// The status glyph and its color for a check. Running and queued checks are yellow, like
+/// herdr's working dot and GitHub's pending checks.
 fn check_glyph(p: &Palette, status: forge::CheckStatus, on: Fill) -> (&'static str, Color) {
     match status {
         forge::CheckStatus::Success => ("✓", p.mark(Ink::Success, on)),
         forge::CheckStatus::Failure => ("✗", p.mark(Ink::Danger, on)),
-        forge::CheckStatus::Running => ("●", p.mark(Ink::Pending, on)),
-        forge::CheckStatus::Pending => ("○", p.mark(Ink::Pending, on)),
+        forge::CheckStatus::Running => ("●", p.mark(Ink::Warning, on)),
+        forge::CheckStatus::Pending => ("○", p.mark(Ink::Warning, on)),
         forge::CheckStatus::Skipped => ("⊘", p.mark(Ink::TextMuted, on)),
     }
 }

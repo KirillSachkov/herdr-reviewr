@@ -7,8 +7,11 @@
 //! alone. Rules, in order:
 //!
 //! - A fill is a step or a tint off `base`. It softens toward `base` until body text reads on it,
-//!   but never into `base`: it stays visibly a fill.
-//! - Body text that still falls short lifts toward the contrast pole, on that fill only.
+//!   but never into `base`: it stays visibly a fill. The match highlight is the one solid fill:
+//!   it must be found at a glance, so it never softens.
+//! - Body text that still falls short lifts toward the contrast pole, on that fill only. On a
+//!   fill bright enough that the theme's background reads better than its text, text takes the
+//!   background's side and the opposite pole.
 //! - The secondary and muted tiers sit at fixed shares of the text's contrast, floored at their
 //!   minimums, so the three tiers keep their order and a visible step on every fill.
 //! - A colored ink keeps its official color wherever it clears its floor, and lifts toward the
@@ -21,9 +24,9 @@ use ratatui::style::Color;
 /// A color text or a glyph paints with, by what it means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ink {
-    /// Body text, file names, headings, the footer's status message.
+    /// Body text, file names, the footer's status message.
     Text,
-    /// Labels, inactive tabs, footer labels, inline code, other people's PR comment authors.
+    /// Labels, inactive tabs, footer labels, other people's PR comment authors.
     TextSecondary,
     /// Line numbers, placeholders, trails, empty-state hints.
     TextMuted,
@@ -36,9 +39,8 @@ pub enum Ink {
     Modified,
     Success,
     Danger,
+    /// Warnings, and checks still running or queued.
     Warning,
-    /// Running checks and drafts: in progress, not a problem.
-    Pending,
     /// The merged PR chip.
     Merged,
     /// Pane borders, rules, separators.
@@ -46,7 +48,7 @@ pub enum Ink {
 }
 
 /// Every ink, in table order.
-pub const INKS: [Ink; 14] = [
+pub const INKS: [Ink; 13] = [
     Ink::Text,
     Ink::TextSecondary,
     Ink::TextMuted,
@@ -58,13 +60,12 @@ pub const INKS: [Ink; 14] = [
     Ink::Success,
     Ink::Danger,
     Ink::Warning,
-    Ink::Pending,
     Ink::Merged,
     Ink::Border,
 ];
 
 /// A layer text sits on. Fills stack in one order (topmost first): selection, highlight,
-/// cursor, word emphasis, diff row, bar, the terminal background. A selection is text you
+/// cursor, word emphasis, diff row, bar or code chip, the terminal background. A selection is text you
 /// dragged over or a line range you picked for a comment: one fill, one meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
@@ -72,13 +73,15 @@ pub enum Fill {
     Base,
     /// Header, footer and fold rows.
     Bar,
+    /// Inline code's chip in rendered markdown.
+    Code,
     /// The cursor row in an unfocused pane.
     CursorInactive,
     /// The cursor row in the focused pane.
     Cursor,
     /// A text selection, or a line range picked for a comment.
     Selection,
-    /// A find or search match.
+    /// A find or search match: a solid block of the highlight hue.
     Highlight,
     Added,
     Removed,
@@ -89,9 +92,10 @@ pub enum Fill {
 }
 
 /// Every fill, in table order.
-pub const FILLS: [Fill; 10] = [
+pub const FILLS: [Fill; 11] = [
     Fill::Base,
     Fill::Bar,
+    Fill::Code,
     Fill::CursorInactive,
     Fill::Cursor,
     Fill::Selection,
@@ -181,7 +185,7 @@ impl Roles {
     }
 
     /// `ink` painting text on `on`: clears [`TEXT_FLOOR`] there ([`MARK_FLOOR`] for the muted
-    /// tier and pending).
+    /// tier).
     #[must_use]
     pub fn ink(&self, ink: Ink, on: Fill) -> Color {
         self.text[ink as usize][on as usize]
@@ -213,13 +217,13 @@ impl Roles {
                 let (t, m) = match ink {
                     Ink::Text => (tiers.text, tiers.text),
                     Ink::TextSecondary => (tiers.secondary, tiers.secondary),
-                    Ink::TextMuted | Ink::Pending => (tiers.muted, tiers.muted),
+                    Ink::TextMuted => (tiers.muted, tiers.muted),
                     Ink::Border => (tiers.border, tiers.border),
                     colored => {
                         let hue = hues.of(colored);
                         (
-                            lift(hue, bg, pole(p.cast), TEXT_FLOOR),
-                            lift(hue, bg, pole(p.cast), MARK_FLOOR),
+                            lift(hue, bg, pole_on(bg), TEXT_FLOOR),
+                            lift(hue, bg, pole_on(bg), MARK_FLOOR),
                         )
                     }
                 };
@@ -294,7 +298,9 @@ struct Tiers {
 
 impl Tiers {
     fn on(p: &Primitives, bg: Color) -> Self {
-        let text = lift(p.text, bg, pole(p.cast), TEXT_TARGET);
+        // Text keeps the theme's side unless the theme's background reads better on this fill.
+        let side = if contrast(p.text, bg) >= contrast(p.base, bg) { p.text } else { p.base };
+        let text = lift(side, bg, pole_on(bg), TEXT_TARGET);
         let tc = contrast(text, bg);
         let toward_bg = |target: f64| fade(text, bg, target);
         Tiers {
@@ -308,8 +314,9 @@ impl Tiers {
 
 /// Which fills each fill can sit on, in stacking order bottom up: a fill must read as a layer
 /// over every one of them.
-pub const STACKING: [(Fill, &[Fill]); 9] = [
+pub const STACKING: [(Fill, &[Fill]); 10] = [
     (Fill::Bar, &[Fill::Base]),
+    (Fill::Code, &[Fill::Base]),
     (Fill::CursorInactive, &[Fill::Base]),
     (Fill::Added, &[Fill::Base]),
     (Fill::Removed, &[Fill::Base]),
@@ -334,6 +341,12 @@ fn derive_fills(p: &Primitives, hues: &Hues, o: &Overrides) -> [Color; FILLS.len
             fills[fill as usize] = given;
             continue;
         }
+        // A match must be found at a glance, so it paints the highlight hue solid; its text
+        // takes whichever side reads on it.
+        if fill == Fill::Highlight {
+            fills[fill as usize] = hues.modified;
+            continue;
+        }
         let (toward, start) = recipe(p, hues, fill);
         let at = |t: f64| blend(p.base, toward, t);
         let mut t = start;
@@ -356,11 +369,11 @@ fn recipe(p: &Primitives, hues: &Hues, fill: Fill) -> (Color, f64) {
     let dark = p.cast == Cast::Dark;
     match fill {
         Fill::Base => (p.base, 0.0),
-        Fill::Bar => (pole(p.cast), 0.045),
+        Fill::Bar | Fill::Code => (pole(p.cast), 0.045),
         Fill::CursorInactive => (pole(p.cast), 0.09),
         Fill::Cursor => (pole(p.cast), 0.14),
         Fill::Selection => (saturated(hues.accent), if dark { 0.38 } else { 0.22 }),
-        Fill::Highlight => (hues.modified, if dark { 0.38 } else { 0.30 }),
+        Fill::Highlight => (hues.modified, 1.0),
         Fill::Added => (hues.added, if dark { 0.20 } else { 0.12 }),
         Fill::Removed => (hues.removed, if dark { 0.20 } else { 0.12 }),
         Fill::AddedEmph => (hues.added, if dark { 0.38 } else { 0.22 }),
@@ -374,6 +387,12 @@ fn pole(cast: Cast) -> Color {
         Cast::Dark => Color::Rgb(0xff, 0xff, 0xff),
         Cast::Light => Color::Rgb(0x00, 0x00, 0x00),
     }
+}
+
+/// The pole that reads best on `bg`: black on a bright fill, white on a dark one.
+fn pole_on(bg: Color) -> Color {
+    let (black, white) = (Color::Rgb(0, 0, 0), Color::Rgb(0xff, 0xff, 0xff));
+    if contrast(black, bg) >= contrast(white, bg) { black } else { white }
 }
 
 /// `fg` blended toward `toward` just far enough to clear `min` on `bg`; `fg` itself when it

@@ -193,13 +193,13 @@ fn catppuccin() -> Theme {
     // Catppuccin ships its own surfaces and fills, so they enter the roles as given.
     let fills = Overrides::default()
         .fill(Fill::Bar, hex(0x313244))
+        .fill(Fill::Code, hex(0x313244))
         .fill(Fill::CursorInactive, hex(0x45475a))
         .fill(Fill::Cursor, hex(0x585b70))
         .fill(Fill::Removed, hex(0x45232f))
         .fill(Fill::Added, hex(0x1f3a2a))
         .fill(Fill::RemovedEmph, hex(0x6e3446))
         .fill(Fill::AddedEmph, hex(0x30553f))
-        .fill(Fill::Highlight, hex(0x5c512b))
         .fill(Fill::Selection, hex(0x353d7d));
     Theme {
         name: "catppuccin",
@@ -581,17 +581,18 @@ mod tests {
             for on in FILLS {
                 let bg = roles.fill(on);
                 // 2: syntax colors keep their plain-background legibility on every fill. A dim
-                // comment-like gray is the hardest case.
+                // comment-like gray is the hardest case. A match repaints its text in `text`,
+                // so no syntax color sits on the highlight.
                 let gray = super::blend(prim.text, prim.base, 0.45);
                 let lifted = legible(gray, bg, prim.base, roles.ink(Ink::Text, on));
                 let want = contrast(gray, prim.base).min(TEXT_FLOOR) - 0.05;
-                if contrast(lifted, bg) < want {
+                if on != Fill::Highlight && contrast(lifted, bg) < want {
                     failures.push(format!("{name}: syntax gray on {on:?} below {want:.2}"));
                 }
                 // 2: text floors; 3: glyph floors.
                 for ink in INKS {
                     let floor = match ink {
-                        Ink::TextMuted | Ink::Pending | Ink::Border => MARK_FLOOR,
+                        Ink::TextMuted | Ink::Border => MARK_FLOOR,
                         _ => TEXT_FLOOR,
                     };
                     let c = contrast(roles.ink(ink, on), bg);
@@ -603,10 +604,12 @@ mod tests {
                         failures.push(format!("{name}: {ink:?} mark on {on:?} {m:.2} < 3"));
                     }
                 }
-                // 4: the tiers keep their order and a visible step.
+                // 4: the tiers keep their order and a visible step. Only `text` paints on a
+                // match, and a solid mid-tone highlight can't hold three tiers above the floor.
                 let tier = |ink| contrast(roles.ink(ink, on), bg);
                 let (t, s, m) = (tier(Ink::Text), tier(Ink::TextSecondary), tier(Ink::TextMuted));
-                if t < s * TIER_STEP - 0.01 || s < m * TIER_STEP - 0.01 {
+                let ordered = t >= s * TIER_STEP - 0.01 && s >= m * TIER_STEP - 0.01;
+                if on != Fill::Highlight && !ordered {
                     failures.push(format!("{name}: tiers on {on:?} {t:.2} / {s:.2} / {m:.2}"));
                 }
             }
@@ -637,6 +640,20 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    }
+
+    /// A match is a solid block of the theme's highlight hue, found at a glance, and its text
+    /// reads on it in every theme.
+    #[test]
+    fn a_match_is_a_solid_block_its_text_reads_on() {
+        use crate::roles::{Fill, Ink, TEXT_FLOOR, contrast};
+        for &(name, _) in NAMED {
+            let roles = *resolve(Some(name)).palette.roles();
+            let fill = roles.fill(Fill::Highlight);
+            assert_eq!(fill, roles.primitives().yellow, "{name}: the match is solid yellow");
+            let c = contrast(roles.ink(Ink::Text, Fill::Highlight), fill);
+            assert!(c >= TEXT_FLOOR, "{name}: match text {c:.2} < {TEXT_FLOOR}");
+        }
     }
 
     #[test]

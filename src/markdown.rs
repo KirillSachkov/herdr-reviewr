@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
@@ -418,7 +418,13 @@ impl Renderer<'_> {
                 }
             }
             Event::Code(t) if self.emitting() && !self.collecting_summary() => {
-                let style = self.current_style().fg(self.p.ink(Ink::TextSecondary, Fill::Base));
+                // Inline code sits on a chip, so it reads as code in every theme, in the
+                // syntax theme's code color where it sets one.
+                let fg = self.hl.markdown().inline_code.map_or_else(
+                    || self.p.ink(Ink::Text, Fill::Code),
+                    |c| self.content(c, Fill::Code),
+                );
+                let style = self.current_style().fg(fg).bg(self.p.fill(Fill::Code));
                 self.push_code_span(&t, &range, style);
             }
             Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
@@ -667,15 +673,23 @@ impl Renderer<'_> {
             .unwrap_or_else(|| Style::default().fg(self.p.ink(Ink::Text, Fill::Base)))
     }
 
-    /// Heading style: bold body text, deeper levels secondary. A heading is read, never
-    /// clicked, so it carries no accent.
+    /// Heading style: bold, in the syntax theme's color for that level, like the file's source
+    /// view. Where the theme sets none, body text, deeper levels secondary. A heading is read,
+    /// never clicked, so it never takes the accent.
     fn heading_style(&self, level: HeadingLevel) -> Style {
-        let ink = match level {
+        let fallback = match level {
             HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3 => Ink::Text,
             _ => Ink::TextSecondary,
         };
-        let fg = self.p.ink(ink, Fill::Base);
+        let fg = self.hl.markdown().headings[level as usize - 1]
+            .map_or_else(|| self.p.ink(fallback, Fill::Base), |c| self.content(c, Fill::Base));
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    }
+
+    /// A syntax theme's content color, lifted to the text floor on `on`.
+    fn content(&self, (r, g, b): crate::diff::Rgb, on: Fill) -> Color {
+        let toward = self.p.ink(Ink::Text, on);
+        crate::roles::lift(Color::Rgb(r, g, b), self.p.fill(on), toward, crate::roles::TEXT_FLOOR)
     }
 
     /// Close a link: when its visible text differs from the destination, append the
@@ -1660,7 +1674,7 @@ mod tests {
     use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
     use crate::theme::{self, Palette};
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use std::collections::HashSet;
 
@@ -1696,33 +1710,43 @@ mod tests {
             .unwrap_or_else(|| panic!("{t:?}"));
         assert!(!t[i].contains("<h3>"), "{t:?}");
         let span = lines[i].spans.iter().find(|s| s.content.contains("Greptile")).unwrap();
-        assert_eq!(
-            span.style.fg,
-            Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)),
-            "h3 is bold body text"
-        );
+        // Catppuccin's H3 yellow, the same as a `###` heading.
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xf9, 0xe2, 0xaf)), "h3 takes the h3 color");
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
         let j = t.iter().position(|l| l.contains("Confidence Score")).unwrap();
         let span = lines[j].spans.iter().find(|s| s.content.contains("Confidence")).unwrap();
-        assert_eq!(span.style.fg, Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xf9, 0xe2, 0xaf)));
     }
 
     #[test]
-    fn heading_is_bold_text_without_markers() {
+    fn heading_is_bold_in_its_theme_color_without_markers() {
         let (hl, p) = setup();
         let lines = render_lines("## Install", 80, &hl, &p);
         assert_eq!(texts(&lines), vec!["Install"]);
         let span = &lines[0].spans[1]; // [0] is the (empty) prefix
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(span.style.fg, Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
+        // Catppuccin's H2 peach.
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)));
     }
 
+    /// Each level takes the theme's color for it: Catppuccin's markdown rainbow, red through
+    /// lavender. A theme with no heading colors falls back to body text, deeper levels secondary.
     #[test]
-    fn deeper_headings_dim() {
+    fn each_heading_level_takes_its_theme_color() {
         let (hl, p) = setup();
-        let h4 = render_lines("#### Notes", 80, &hl, &p);
+        let rainbow = [0xf3_8b_a8, 0xfa_b3_87, 0xf9_e2_af, 0xa6_e3_a1, 0x74_c7_ec, 0xb4_be_fe];
+        for (level, rgb) in (1..=6).zip(rainbow) {
+            let md = format!("{} Title", "#".repeat(level));
+            let lines = render_lines(&md, 80, &hl, &p);
+            let [r, g, b] = [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8];
+            assert_eq!(lines[0].spans[1].style.fg, Some(Color::Rgb(r, g, b)), "h{level}");
+        }
+        let t = theme::resolve(Some("one-dark"));
+        let (hl, p) = (Highlighter::new(t.syntax), t.palette);
+        let fg = |md: &str| render_lines(md, 80, &hl, &p)[0].spans[1].style.fg;
+        assert_eq!(fg("## Title"), Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
         assert_eq!(
-            h4[0].spans[1].style.fg,
+            fg("#### Title"),
             Some(p.ink(crate::roles::Ink::TextSecondary, crate::roles::Fill::Base))
         );
     }
@@ -1738,15 +1762,17 @@ mod tests {
         assert!(find("d").style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 
+    /// Inline code sits on the code chip in the theme's code color: Catppuccin's green on
+    /// surface0.
     #[test]
-    fn inline_code_reads_as_secondary_text() {
+    fn inline_code_sits_on_a_chip_in_its_theme_color() {
         let (hl, p) = setup();
         let lines = render_lines("run `cargo test` now", 80, &hl, &p);
         let code = lines[0].spans.iter().find(|s| s.content.contains("cargo test")).unwrap();
-        assert_eq!(
-            code.style.fg,
-            Some(p.ink(crate::roles::Ink::TextSecondary, crate::roles::Fill::Base))
-        );
+        assert_eq!(code.style.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
+        assert_eq!(code.style.bg, Some(Color::Rgb(0x31, 0x32, 0x44)));
+        let prose = lines[0].spans.iter().find(|s| s.content.contains("run")).unwrap();
+        assert_eq!(prose.style.bg, None, "only the code wears the chip");
     }
 
     #[test]

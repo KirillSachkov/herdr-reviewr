@@ -32,6 +32,8 @@ use ratatui::style::{Color, Modifier};
 
 const W: u16 = 120;
 const H: u16 = 34;
+/// The markdown showcase is tall enough to show every element at once.
+const TALL: u16 = 63;
 
 const THEMES: &[&str] = &[
     "catppuccin",
@@ -64,6 +66,7 @@ const SCENES: &[Scene] = &[
     ("comments", scene_comment_list),
     ("find", scene_find),
     ("markdown", scene_markdown),
+    ("markdown-all", scene_markdown_all),
     ("selection", scene_selection),
     ("pr", scene_pr),
     ("quit", scene_quit),
@@ -77,7 +80,7 @@ fn main() {
         std::fs::create_dir_all(&dir).expect("out dir");
         for (name, scene) in SCENES {
             let app = scene(repo.path(), theme);
-            let html = frame_html(&app);
+            let html = frame_html(&app, if *name == "markdown-all" { TALL } else { H });
             std::fs::write(dir.join(format!("{name}.html")), html).expect("write fragment");
         }
     }
@@ -97,10 +100,12 @@ fn fixture_repo() -> tempfile::TempDir {
     git(&["config", "user.name", "snapshot"]);
     std::fs::write(dir.path().join("src.rs"), RUST_BEFORE).unwrap();
     std::fs::write(dir.path().join("README.md"), MD_BEFORE).unwrap();
+    std::fs::write(dir.path().join("GUIDE.md"), GUIDE_BEFORE).unwrap();
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "init"]);
     std::fs::write(dir.path().join("src.rs"), RUST_AFTER).unwrap();
     std::fs::write(dir.path().join("README.md"), MD_AFTER).unwrap();
+    std::fs::write(dir.path().join("GUIDE.md"), GUIDE_AFTER).unwrap();
     dir
 }
 
@@ -148,6 +153,127 @@ pub struct Item {
 const MD_BEFORE: &str = "# Orders\n\nTotals line items for one order.\n\n## Usage\n\n- Call `total` with the items.\n- The result is in cents.\n\nLegacy callers use `legacy_total`.\n";
 
 const MD_AFTER: &str = "# Orders\n\nTotals line items for one order, after discounts.\n\n## Usage\n\n- Call `total` with the items and a discount map.\n- The result is in cents.\n- Unknown SKUs get no discount.\n";
+
+const GUIDE_BEFORE: &str = r"# Heading one
+
+Body text with **bold**, *italic*, ***both***, ~~struck~~, `inline code` and a [link](https://example.com/docs). An autolink: <https://herdr.dev>.
+
+A paragraph that was removed.
+
+## Heading two
+
+### Heading three
+
+#### Heading four
+
+##### Heading five
+
+###### Heading six
+
+- A bullet
+- Another bullet
+  - A nested bullet
+    - Deeper still
+
+1. First step
+
+- [x] A done task
+- [ ] An open task
+
+> A quote with **bold** and `code`.
+>
+> > A nested quote.
+
+```rust
+fn total(items: &[Item]) -> u64 {
+    items.iter().map(|i| i.price * i.qty).sum() // cents
+}
+```
+
+| Column | Left | Right |
+|:--|:--|--:|
+| one | `code` | 1 |
+| two | **bold** | 22 |
+
+---
+
+**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-red?style=flat)</sub></sub>  A P1 finding**
+
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  A P2 finding**
+
+**<sub><sub>![P3 Badge](https://img.shields.io/badge/P3-blue?style=flat)</sub></sub>  A P3 finding**
+
+![A diagram](docs/diagram.png)
+
+<details><summary>Collapsed details</summary>
+
+Hidden body.
+
+</details>
+
+A line with a hard break  
+and its continuation.
+";
+
+const GUIDE_AFTER: &str = r"# Heading one
+
+Body text with **bold**, *italic*, ***both***, ~~struck~~, `inline code` and a [link](https://example.com/docs). An autolink: <https://herdr.dev>.
+
+## Heading two
+
+### Heading three
+
+#### Heading four
+
+##### Heading five
+
+###### Heading six
+
+- A bullet
+- Another bullet, edited
+  - A nested bullet
+    - Deeper still
+
+1. First step
+2. Second step, added
+
+- [x] A done task
+- [ ] An open task
+
+> A quote with **bold** and `code`.
+>
+> > A nested quote.
+
+```rust
+fn total(items: &[Item]) -> u64 {
+    items.iter().map(|i| i.price * i.qty).sum() // cents
+}
+```
+
+| Column | Left | Right |
+|:--|:--|--:|
+| one | `code` | 1 |
+| two | **bold** | 22 |
+
+---
+
+**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-red?style=flat)</sub></sub>  A P1 finding**
+
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  A P2 finding**
+
+**<sub><sub>![P3 Badge](https://img.shields.io/badge/P3-blue?style=flat)</sub></sub>  A P3 finding**
+
+![A diagram](docs/diagram.png)
+
+<details><summary>Collapsed details</summary>
+
+Hidden body.
+
+</details>
+
+A line with a hard break  
+and its continuation.
+";
 
 fn app_on(repo: &Path, theme: &str) -> App {
     let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
@@ -219,6 +345,14 @@ fn scene_find(repo: &Path, theme: &str) -> App {
 fn scene_markdown(repo: &Path, theme: &str) -> App {
     let mut app = app_on(repo, theme);
     open(&mut app, "README.md");
+    app.toggle_rendered();
+    app
+}
+
+/// Every markdown element rendered at once, with a changed, an added and a removed line.
+fn scene_markdown_all(repo: &Path, theme: &str) -> App {
+    let mut app = app_on(repo, theme);
+    open(&mut app, "GUIDE.md");
     app.toggle_rendered();
     app
 }
@@ -320,8 +454,8 @@ impl ExportTarget for NoClipboard {
 
 /// The frame as a `<pre>` of styled runs. `Color::Reset` is the terminal's own color, which
 /// the precondition makes the theme's `base` and `text`.
-fn frame_html(app: &App) -> String {
-    let mut terminal = Terminal::new(TestBackend::new(W, H)).expect("terminal");
+fn frame_html(app: &App, h: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(W, h)).expect("terminal");
     terminal.draw(|f| ui::render(f, app)).expect("draw");
     let buf: Buffer = terminal.backend().buffer().clone();
     let p = app.palette();
@@ -330,7 +464,7 @@ fn frame_html(app: &App) -> String {
         hex(p.ink(herdr_reviewr::roles::Ink::Text, herdr_reviewr::roles::Fill::Base), "#fff"),
     );
     let mut html = format!("<pre class=\"frame\" style=\"background:{base};color:{text}\">");
-    for y in 0..H {
+    for y in 0..h {
         let mut run = String::new();
         let mut style = String::new();
         for x in 0..W {
