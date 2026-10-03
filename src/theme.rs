@@ -302,12 +302,12 @@ mod tests {
     }
 
     /// A text tier resolved on the background resolves as that tier on a fill: rendered
-    /// markdown's muted and secondary text keep their order on the cursor row.
+    /// markdown's muted and secondary text and its rules keep their order on the cursor row.
     #[test]
     fn a_text_tier_resolves_as_its_tier_on_a_fill() {
         for name in NAMES {
             let p = resolve(Some(name)).palette;
-            for ink in [Ink::Text, Ink::TextSecondary, Ink::TextMuted] {
+            for ink in [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Border] {
                 let on_base = p.ink(ink, Fill::Base);
                 assert_eq!(p.legible(on_base, Fill::Cursor), p.ink(ink, Fill::Cursor), "{name}");
             }

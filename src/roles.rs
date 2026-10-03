@@ -76,7 +76,7 @@ pub const INKS: [Ink; 13] = [
 const TIERS: [Ink; 4] = [Ink::Text, Ink::TextSecondary, Ink::TextMuted, Ink::Border];
 
 /// A layer text sits on. A selection is text you dragged over or a line range you picked for a
-/// comment: one fill, one meaning. [`LAYERS`] keeps every stack the UI paints readable.
+/// comment: one fill, one meaning. [`LAYERS`] keeps every stack the UI paints visibly layered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Fill {
     /// The terminal's own background, which the theme's `base` stands for. Never painted.
@@ -240,8 +240,8 @@ impl Palette {
     /// A content color — syntax, a theme's markdown heading — painted on `on`, as legible there
     /// as it is on the plain background (capped at [`TEXT_FLOOR`]), its hue kept. A text tier
     /// resolved on the background resolves as that tier on `on`, so rendered markdown's body,
-    /// secondary and muted text and its rules keep their order there. Non-RGB colors are the terminal's own
-    /// defaults and pass through.
+    /// secondary and muted text and its rules keep their order there. Non-RGB colors are the
+    /// terminal's own defaults and pass through.
     #[must_use]
     pub fn legible(&self, fg: Color, on: Fill) -> Color {
         if on == Fill::Base || !matches!(fg, Color::Rgb(..)) {
