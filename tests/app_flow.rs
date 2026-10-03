@@ -6574,7 +6574,7 @@ fn a_double_click_copies_the_word_and_settles_its_highlight() {
     terminal.draw(|f| herdr_reviewr::ui::render(f, &app)).unwrap();
     let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, &app);
     let cell = terminal.backend().buffer().cell((inner.x + 5, inner.y)).unwrap();
-    assert_eq!(cell.style().bg, Some(app.palette().sel_bg));
+    assert_eq!(cell.style().bg, Some(app.palette().fill(herdr_reviewr::roles::Fill::Selection)));
 
     // Any keypress clears the settled highlight.
     press(&mut app, &Keymap::default(), KeyCode::Char('j'));

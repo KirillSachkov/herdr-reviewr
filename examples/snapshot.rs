@@ -325,7 +325,10 @@ fn frame_html(app: &App) -> String {
     terminal.draw(|f| ui::render(f, app)).expect("draw");
     let buf: Buffer = terminal.backend().buffer().clone();
     let p = app.palette();
-    let (base, text) = (hex(p.base, "#000"), hex(p.text, "#fff"));
+    let (base, text) = (
+        hex(p.fill(herdr_reviewr::roles::Fill::Base), "#000"),
+        hex(p.ink(herdr_reviewr::roles::Ink::Text, herdr_reviewr::roles::Fill::Base), "#fff"),
+    );
     let mut html = format!("<pre class=\"frame\" style=\"background:{base};color:{text}\">");
     for y in 0..H {
         let mut run = String::new();

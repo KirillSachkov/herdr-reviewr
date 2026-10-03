@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::highlight::Highlighter;
+use crate::roles::{Fill, Ink};
 use crate::theme::Palette;
 
 /// Block indents (quote bars, list levels) deeper than this render at the cap, so
@@ -417,7 +418,7 @@ impl Renderer<'_> {
                 }
             }
             Event::Code(t) if self.emitting() && !self.collecting_summary() => {
-                let style = self.current_style().fg(self.p.orange);
+                let style = self.current_style().fg(self.p.ink(Ink::TextSecondary, Fill::Base));
                 self.push_code_span(&t, &range, style);
             }
             Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
@@ -435,7 +436,10 @@ impl Renderer<'_> {
                 let budget = self.budget(self.prefix(None).0.width());
                 let line = Line::from(vec![
                     self.prefix(None).0,
-                    Span::styled("─".repeat(budget), Style::default().fg(self.p.dim2)),
+                    Span::styled(
+                        "─".repeat(budget),
+                        Style::default().fg(self.p.mark(Ink::Border, Fill::Base)),
+                    ),
                 ]);
                 self.push_plain_line(line);
                 self.needs_blank = true;
@@ -504,7 +508,7 @@ impl Renderer<'_> {
                 let at = self.chunk_len();
                 self.urls.push(std::sync::Arc::from(dest_url.as_ref()));
                 self.links.push((self.urls.len() - 1, at));
-                let blue = self.p.blue;
+                let blue = self.p.ink(Ink::Accent, Fill::Base);
                 self.push_style(|s| s.fg(blue).add_modifier(Modifier::UNDERLINED));
             }
             Tag::Image { dest_url, .. } => {
@@ -657,16 +661,20 @@ impl Renderer<'_> {
     }
 
     fn current_style(&self) -> Style {
-        self.styles.last().copied().unwrap_or_else(|| Style::default().fg(self.p.text))
+        self.styles
+            .last()
+            .copied()
+            .unwrap_or_else(|| Style::default().fg(self.p.ink(Ink::Text, Fill::Base)))
     }
 
-    /// Heading style: bold in an accent, deeper levels dimmer.
+    /// Heading style: bold body text, deeper levels secondary. A heading is read, never
+    /// clicked, so it carries no accent.
     fn heading_style(&self, level: HeadingLevel) -> Style {
-        let fg = match level {
-            HeadingLevel::H1 | HeadingLevel::H2 => self.p.purple,
-            HeadingLevel::H3 => self.p.blue,
-            _ => self.p.dim0,
+        let ink = match level {
+            HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3 => Ink::Text,
+            _ => Ink::TextSecondary,
         };
+        let fg = self.p.ink(ink, Fill::Base);
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
     }
 
@@ -680,7 +688,7 @@ impl Renderer<'_> {
         let dest = self.urls[id].clone();
         let text: String = self.chunks_mut()[start..].iter().map(|c| c.text.as_str()).collect();
         if !dest.is_empty() && text != *dest {
-            let style = Style::default().fg(self.p.dim2);
+            let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
             // The dim destination shares the click target with the text.
             self.push_chunk(format!(" ({})", sanitize(&dest)), style, Some(id));
         }
@@ -703,9 +711,9 @@ impl Renderer<'_> {
     fn emit_image(&mut self, alt: &str, dest: &str) {
         if let Some(label) = badge_label(alt) {
             let fg = match label {
-                "P1" => self.p.orange,
-                "P2" => self.p.yellow,
-                _ => self.p.dim0,
+                "P1" => self.p.ink(Ink::Danger, Fill::Base),
+                "P2" => self.p.ink(Ink::Warning, Fill::Base),
+                _ => self.p.ink(Ink::TextSecondary, Fill::Base),
             };
             let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             self.push_chunk(label.to_string(), style, self.current_link());
@@ -714,7 +722,7 @@ impl Renderer<'_> {
         let alt = sanitize(alt);
         let dest = sanitize(dest);
         let text = if alt.is_empty() { "⧉ image".to_string() } else { format!("⧉ {alt}") };
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         let link = if dest.is_empty() {
             self.current_link()
         } else {
@@ -869,8 +877,8 @@ impl Renderer<'_> {
         let glyph = if open { "▾ " } else { "▸ " };
         let (first, _) = self.prefix(None);
         let off = first.width();
-        let glyph_style = Style::default().fg(self.p.dim2);
-        let text_style = Style::default().fg(self.p.text);
+        let glyph_style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
+        let text_style = Style::default().fg(self.p.ink(Ink::Text, Fill::Base));
         let summary_w = summary.width();
         self.pending_details = Some(DetailsHit {
             start: off,
@@ -899,7 +907,7 @@ impl Renderer<'_> {
         let marker = marker.unwrap_or("");
         let first = format!("{bars}{gap}{indent}{marker}");
         let cont = format!("{bars}{gap}{indent}{}", " ".repeat(marker.width()));
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         (Span::styled(first, style), Span::styled(cont, style))
     }
 
@@ -1030,7 +1038,10 @@ impl Renderer<'_> {
             self.out.lines.push(if bars.is_empty() {
                 Line::default()
             } else {
-                Line::from(Span::styled(bars, Style::default().fg(self.p.dim2)))
+                Line::from(Span::styled(
+                    bars,
+                    Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base)),
+                ))
             });
         }
         self.needs_blank = false;
@@ -1130,7 +1141,7 @@ impl Renderer<'_> {
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         let first = Span::styled(format!("{}{extra_indent}", first.content), style);
         let cont = Span::styled(format!("{}{extra_indent}", cont.content), style);
         let budget = self.budget(cont.width());
@@ -1187,7 +1198,7 @@ impl Renderer<'_> {
             Some(k) => format!("⧉ mermaid {k}"),
             None => "⧉ mermaid".to_string(),
         };
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         self.emit_fragments(vec![(text, style)], "");
     }
 
@@ -1255,7 +1266,7 @@ impl Renderer<'_> {
 
         if deficit > 0 {
             // Over-wide at every floor: the table renders as its source text instead.
-            let style = Style::default().fg(self.p.dim2);
+            let style = Style::default().fg(self.p.ink(Ink::TextSecondary, Fill::Base));
             let src = self.source.get(table.range.clone()).unwrap_or("");
             let first_line = self.src_line(table.range.start);
             for (i, src_line) in src.trim_end_matches('\n').split('\n').enumerate() {
@@ -1267,7 +1278,7 @@ impl Renderer<'_> {
             return;
         }
 
-        let dim = Style::default().fg(self.p.dim2);
+        let dim = Style::default().fg(self.p.mark(Ink::Border, Fill::Base));
         for (r, row) in table.rows.iter().enumerate() {
             let head = r < table.head_rows;
             let style_of =
@@ -1685,28 +1696,35 @@ mod tests {
             .unwrap_or_else(|| panic!("{t:?}"));
         assert!(!t[i].contains("<h3>"), "{t:?}");
         let span = lines[i].spans.iter().find(|s| s.content.contains("Greptile")).unwrap();
-        assert_eq!(span.style.fg, Some(p.blue), "h3 uses the H3 accent");
+        assert_eq!(
+            span.style.fg,
+            Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)),
+            "h3 is bold body text"
+        );
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
         let j = t.iter().position(|l| l.contains("Confidence Score")).unwrap();
         let span = lines[j].spans.iter().find(|s| s.content.contains("Confidence")).unwrap();
-        assert_eq!(span.style.fg, Some(p.blue));
+        assert_eq!(span.style.fg, Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
     }
 
     #[test]
-    fn heading_is_bold_accent_without_markers() {
+    fn heading_is_bold_text_without_markers() {
         let (hl, p) = setup();
         let lines = render_lines("## Install", 80, &hl, &p);
         assert_eq!(texts(&lines), vec!["Install"]);
         let span = &lines[0].spans[1]; // [0] is the (empty) prefix
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(span.style.fg, Some(p.purple));
+        assert_eq!(span.style.fg, Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base)));
     }
 
     #[test]
     fn deeper_headings_dim() {
         let (hl, p) = setup();
         let h4 = render_lines("#### Notes", 80, &hl, &p);
-        assert_eq!(h4[0].spans[1].style.fg, Some(p.dim0));
+        assert_eq!(
+            h4[0].spans[1].style.fg,
+            Some(p.ink(crate::roles::Ink::TextSecondary, crate::roles::Fill::Base))
+        );
     }
 
     #[test]
@@ -1721,11 +1739,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_gets_the_code_tint() {
+    fn inline_code_reads_as_secondary_text() {
         let (hl, p) = setup();
         let lines = render_lines("run `cargo test` now", 80, &hl, &p);
         let code = lines[0].spans.iter().find(|s| s.content.contains("cargo test")).unwrap();
-        assert_eq!(code.style.fg, Some(p.orange));
+        assert_eq!(
+            code.style.fg,
+            Some(p.ink(crate::roles::Ink::TextSecondary, crate::roles::Fill::Base))
+        );
     }
 
     #[test]
@@ -1745,7 +1766,7 @@ mod tests {
         // `let` keyword takes a syntax color different from the plain text color.
         let colors: Vec<_> = lines[0].spans.iter().filter_map(|s| s.style.fg).collect();
         assert!(colors.len() > 2, "rust tokenizes into several colored spans: {colors:?}");
-        assert!(colors.iter().any(|c| *c != p.text));
+        assert!(colors.iter().any(|c| Some(*c) != Some(p.ink(crate::roles::Ink::Text, crate::roles::Fill::Base))));
     }
 
     #[test]
@@ -1765,7 +1786,10 @@ mod tests {
         let text = text_of(&lines[0]);
         assert_eq!(text, "see the run (https://ci.example/1)");
         let dest = lines[0].spans.iter().find(|s| s.content.contains("ci.example")).unwrap();
-        assert_eq!(dest.style.fg, Some(p.dim2));
+        assert_eq!(
+            dest.style.fg,
+            Some(p.ink(crate::roles::Ink::TextMuted, crate::roles::Fill::Base))
+        );
         let label = lines[0].spans.iter().find(|s| s.content.contains("the run")).unwrap();
         assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -2011,8 +2035,12 @@ mod tests {
             &hl,
             &p,
         );
-        let named =
-            [p.text, p.dim0, p.dim2, p.dim1, p.purple, p.blue, p.orange, p.red, p.green, p.yellow];
+        let named: Vec<_> = crate::roles::INKS
+            .iter()
+            .flat_map(|&ink| {
+                crate::roles::FILLS.iter().flat_map(move |&on| [p.ink(ink, on), p.mark(ink, on)])
+            })
+            .collect();
         for line in &lines {
             for span in &line.spans {
                 if let Some(fg) = span.style.fg {
@@ -2409,7 +2437,10 @@ mod tests {
         assert!(!t.contains("<sub>"), "{t}");
         assert!(!t.contains("⧉"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P2").unwrap();
-        assert_eq!(chip.style.fg, Some(p.yellow));
+        assert_eq!(
+            chip.style.fg,
+            Some(p.ink(crate::roles::Ink::Warning, crate::roles::Fill::Base))
+        );
         assert!(chip.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -2423,7 +2454,7 @@ mod tests {
         assert!(t.contains("Backfill misses live updates"), "{t}");
         assert!(!t.contains("<img"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P1").unwrap();
-        assert_eq!(chip.style.fg, Some(p.orange));
+        assert_eq!(chip.style.fg, Some(p.ink(crate::roles::Ink::Danger, crate::roles::Fill::Base)));
     }
 
     #[test]
