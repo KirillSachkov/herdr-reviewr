@@ -1036,6 +1036,21 @@ mod tests {
     }
 
     #[test]
+    fn goto_line_defaults_to_colon_and_rebinds() {
+        use crate::keymap::{Action, Key};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "theme = \"catppuccin\"\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain(':')), Some(Action::GotoLine));
+        assert_eq!(config.to_json()["keybindings"]["goto-line"], serde_json::json!([":"]));
+        std::fs::write(&path, "[keybindings]\ngoto-line = [\"L\"]\n").unwrap();
+        let config = super::plugin_config_in(dir.path()).unwrap();
+        assert_eq!(config.keymap().action_for(Key::plain('L')), Some(Action::GotoLine));
+        assert_eq!(config.keymap().action_for(Key::plain(':')), None);
+    }
+
+    #[test]
     fn find_binds_to_a_chord_and_round_trips() {
         use crate::keymap::{Action, Key};
         let dir = tempfile::tempdir().unwrap();
@@ -1058,13 +1073,6 @@ mod tests {
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);
         // The `alt+` chord serializes back in config syntax, not the glyph.
         assert_eq!(config.to_json()["keybindings"]["find"], serde_json::json!(["alt+x"]));
-
-        // `:` jumps to a line by default and rebinds like any action.
-        assert_eq!(bindings["goto-line"], serde_json::json!([":"]));
-        std::fs::write(&path, "[keybindings]\ngoto-line = [\"L\"]\n").unwrap();
-        let config = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(config.keymap().action_for(Key::plain('L')), Some(Action::GotoLine));
-        assert_eq!(config.keymap().action_for(Key::plain(':')), None);
 
         // A malformed chord is an invalid value.
         std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();

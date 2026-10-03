@@ -9579,17 +9579,10 @@ fn a_selected_find_match_reads_on_the_selection() {
     }
 }
 
-/// One frame's scroll settle, as the frame loop runs it: a jump to a named line centers, any
-/// other move nudges, then the offset bounds. One display row per logical row.
+/// One frame's scroll settle through the frame loop's own step, one display row per logical row.
 fn settle_frame(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
-    let nudge = std::mem::take(&mut app.reveal_diff);
-    if std::mem::take(&mut app.reveal_center) {
-        app.center_diff_cursor(&heights, viewport);
-    } else if nudge {
-        app.reveal_diff_cursor(&heights, viewport);
-    }
-    app.bound_diff_scroll(&heights, viewport);
+    app.settle_diff_scroll(&heights, viewport);
 }
 
 /// `:N` lands on the new side's line N in the Changes diff: a folded line opens its fold, a
@@ -9610,6 +9603,8 @@ fn goto_line_lands_on_the_new_sides_line_in_the_changes_diff() {
     r.write("m.rs", &base.replace("last = 1\ngone\n", "last = total\n"));
     let mut app = app_on(&r);
     let new_no = |app: &App| app.visible[app.diff_cursor].new_no();
+
+    assert_eq!(app.line_count(), 12, "the new side's lines, the folded head among them");
 
     // Line 1 hides in the leading fold: the jump opens it and lands there.
     assert!(app.visible.iter().any(|row| matches!(row, Row::Fold { .. })));
@@ -9639,7 +9634,7 @@ fn goto_line_lands_on_the_new_sides_line_in_the_changes_diff() {
     assert_eq!((app.diff_cursor, app.visible.len()), (cursor, len));
 }
 
-/// A file with no new-side lines numbers by its old side.
+/// A file with no new-side lines numbers by its old side, its count too.
 #[test]
 fn goto_line_in_a_deleted_file_lands_on_the_old_line() {
     let r = Repo::init();
@@ -9647,6 +9642,7 @@ fn goto_line_in_a_deleted_file_lands_on_the_old_line() {
     r.commit_all("init");
     std::fs::remove_file(r.path_buf().join("gone.rs")).unwrap();
     let mut app = app_on(&r);
+    assert_eq!(app.line_count(), 3);
     app.goto_line(2);
     assert_eq!(app.visible[app.diff_cursor].old_no(), Some(2));
     assert!(app.visible[app.diff_cursor].text().contains("two"));
@@ -9684,6 +9680,24 @@ fn goto_line_centers_an_off_screen_line_and_keeps_an_on_screen_one() {
     app.goto_line(52);
     settle_frame(&mut app, 10);
     assert_eq!(app.diff_scroll, 45, "an on-screen line leaves the view still");
+
+    // Up the file too: line 20 sits mid-pane above the old view.
+    app.goto_line(20);
+    settle_frame(&mut app, 10);
+    assert_eq!(app.diff_scroll, 15);
+
+    // Heights, not rows: a 3-row wrapped line above the target fills its share of the half.
+    let mut heights = vec![1usize; app.visible.len()];
+    heights[47] = 3;
+    (app.diff_cursor, app.diff_scroll) = (49, 0);
+    app.center_diff_cursor(&heights, 10);
+    assert_eq!(app.diff_scroll, 47, "line 49's 1 row and line 48's 3 fill the 4 above");
+
+    // A target taller than the pane starts at the top.
+    heights[49] = 15;
+    (app.diff_cursor, app.diff_scroll) = (49, 0);
+    app.center_diff_cursor(&heights, 10);
+    assert_eq!(app.diff_scroll, 49);
 }
 
 /// Rendered markdown lands on the block holding the line; a line inside a collapsed `<details>`
@@ -9707,6 +9721,36 @@ fn goto_line_in_rendered_markdown_lands_on_its_block_and_opens_details() {
     assert!(!app.visible.iter().any(|row| row.text().contains("hidden line")), "collapsed");
     app.goto_line(9);
     assert!(text(&app).contains("hidden line"), "{}", text(&app));
+
+    // The blank line 5 between blocks belongs to the next block; past the end, the last block.
+    app.goto_line(5);
+    assert!(text(&app).contains("More"), "{}", text(&app));
+    app.goto_line(999);
+    assert!(text(&app).contains("last paragraph"), "{}", text(&app));
+    assert_eq!(app.line_count(), 13, "the source's lines");
+}
+
+/// A line inside nested collapsed `<details>` opens every one that hides it; the same jump
+/// works rendered in All files.
+#[test]
+fn goto_line_opens_nested_details_in_all_files() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    let doc = "# Doc\n\n<details>\n<summary>Outer</summary>\n\n<details>\n<summary>Inner</summary>\n\ndeep line\n\n</details>\n\n</details>\n";
+    r.write("doc.md", doc);
+    r.commit_all("init");
+    let mut app = app_on_rendered(&r);
+    enter_tab(&mut app, Tab::AllFiles);
+    let row = app
+        .file_rows
+        .iter()
+        .position(|f| f.file_index().is_some_and(|i| app.entries[i].path == "doc.md"))
+        .unwrap();
+    app.select_file(row).unwrap();
+    assert!(app.rendered_active());
+    assert!(!app.visible.iter().any(|row| row.text().contains("deep line")), "collapsed");
+    app.goto_line(9);
+    assert!(app.visible[app.diff_cursor].text().contains("deep line"));
 }
 
 /// A repo with one changed 30-line file, `src/m.rs`: a fold hides its head, a change at the end.
@@ -9718,8 +9762,10 @@ fn line_field_repo() -> Repo {
         writeln!(text, "line {i}").unwrap();
     }
     r.write("src/m.rs", &text);
+    r.write("src/n.rs", "one\n");
     r.commit_all("init");
     r.write("src/m.rs", &text.replace("line 30", "line 30 edited"));
+    r.write("src/n.rs", "one\ntwo\n");
     r
 }
 
@@ -9754,7 +9800,13 @@ fn the_line_field_follows_its_event_table() {
     assert_eq!(app.tab, Tab::Changes, "a digit never switches tab while the field is open");
     assert_eq!(place(&app), before, "nothing moves before enter");
 
-    // A refresh of the same file keeps the field and its number.
+    // A refresh of the same file, its content changed, keeps the field and its number.
+    r.write(
+        "src/m.rs",
+        &std::fs::read_to_string(r.path_buf().join("src/m.rs"))
+            .unwrap()
+            .replace("line 2\n", "line 2 edited\n"),
+    );
     common::land_world(&mut app);
     assert!(app.line_open());
     assert_eq!(app.find.as_ref().unwrap().query, "26");
@@ -9808,30 +9860,139 @@ fn the_line_field_is_silent_where_it_cannot_work() {
     assert!(!offered(&app));
 }
 
-/// Paste takes the line part of `path:line[:col]` when the path names the open file, the first
-/// number of any other text, and refuses a path to another file until the next edit.
+/// Paste takes the line from a location — `path:line`, `:line:col`, a range, wrapped in backticks
+/// or followed by punctuation — when its path names the open file, in either direction of the
+/// suffix; a location in another file refuses and keeps the number. Text with no location gives
+/// its first standalone number.
 #[test]
 fn the_line_field_takes_the_line_from_a_pasted_location() {
     let r = line_field_repo();
     let mut app = app_on(&r);
     let keymap = Keymap::default();
-    let query = |app: &App| app.find.as_ref().unwrap().query.clone();
-    let notice = |app: &App| app.find.as_ref().unwrap().notice.clone();
+    let field = |app: &App| {
+        let f = app.find.as_ref().unwrap();
+        (f.query.clone(), app.line_refusal().map(str::to_string))
+    };
+    // The open file is `src/m.rs`.
+    assert_eq!(app.diff_path.as_deref(), Some("src/m.rs"));
     press(&mut app, &keymap, KeyCode::Char(':'));
+    let took = |line: &str| (line.to_string(), None::<String>);
+    for (pasted, want) in [
+        ("src/m.rs:12:4", took("12")),
+        ("`src/m.rs:12`", took("12")),
+        ("see src/m.rs:13.", took("13")),
+        ("src/m.rs:10-20", took("10")),
+        ("/home/me/repo/src/m.rs:7", took("7")),
+        ("m.rs:5", took("5")),
+        ("./src/m.rs:6", took("6")),
+        ("1337:12", took("1337")),
+        ("see line 21, please", took("21")),
+    ] {
+        app.input_paste(pasted);
+        assert_eq!(field(&app), want, "{pasted}");
+    }
 
-    app.input_paste("src/m.rs:12:4");
-    assert_eq!((query(&app), notice(&app)), ("12".to_string(), None));
-    app.input_paste("/home/me/repo/src/m.rs:7");
-    assert_eq!(query(&app), "7", "a path ending in the open file's path names it");
-    app.input_paste("see line 21, please");
-    assert_eq!(query(&app), "21");
-
-    app.input_paste("src/other.rs:5");
-    assert_eq!(notice(&app).as_deref(), Some("src/other.rs isn't open"));
+    // A location in another file refuses and keeps the number; Enter waits on an edit.
+    for (pasted, path) in [
+        ("src/n.rs:5", "src/n.rs"),
+        ("error: src/n.rs:5", "src/n.rs"),
+        ("`src/n.rs:12`", "src/n.rs"),
+        ("src/v2/other.rs:10-20", "src/v2/other.rs"),
+        ("rc/m.rs:5", "rc/m.rs"),
+    ] {
+        app.input_paste(pasted);
+        let refusal = format!("{path} isn't open");
+        assert_eq!(field(&app), ("21".to_string(), Some(refusal)), "{pasted}");
+    }
     let before = app.diff_cursor;
     press(&mut app, &keymap, KeyCode::Enter);
     assert!(app.line_open(), "enter does nothing while the paste is refused");
     assert_eq!(app.diff_cursor, before);
     find_type(&mut app, &keymap, "3");
-    assert_eq!((query(&app), notice(&app)), ("3".to_string(), None), "an edit answers the refusal");
+    assert_eq!(field(&app), ("213".to_string(), None), "an edit answers the refusal");
+
+    // A path with no line has no number to give; the field stays as it was.
+    app.input_paste("src/v2/other.rs");
+    assert_eq!(field(&app), ("213".to_string(), None));
+}
+
+/// Past the end lands on the new side's last line even when the file's tail was deleted, and a
+/// number too long for any file is past the end, not nothing.
+#[test]
+fn the_line_field_lands_past_the_end_on_the_last_new_line() {
+    let r = Repo::init();
+    r.write("t.rs", "a\nb\nc\nd\n");
+    r.commit_all("init");
+    r.write("t.rs", "a\nb\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.goto_line(99);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2), "not the deleted tail");
+
+    app.diff_cursor = 0;
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    find_type(&mut app, &keymap, "99999999999");
+    press(&mut app, &keymap, KeyCode::Enter);
+    assert_eq!(app.visible[app.diff_cursor].new_no(), Some(2));
+}
+
+/// The line field holds only digits: an alt chord types nothing, and the footer offers `enter
+/// go` only for a line Enter would jump to.
+#[test]
+fn the_line_field_holds_digits_and_offers_enter_only_for_a_line() {
+    use herdr_reviewr::app::FooterAction;
+    let r = line_field_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let go = |app: &App| app.footer_bands().iter().any(|&(a, _)| a == FooterAction::LineGo);
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    find_type(&mut app, &keymap, "12");
+    let alt_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT);
+    handle_key(&mut app, alt_x, Rect::new(0, 0, 120, 40), &keymap).unwrap();
+    assert_eq!(app.find.as_ref().unwrap().query, "12", "an alt chord types nothing");
+    assert!(go(&app));
+    app.input_paste("0");
+    assert!(!go(&app), "`0` closes on Enter, so the footer offers only esc");
+}
+
+/// The field is typed for the file and tab it opened over: opening another file, or any tab,
+/// closes it, by key or by click; the PR tab closes find too, which it cannot draw.
+#[test]
+fn the_line_field_closes_when_its_file_or_tab_changes() {
+    use herdr_reviewr::app::Tab;
+    let r = Repo::init();
+    r.write("m.rs", "one\n");
+    r.write("n.rs", "one\n");
+    r.commit_all("init");
+    r.write("m.rs", "one\ntwo\n");
+    r.write("n.rs", "one\ntwo\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let row_of = |app: &App, path: &str| {
+        app.file_rows
+            .iter()
+            .position(|f| f.file_index().is_some_and(|i| app.entries[i].path == path))
+            .unwrap()
+    };
+
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    find_type(&mut app, &keymap, "2");
+    let other = row_of(&app, "n.rs");
+    app.select_file(other).unwrap();
+    assert!(!app.line_open(), "another file closes the field");
+
+    // All files with a file already open there: the tab switch closes it too.
+    enter_tab(&mut app, Tab::AllFiles);
+    let m = row_of(&app, "m.rs");
+    app.select_file(m).unwrap();
+    enter_tab(&mut app, Tab::Changes);
+    press(&mut app, &keymap, KeyCode::Char(':'));
+    app.set_tab(Tab::AllFiles).unwrap();
+    assert!(!app.line_open(), "a tab switch closes the field");
+
+    // The PR tab draws no band: find closes there too, so no key falls into a hidden field.
+    enter_tab(&mut app, Tab::Changes);
+    open_find(&mut app, &keymap);
+    app.set_tab(Tab::Pr).unwrap();
+    assert_eq!(app.mode, Mode::Normal, "the PR tab closes find");
 }

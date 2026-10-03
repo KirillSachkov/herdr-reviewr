@@ -1947,11 +1947,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         wrap: app.wrap,
         focused: app.focus == Focus::Diff,
         pal: p,
-        find: app
-            .find
-            .as_ref()
-            .filter(|f| f.kind == crate::app::BandKind::Text)
-            .map(|f| (f.query.as_str(), crate::app::find_case_sensitive(&f.query))),
+        find: app.find_query().map(|q| (q, crate::app::find_case_sensitive(q))),
         expand_hint: &expand_hint,
         rendered: app.rendered_lines(),
         see: &see,
@@ -2601,11 +2597,17 @@ fn cell_span(
 fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let Some(f) = app.find.as_ref() else { return };
     let p = app.palette();
-    let line_field = f.kind == crate::app::BandKind::Line;
-    let (count, count_style) = if let Some(notice) = &f.notice {
-        (notice.clone(), Style::default().fg(p.ink(Ink::Warning, Fill::Base)))
+    let line_field = app.line_open();
+    let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
+    let width = area.width as usize;
+    let (label, placeholder) =
+        if line_field { ("line ", "Line number…") } else { ("find ", "Find in file…") };
+    let (count, count_style) = if let Some(refused) = app.line_refusal() {
+        // The reason Enter waits keeps its end in a narrow pane: the path's head elides.
+        let room = width.saturating_sub(label.width() + f.query.width() + 2);
+        (elide_head(refused, room), Style::default().fg(p.ink(Ink::Warning, Fill::Base)))
     } else if line_field {
-        (format!("of {}", app.line_count()), Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)))
+        (format!("of {}", app.line_count()), dim)
     } else {
         // The count: `k/total` on a match, the total off a match, `no matches` when nothing
         // matches, blank while the query is empty.
@@ -2615,13 +2617,10 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
             Some((Some(k), total)) => format!("{k}/{total}"),
             Some((None, total)) => total.to_string(),
         };
-        (count, Style::default().fg(p.ink(Ink::TextMuted, Fill::Base)))
+        (count, dim)
     };
 
-    let width = area.width as usize;
     let count_w = count.width();
-    let (label, placeholder) =
-        if line_field { ("line ", "Line number…") } else { ("find ", "Find in file…") };
     // The query slice is bounded to `query_w` cells, so a long tail never pushes the count off
     // the right edge.
     let query_w = width.saturating_sub(label.width() + count_w + 1).max(1);

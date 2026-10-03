@@ -1014,15 +1014,7 @@ fn event_loop(
             // the heights below measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
             let heights = ui::diff_row_heights(app, area);
-            // A jump to a named line centers instead of nudging; it consumes any nudge asked
-            // in the same event, which would otherwise pin the line to the edge first.
-            let nudge = std::mem::take(&mut app.reveal_diff);
-            if std::mem::take(&mut app.reveal_center) && !app.composing() {
-                app.center_diff_cursor(&heights, effective);
-            } else if nudge || app.composing() {
-                app.reveal_diff_cursor(&heights, effective);
-            }
-            app.bound_diff_scroll(&heights, effective);
+            app.settle_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
             // While the navigator is hidden its viewport is zero, and a reveal computed
             // there would zero the kept scroll — it stays pending for the show frame.
@@ -1731,22 +1723,31 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The in-file find band: printable keys edit the query, the steps move the cursor between
-    // matches (`↑`/`↓` are the steps, so the single-line query has no vertical caret), `esc`
-    // closes. Every other key is inert.
-    // The line field takes digits and the caret's edits; Enter jumps, Esc closes, and every
-    // other key is inert, so a digit never reaches the tab keys.
+    // The line field takes digits and moves its caret; Enter jumps, Esc closes, and every other
+    // key is inert, so a digit never reaches the tab keys. An edit answers a refused paste.
     if app.line_open() {
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let word = alt || ctrl;
+        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             Esc => app.close_find(),
             Enter => app.line_go(),
-            Char(c) if !ctrl && !alt && !c.is_ascii_digit() => {}
-            code => apply_text_edit(app, code, ctrl, alt, word),
+            Char(c) if plain && c.is_ascii_digit() => {
+                app.clear_line_refusal();
+                app.input_push(c);
+            }
+            code @ (KeyCode::Backspace | KeyCode::Delete) if plain => {
+                app.clear_line_refusal();
+                apply_text_edit(app, code, false, false, false);
+            }
+            code @ (KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End) if plain => {
+                apply_text_edit(app, code, false, false, false);
+            }
+            _ => {}
         }
         return Ok(());
     }
+    // The in-file find band: printable keys edit the query, the steps move the cursor between
+    // matches (`↑`/`↓` are the steps, so the single-line query has no vertical caret), `esc`
+    // closes. Every other key is inert.
     if app.mode == Mode::Find {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
