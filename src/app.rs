@@ -4566,14 +4566,22 @@ impl App {
         crate::marks::diff_lines(&self.visible).filter_map(side).max().unwrap_or(0) as usize
     }
 
-    /// Paste into the line field. A location's path must name the open file — the same path,
-    /// or one ending with the other — to give its line; one in another file refuses and keeps
-    /// the number. Text with no location gives its first standalone number, else nothing.
+    /// Paste into the line field: one location or one number ([`parse_line_paste`]). A
+    /// location's path must name the open file — the same path, its tail (`app.rs`), the repo
+    /// root joined with it, or a GitHub blob URL to it — to give its line; one in another file
+    /// refuses and keeps the number. A longer relative path names another file: in a monorepo,
+    /// `docs/README.md` is not `README.md`.
     fn paste_line(&mut self, text: &str) {
         let open = self.diff_path.clone().unwrap_or_default();
+        let absolute = self.repo.join(&open);
         let names_open = |p: &str| {
-            let p = p.trim_start_matches("./");
-            std::path::Path::new(p).ends_with(&open) || std::path::Path::new(&open).ends_with(p)
+            // A GitHub blob URL's path past `/blob/<ref>/` is repo-relative.
+            let p = p
+                .split_once("/blob/")
+                .and_then(|(_, rest)| rest.split_once('/'))
+                .map_or(p, |(_, path)| path);
+            let p = std::path::Path::new(p.trim_start_matches("./"));
+            std::path::Path::new(&open).ends_with(p) || p == absolute
         };
         let pasted = parse_line_paste(text);
         let Some(Find { kind: BandKind::Line { refused }, query, caret }) = self.find.as_mut()
@@ -6023,40 +6031,41 @@ enum LinePaste {
     Nothing,
 }
 
-/// Read a pasted location. In each word, the first `:` or `(` directly followed by a digit marks
-/// one: its line is that digit run, its path the run of path characters just before it — so
-/// quotes, brackets, a stack frame's method or a drive letter around the path drop away, and a
-/// column, a range or grep's match may follow. A `(` needs a path with a `.` or `/` (`foo.cpp(42)`,
-/// not a call like `retry(3)`); a bare `1337:12` is a line. The first location ends the search.
-/// Else the first word that is only a number once its punctuation drops; a number inside a word
-/// (`v2` in a path) is no line. A line too long for a `u32` is past every file's end.
+/// Read a paste as one location or one number; text of more than one word (prose, a log line,
+/// a traceback) is neither, so a guess can never land in the wrong file. A location is the first
+/// `:`, `(` or `#L` directly followed by a digit: its line is that digit run, its path the run
+/// of path characters just before it — so quotes, brackets, a stack frame's method or a URL's
+/// scheme around the path drop away, and a column, a range or grep's match may follow. A `(`
+/// needs a path with a `.` or `/` (`foo.cpp(42)`, not `retry(3)`); a bare `1337:12` is a line.
+/// A line too long for a `u32` is past every file's end.
 fn parse_line_paste(text: &str) -> LinePaste {
     let number = |s: &str| {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
             .then(|| s.parse::<u32>().unwrap_or(u32::MAX))
     };
+    let mut words = text.split_whitespace();
+    let (Some(word), None) = (words.next(), words.next()) else { return LinePaste::Nothing };
     let is_path = |c: char| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | '\\');
-    for word in text.split_whitespace() {
-        for (at, mark) in word.char_indices().filter(|&(_, c)| c == ':' || c == '(') {
-            let rest = &word[at + 1..];
-            let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
-            let Some(line) = number(digits) else { continue };
-            let head = &word[..at];
-            let path = &head[head.trim_end_matches(is_path).len()..];
-            if mark == '(' && !path.contains(['.', '/']) {
-                continue;
-            }
-            return match number(path) {
-                // `1337:12`: a line and a column, no path.
-                Some(bare) => LinePaste::At { path: None, line: bare },
-                None if path.is_empty() => LinePaste::At { path: None, line },
-                None => LinePaste::At { path: Some(path.to_string()), line },
-            };
+    let marks = word.match_indices([':', '(']).chain(word.match_indices("#L"));
+    let mut marks: Vec<(usize, &str)> = marks.collect();
+    marks.sort_unstable();
+    for (at, mark) in marks {
+        let rest = &word[at + mark.len()..];
+        let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+        let Some(line) = number(digits) else { continue };
+        let head = &word[..at];
+        let path = &head[head.trim_end_matches(is_path).len()..];
+        if mark == "(" && !path.contains(['.', '/']) {
+            continue;
         }
+        return match number(path) {
+            // `1337:12`: a line and a column, no path.
+            Some(bare) => LinePaste::At { path: None, line: bare },
+            None if path.is_empty() => LinePaste::At { path: None, line },
+            None => LinePaste::At { path: Some(path.to_string()), line },
+        };
     }
-    text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
-        .find_map(number)
+    number(word.trim_matches(|c: char| !c.is_alphanumeric()))
         .map_or(LinePaste::Nothing, |line| LinePaste::At { path: None, line })
 }
 

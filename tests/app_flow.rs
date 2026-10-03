@@ -9860,10 +9860,11 @@ fn the_line_field_is_silent_where_it_cannot_work() {
     assert!(!offered(&app));
 }
 
-/// Paste takes the line from a location — `path:line`, `:line:col`, a range, wrapped in backticks
-/// or followed by punctuation — when its path names the open file, in either direction of the
-/// suffix; a location in another file refuses and keeps the number. Text with no location gives
-/// its first standalone number.
+/// A paste is one location or one number. A location gives its line when its path names the
+/// open file — the same path, the open path's tail (`m.rs`), the repo root joined with it, or a
+/// GitHub blob URL to it; one in another file refuses and keeps the number, a longer relative
+/// path included (a monorepo's `docs/src/m.rs` is not `src/m.rs`). Prose, logs and tracebacks
+/// hold more than one word, so they leave the field as it was.
 #[test]
 fn the_line_field_takes_the_line_from_a_pasted_location() {
     let r = line_field_repo();
@@ -9873,46 +9874,36 @@ fn the_line_field_takes_the_line_from_a_pasted_location() {
         let f = app.find.as_ref().unwrap();
         (f.query.clone(), app.line_refusal().map(str::to_string))
     };
-    // The open file is `src/m.rs`.
     assert_eq!(app.diff_path.as_deref(), Some("src/m.rs"));
     press(&mut app, &keymap, KeyCode::Char(':'));
+    let root = r.path_buf().display().to_string();
     let took = |line: &str| (line.to_string(), None::<String>);
     for (pasted, want) in [
-        ("src/m.rs:12:4", took("12")),
-        ("`src/m.rs:12`", took("12")),
-        ("see src/m.rs:13.", took("13")),
-        ("src/m.rs:10-20", took("10")),
-        ("/home/me/repo/src/m.rs:7", took("7")),
-        ("m.rs:5", took("5")),
-        ("./src/m.rs:6", took("6")),
-        ("1337:12", took("1337")),
-        ("see `src/m.rs:42`, which", took("42")),
-        ("src/m.rs:12:fn main() {", took("12")),
-        ("see (src/m.rs:14).", took("14")),
-        ("src/m.rs(15)", took("15")),
-        ("src/m.rs:3000000000", took("3000000000")),
-        ("src/m.rs:99999999999", took("4294967295")),
-        ("src/m.rs(42): error C2065", took("42")),
-        ("\u{201c}src/m.rs:43\u{201d}", took("43")),
-        ("at com.x.Foo.bar(m.rs:44)", took("44")),
-        ("C:/proj/src/m.rs:45", took("45")),
-        ("call `retry(3)` in src/m.rs:46", took("46")),
-        ("error at line 12: expected 3 args", took("12")),
-        ("see line 21, please", took("21")),
+        ("src/m.rs:12:4".to_string(), took("12")),
+        ("`src/m.rs:13`".to_string(), took("13")),
+        ("src/m.rs:10-20\n".to_string(), took("10")),
+        (format!("{root}/src/m.rs:7"), took("7")),
+        ("m.rs:5".to_string(), took("5")),
+        ("./src/m.rs:6".to_string(), took("6")),
+        ("1337:12".to_string(), took("1337")),
+        ("src/m.rs(42):".to_string(), took("42")),
+        ("\u{201c}src/m.rs:43\u{201d}".to_string(), took("43")),
+        ("com.x.Foo.bar(m.rs:44)".to_string(), took("44")),
+        ("src/m.rs#L46".to_string(), took("46")),
+        ("https://github.com/o/r/blob/main/src/m.rs#L47-L50".to_string(), took("47")),
+        ("src/m.rs:99999999999".to_string(), took("4294967295")),
+        ("`21`".to_string(), took("21")),
     ] {
-        app.input_paste(pasted);
+        app.input_paste(&pasted);
         assert_eq!(field(&app), want, "{pasted}");
     }
 
     // A location in another file refuses and keeps the number; Enter waits on an edit.
     for (pasted, path) in [
         ("src/n.rs:5", "src/n.rs"),
-        ("error: src/n.rs:5", "src/n.rs"),
-        ("`src/n.rs:12`", "src/n.rs"),
-        ("src/v2/other.rs:10-20", "src/v2/other.rs"),
-        ("rc/m.rs:5", "rc/m.rs"),
         ("(src/n.rs:5)", "src/n.rs"),
-        ("\"src/n.rs:5\".", "src/n.rs"),
+        ("rc/m.rs:5", "rc/m.rs"),
+        ("docs/src/m.rs:5", "docs/src/m.rs"),
         ("src/n.rs:3000000000", "src/n.rs"),
     ] {
         app.input_paste(pasted);
@@ -9929,9 +9920,17 @@ fn the_line_field_takes_the_line_from_a_pasted_location() {
     find_type(&mut app, &keymap, "3");
     assert_eq!(field(&app), ("213".to_string(), None), "an edit answers the refusal");
 
-    // A path with no line has no number to give; the field stays as it was.
-    app.input_paste("src/v2/other.rs");
-    assert_eq!(field(&app), ("213".to_string(), None));
+    // More than one word, or no line at all: the field stays as it was.
+    for pasted in [
+        "see src/m.rs:13",
+        "At 10:30 I saw src/m.rs:1337",
+        "  File \"src/n.py\", line 12, in run",
+        "error at line 12: expected 3 args",
+        "src/v2/other.rs",
+    ] {
+        app.input_paste(pasted);
+        assert_eq!(field(&app), ("213".to_string(), None), "{pasted}");
+    }
 }
 
 /// Past the end lands on the new side's last line even when the file's tail was deleted, and a

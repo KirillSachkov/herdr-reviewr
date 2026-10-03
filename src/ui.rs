@@ -2601,7 +2601,7 @@ fn render_find_band(frame: &mut Frame, app: &App, area: Rect) {
     let dim = Style::default().fg(p.ink(Ink::TextMuted, Fill::Base));
     let width = area.width as usize;
     let (label, placeholder) =
-        if line_field { ("line ", "Line number…") } else { ("find ", "Find in file…") };
+        if line_field { ("line ", "Go to line…") } else { ("find ", "Find in file…") };
     let (count, count_style) = if let Some(refused) = app.line_refusal() {
         // The reason Enter waits keeps its end in a narrow pane: the path's head elides.
         let room = width.saturating_sub(label.width() + f.query.width() + 2);
