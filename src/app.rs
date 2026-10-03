@@ -4522,19 +4522,35 @@ impl App {
         }
     }
 
-    /// The line Enter jumps to: the typed number, past every file's end when it outgrows a
-    /// `u32`. `None` — Enter only closes — on an empty field or `0`, and while refused.
+    /// The line Enter jumps to: the typed number, `0` the first line and `$` the last as in
+    /// vim, and past every file's end when it outgrows a `u32`. `None` — Enter only closes — on
+    /// an empty field, and while refused.
     pub fn line_target(&self) -> Option<u32> {
         let f = self.find.as_ref().filter(|_| self.line_open() && self.line_refusal().is_none())?;
-        let digits = f.query.as_str();
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
+        match f.query.as_str() {
+            "$" => Some(u32::MAX),
+            digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(digits.parse::<u32>().unwrap_or(u32::MAX).max(1))
+            }
+            _ => None,
         }
-        Some(digits.parse::<u32>().unwrap_or(u32::MAX)).filter(|&n| n > 0)
     }
 
-    /// `enter` in the line field: close it and jump to the typed line. An empty field or `0`
-    /// only closes; a refused paste holds the field open until an edit answers it.
+    /// Type into the line field: a digit extends the number, `$` (the last line) stands alone,
+    /// and a digit after `$` starts a number.
+    pub fn line_type(&mut self, c: char) {
+        self.edit_input(|v, caret| {
+            if c == '$' || v.as_slice() == ['$'] {
+                v.clear();
+                *caret = 0;
+            }
+            v.insert(*caret, c);
+            *caret += 1;
+        });
+    }
+
+    /// `enter` in the line field: close it and jump to the typed line. An empty field only
+    /// closes; a refused paste holds the field open until an edit answers it.
     pub fn line_go(&mut self) {
         if self.line_refusal().is_some() {
             return;

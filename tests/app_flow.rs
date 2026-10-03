@@ -9816,8 +9816,8 @@ fn the_line_field_follows_its_event_table() {
     assert_eq!(app.mode, Mode::Normal);
     assert_eq!(app.visible[app.diff_cursor].new_no(), Some(26));
 
-    // Esc, an empty Enter and `0` close with nothing moved.
-    for keys in [&[KeyCode::Esc][..], &[KeyCode::Enter], &[KeyCode::Char('0'), KeyCode::Enter]] {
+    // Esc and an empty Enter close with nothing moved.
+    for keys in [&[KeyCode::Esc][..], &[KeyCode::Enter]] {
         colon(&mut app);
         let before = place(&app);
         for &k in keys {
@@ -9825,6 +9825,15 @@ fn the_line_field_follows_its_event_table() {
         }
         assert_eq!(app.mode, Mode::Normal, "{keys:?} closes");
         assert_eq!(place(&app), before, "{keys:?} moves nothing");
+    }
+
+    // `:0` is the first line and `:$` the last, as in vim; a digit after `$` starts a number.
+    let new_no = |app: &App| app.visible[app.diff_cursor].new_no();
+    for (typed, line) in [("0", 1), ("$", 30), ("$7", 7)] {
+        colon(&mut app);
+        find_type(&mut app, &keymap, typed);
+        press(&mut app, &keymap, KeyCode::Enter);
+        assert_eq!(new_no(&app), Some(line), ":{typed}");
     }
 
     // A tab switch and an invalid config close it.
@@ -9968,8 +9977,12 @@ fn the_line_field_holds_digits_and_offers_enter_only_for_a_line() {
     handle_key(&mut app, alt_x, Rect::new(0, 0, 120, 40), &keymap).unwrap();
     assert_eq!(app.find.as_ref().unwrap().query, "12", "an alt chord types nothing");
     assert!(go(&app));
-    app.input_paste("0");
-    assert!(!go(&app), "`0` closes on Enter, so the footer offers only esc");
+    for _ in 0..2 {
+        press(&mut app, &keymap, KeyCode::Backspace);
+    }
+    assert!(!go(&app), "an empty field closes on Enter, so the footer offers only esc");
+    find_type(&mut app, &keymap, "$");
+    assert!(go(&app), "`$` goes to the last line");
 }
 
 /// The field is typed for the file and tab it opened over: opening another file, or any tab,

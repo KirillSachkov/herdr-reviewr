@@ -1723,15 +1723,15 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The line field takes digits and moves its caret; Enter jumps, Esc closes, and every other
-    // key is inert, so a digit never reaches the tab keys. An edit answers a refused paste.
+    // The line field takes digits or `$` and moves its caret; Enter jumps, Esc closes, and every
+    // other key is inert, so a digit never reaches the tab keys. An edit answers a refused paste.
     if app.line_open() {
         let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             Esc => app.close_find(),
             Enter => app.line_go(),
-            code @ (Char('0'..='9')
-            | KeyCode::Backspace
+            Char(c @ ('0'..='9' | '$')) if plain => app.line_type(c),
+            code @ (KeyCode::Backspace
             | KeyCode::Delete
             | KeyCode::Left
             | KeyCode::Right
