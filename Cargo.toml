@@ -31,6 +31,9 @@ time = { version = "0.3", features = ["parsing"] }
 toml = "1.1"
 two-face = "0.5.2"
 unicode-width = "0.2"
+# Program lookup the way a shell does it: the executable bit on unix, PATHEXT on Windows
+# (so `az` finds `az.cmd`), and never the current directory for a bare name.
+which = "8.0.6"
 
 [dev-dependencies]
 tempfile = "3"

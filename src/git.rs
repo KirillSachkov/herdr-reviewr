@@ -2065,8 +2065,9 @@ mod tests {
         // A plain directory git can read but that holds no worktree.
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(worktree_of(outside.path()), Worktree::Outside);
-        // A real worktree resolves to its root. Compare against std canonicalization, an oracle
-        // independent of `worktree_of` (both git and std resolve the temp dir's symlinks).
+        // A real worktree resolves to its root. Compare through std canonicalization, an oracle
+        // independent of `worktree_of`: both sides resolve the temp dir's symlinks, and on
+        // Windows git's `C:/…` and std's `\\?\C:\…` spell the same directory.
         let repo = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -2075,8 +2076,11 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let canonical = std::fs::canonicalize(repo.path()).unwrap();
-        assert_eq!(worktree_of(repo.path()), Worktree::Root(canonical));
+        let Worktree::Root(root) = worktree_of(repo.path()) else {
+            panic!("a fresh repository resolves to a worktree root");
+        };
+        let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(canonical(&root), canonical(repo.path()));
     }
 
     #[test]

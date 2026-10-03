@@ -2,46 +2,51 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
-/// Usual host bin dirs a stripped pane PATH may omit.
+/// Usual host bin dirs a stripped pane PATH may omit. Unix only: on Windows these names
+/// resolve to directories like `C:\\usr\\bin` on the current drive, which any user can create.
+#[cfg(unix)]
 const COMMON_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+#[cfg(not(unix))]
+const COMMON_BINS: &[&str] = &[];
 
 fn host_path() -> OsString {
     prepended_path(env::var_os("PATH").as_deref())
 }
 
+fn common_bins() -> impl Iterator<Item = PathBuf> {
+    COMMON_BINS.iter().map(PathBuf::from)
+}
+
+/// The inherited PATH's entries. A set-but-empty PATH is the same as none: split, its one
+/// empty entry would put the reviewed repository's own working directory ahead of every real
+/// bin dir.
+fn inherited_dirs(inherited: Option<&OsStr>) -> Vec<PathBuf> {
+    inherited.filter(|p| !p.is_empty()).map(|p| env::split_paths(p).collect()).unwrap_or_default()
+}
+
+/// Join PATH entries with the platform's separator. Every entry came out of `split_paths` or
+/// `COMMON_BINS`, so none holds a separator and the join cannot fail. Were it to, the inherited
+/// PATH passes through untouched rather than becoming an empty one.
+fn joined(dirs: impl Iterator<Item = PathBuf>, inherited: Option<&OsStr>) -> OsString {
+    env::join_paths(dirs).unwrap_or_else(|_| inherited.map(OsStr::to_os_string).unwrap_or_default())
+}
+
 fn prepended_path(inherited: Option<&OsStr>) -> OsString {
-    let mut path = OsString::from(COMMON_BINS.join(":"));
-    if let Some(inherited) = inherited
-        && !inherited.is_empty()
-    {
-        path.push(":");
-        path.push(inherited);
-    }
-    path
+    joined(common_bins().chain(inherited_dirs(inherited)), inherited)
 }
 
 fn appended_path(inherited: Option<&OsStr>) -> OsString {
-    let Some(inherited) = inherited.filter(|p| !p.is_empty()) else {
-        return OsString::from(COMMON_BINS.join(":"));
-    };
-    let mut path = inherited.to_os_string();
-    path.push(":");
-    path.push(COMMON_BINS.join(":"));
-    path
+    joined(inherited_dirs(inherited).into_iter().chain(common_bins()), inherited)
 }
 
+/// Resolve `name` against `path` the way a shell would: an executable file, with PATHEXT on
+/// Windows, and the current directory only for a name that is itself a path.
 fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
-    let as_path = Path::new(name);
-    if as_path.is_absolute() || as_path.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
-        return as_path.is_file().then(|| as_path.to_path_buf());
-    }
-    env::split_paths(path).find_map(|dir| {
-        let candidate = dir.join(name);
-        candidate.is_file().then_some(candidate)
-    })
+    let cwd = env::current_dir().unwrap_or_default();
+    which::which_in(name, Some(path), cwd).ok()
 }
 
 /// Resolve `program` on the host PATH — the common host bins first, the inherited PATH after —
@@ -74,9 +79,8 @@ pub(crate) fn user_command(program: impl AsRef<OsStr>) -> Option<Command> {
     Some(cmd)
 }
 
-/// Whether `name` resolves to an executable on the host PATH — a dependency-free `which`. Both
-/// shipped platforms are unix, so a file in a host-PATH directory is the executable. Shared by
-/// the clipboard probe (`export.rs`) and the URL-opener probe (`browser.rs`).
+/// Whether `name` resolves to an executable on the host PATH. Shared by the clipboard probe
+/// (`export.rs`) and the URL-opener probe (`browser.rs`).
 #[must_use]
 pub fn on_path(name: &str) -> bool {
     resolve_on(&host_path(), OsStr::new(name)).is_some()
@@ -86,51 +90,99 @@ pub fn on_path(name: &str) -> bool {
 mod tests {
     use super::{COMMON_BINS, appended_path, prepended_path, resolve_on};
     use std::env;
-    use std::ffi::OsStr;
-    use std::path::PathBuf;
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
+
+    fn path_of(dirs: &[&str]) -> OsString {
+        env::join_paths(dirs).unwrap()
+    }
+
+    fn common() -> Vec<PathBuf> {
+        COMMON_BINS.iter().map(PathBuf::from).collect()
+    }
 
     #[test]
     fn prepended_path_puts_the_common_bins_in_front_of_the_inherited_path() {
-        let got = prepended_path(Some(OsStr::new("/usr/bin:/bin")));
+        let got = prepended_path(Some(&path_of(&["inherited-a", "inherited-b"])));
         let parts: Vec<PathBuf> = env::split_paths(&got).collect();
-        let mut expected: Vec<PathBuf> = COMMON_BINS.iter().map(PathBuf::from).collect();
-        expected.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
+        let mut expected = common();
+        expected.extend([PathBuf::from("inherited-a"), PathBuf::from("inherited-b")]);
         assert_eq!(parts, expected);
     }
 
     #[test]
     fn prepended_path_keeps_the_common_bins_when_nothing_is_inherited() {
         let got = prepended_path(None);
-        let parts: Vec<PathBuf> = env::split_paths(&got).collect();
-        let expected: Vec<PathBuf> = COMMON_BINS.iter().map(PathBuf::from).collect();
-        assert_eq!(parts, expected);
+        let parts: Vec<PathBuf> =
+            env::split_paths(&got).filter(|p| !p.as_os_str().is_empty()).collect();
+        assert_eq!(parts, common());
     }
 
     #[test]
     fn appended_path_leaves_the_reviewers_own_entries_in_front() {
         // The editor's own tools have to resolve the way its shell would resolve them, so a
         // version-managed shim wins and the common bins only backstop a stripped PATH.
-        let got = appended_path(Some(OsStr::new("/me/.mise/shims:/usr/bin")));
+        let got = appended_path(Some(&path_of(&["mise-shims", "system-bin"])));
         let parts: Vec<PathBuf> = env::split_paths(&got).collect();
-        let mut expected = vec![PathBuf::from("/me/.mise/shims"), PathBuf::from("/usr/bin")];
-        expected.extend(COMMON_BINS.iter().map(PathBuf::from));
+        let mut expected = vec![PathBuf::from("mise-shims"), PathBuf::from("system-bin")];
+        expected.extend(common());
         assert_eq!(parts, expected);
-
-        let bare: Vec<PathBuf> = env::split_paths(&appended_path(None)).collect();
-        assert_eq!(bare, COMMON_BINS.iter().map(PathBuf::from).collect::<Vec<_>>());
 
         // A set-but-empty PATH is the same as none. Joined instead, its empty entry would put
         // the reviewed repository's own working directory ahead of every real bin dir.
         assert_eq!(appended_path(Some(OsStr::new(""))), appended_path(None));
     }
 
+    /// An executable named `name` in `dir`, spelled the way the platform spells programs.
+    #[cfg(unix)]
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join(name);
+        std::fs::write(&bin, []).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    #[cfg(windows)]
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let bin = dir.join(format!("{name}.exe"));
+        std::fs::write(&bin, []).unwrap();
+        bin
+    }
+
+    fn same_file(a: &Path, b: &Path) -> bool {
+        std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
+    }
+
     #[test]
     fn resolve_on_finds_a_bare_name_in_a_path_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("gh");
-        std::fs::write(&bin, []).unwrap();
-        let path = env::join_paths([dir.path(), PathBuf::from("/usr/bin").as_path()]).unwrap();
-        assert_eq!(resolve_on(&path, OsStr::new("gh")).as_deref(), Some(bin.as_path()));
+        let bin = program(dir.path(), "gh");
+        let path = env::join_paths([dir.path()]).unwrap();
+        let found = resolve_on(&path, OsStr::new("gh")).expect("gh resolves");
+        assert!(same_file(&found, &bin), "{found:?} is not {bin:?}");
         assert!(resolve_on(&path, OsStr::new("missing")).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_the_executable_bit_is_not_a_program() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("notes"), []).unwrap();
+        let path = env::join_paths([dir.path()]).unwrap();
+        assert!(resolve_on(&path, OsStr::new("notes")).is_none());
+    }
+
+    /// `az` and `code` ship as batch shims on Windows: a bare name must reach them through
+    /// PATHEXT, which `std::process::Command` alone never tries.
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_shim_resolves_through_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join("az.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        let path = env::join_paths([dir.path()]).unwrap();
+        let found = resolve_on(&path, OsStr::new("az")).expect("az resolves");
+        assert!(same_file(&found, &shim), "{found:?} is not {shim:?}");
     }
 }

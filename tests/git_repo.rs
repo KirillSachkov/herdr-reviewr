@@ -1223,7 +1223,11 @@ fn a_shallow_cut_is_gone_not_a_root() {
     use herdr_reviewr::git::{EMPTY_TREE, commit_exists, parent_or_empty};
     let (r, shas) = run_repo();
     let shallow = tempfile::tempdir().unwrap();
-    let url = format!("file://{}", r.path().display());
+    // A file URL takes forward slashes, and a Windows drive path needs the third slash a unix
+    // path already starts with: `file:///C:/…`.
+    let path = r.path().to_string_lossy().replace('\\', "/");
+    let url =
+        if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") };
     let out = std::process::Command::new("git")
         .args(["clone", "-q", "--depth", "1", &url, "w"])
         .current_dir(shallow.path())
