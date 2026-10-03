@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use process_wrap::std::CommandWrap;
 use serde_json::Value;
 
 /// What the `PR` tab shows: the resolved snapshot, or a degraded state with its own remedy.
@@ -341,9 +342,21 @@ enum CliError {
 }
 
 /// Run one prepared forge-CLI command to completion and return its stdout.
-fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError> {
-    let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
-    let mut child = match child {
+///
+/// The CLI runs as the root of its own process tree, a process group on unix and a job object
+/// on Windows, so a cancel kills every descendant and not just the CLI. `az` on Windows is
+/// `az.cmd` running python: a grandchild left alive would hold the pipes open, and the readers
+/// below would never finish.
+fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
+    let mut cmd = CommandWrap::from(cmd);
+    // No stdin: the reviewer's terminal belongs to the pane, and a CLI in its own process
+    // group that read it would stop on SIGTTIN until cancelled.
+    cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.wrap(process_wrap::std::ProcessGroup::leader());
+    #[cfg(windows)]
+    cmd.wrap(process_wrap::std::JobObject);
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(CliError::NotFound);
@@ -352,10 +365,10 @@ fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError
     };
 
     // Drain both pipes while polling so a large response cannot fill a pipe and block the
-    // child before it exits. A superseded config/fetch kills the process; the coordinator
+    // child before it exits. A superseded config/fetch kills the process tree; the coordinator
     // keeps ownership until this worker reports completion, preserving one real fetch in flight.
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut stdout = child.stdout().take().expect("piped stdout");
+    let mut stderr = child.stderr().take().expect("piped stderr");
     let stdout_reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stdout.read_to_end(&mut bytes);
@@ -366,15 +379,19 @@ fn run_cli(cmd: &mut Command, cancelled: &AtomicBool) -> Result<String, CliError
         let _ = stderr.read_to_end(&mut bytes);
         bytes
     });
+    // Done once the CLI has exited and both pipes have closed. A descendant can outlive the
+    // CLI with a pipe still open, so a cancel keeps reaching the tree until then.
     let status = loop {
         if cancelled.load(Ordering::Acquire) {
-            let _ = child.kill();
+            let _ = child.start_kill();
         }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(5)),
+            Ok(Some(status)) if stdout_reader.is_finished() && stderr_reader.is_finished() => {
+                break status;
+            }
+            Ok(_) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
-                let _ = child.kill();
+                let _ = child.start_kill();
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
@@ -398,7 +415,7 @@ fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<
     let mut cmd = crate::proc::command("gh");
     cmd.current_dir(repo).args(args);
     run_provider(
-        &mut cmd,
+        cmd,
         cancelled,
         GhError::NoGh,
         |stderr| classify_failure(stderr, host),
@@ -430,7 +447,7 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
 /// a missing binary, a classified stderr, and the IO/cancellation tail every provider
 /// folds into its retryable variant.
 pub(crate) fn run_provider<E>(
-    cmd: &mut Command,
+    cmd: Command,
     cancelled: &AtomicBool,
     not_found: E,
     classify: impl FnOnce(&str) -> E,
@@ -2100,5 +2117,63 @@ mod tests {
         );
         assert_eq!(&args[..4], ["api", "graphql", "--hostname", "github.example.com"]);
         assert!(args.windows(2).any(|pair| pair == ["-f", "o=owner"]));
+    }
+
+    /// A provider that starts a grandchild holding its pipes, then either waits on it or
+    /// exits. The grandchild alone would keep the pipes open for a minute.
+    #[cfg(unix)]
+    fn provider_with_grandchild(_dir: &Path, ready: &Path, waits: bool) -> Command {
+        let script =
+            if waits { r#"sleep 60 & touch "$1"; wait"# } else { r#"sleep 60 & touch "$1""# };
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script, "provider"]).arg(ready);
+        cmd
+    }
+
+    /// The same provider as a batch file, the shape `az.cmd` has.
+    #[cfg(windows)]
+    fn provider_with_grandchild(dir: &Path, ready: &Path, waits: bool) -> Command {
+        let mut script = String::from(
+            "@echo off\r\nstart /b \"\" ping -n 61 127.0.0.1\r\necho ready> \"%~1\"\r\n",
+        );
+        if waits {
+            script.push_str("ping -n 61 127.0.0.1 >nul\r\n");
+        }
+        let path = dir.join("provider.cmd");
+        std::fs::write(&path, script).unwrap();
+        let mut cmd = Command::new(path);
+        cmd.arg(ready);
+        cmd
+    }
+
+    #[test]
+    fn cancelling_a_fetch_ends_the_providers_whole_process_tree() {
+        use std::sync::{Arc, mpsc};
+        use std::time::Instant;
+
+        for (shape, waits) in [("waits on its grandchild", true), ("exits before it", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let ready = dir.path().join("ready");
+            let cmd = provider_with_grandchild(dir.path(), &ready, waits);
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let (done_tx, done_rx) = mpsc::channel();
+            let flag = cancelled.clone();
+            thread::spawn(move || done_tx.send(run_cli(cmd, &flag)));
+
+            // Cancel once the grandchild exists, and once a provider that exits is long gone.
+            // Any earlier, the kill lands before the tree it has to reach.
+            let started = Instant::now();
+            while !ready.exists() {
+                assert!(started.elapsed() < Duration::from_secs(10), "{shape}: never started");
+                thread::sleep(Duration::from_millis(10));
+            }
+            thread::sleep(Duration::from_millis(300));
+            cancelled.store(true, Ordering::Release);
+
+            let result = done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{shape}: still reading the grandchild's pipes"));
+            assert!(matches!(result, Err(CliError::Cancelled)), "{shape}: {result:?}");
+        }
     }
 }

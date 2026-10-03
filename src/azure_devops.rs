@@ -95,7 +95,7 @@ fn az_json(
     let mut cmd = crate::proc::command("az");
     cmd.current_dir(repo).args(args).args(["--organization", org_url, "--output", "json"]);
     let stdout = crate::forge::run_provider(
-        &mut cmd,
+        cmd,
         cancelled,
         AzError::NoAz,
         classify_failure,

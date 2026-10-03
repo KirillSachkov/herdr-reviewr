@@ -18,6 +18,9 @@ fff-search = "0.11.0"
 # The matcher fff-search scores with: the base picker ranks branch names by the same rule
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
+# Forge CLIs spawn in a process group (unix) or job object (Windows), so cancelling a fetch
+# kills the whole tree, `az.cmd`'s python included, and the pipe readers finish.
+process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
@@ -34,6 +37,14 @@ unicode-width = "0.2"
 # Program lookup the way a shell does it: the executable bit on unix, PATHEXT on Windows
 # (so `az` finds `az.cmd`), and never the current directory for a bare name.
 which = "8.0.6"
+
+[target.'cfg(windows)'.dependencies]
+# The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
+# only: no image support, so no image codecs enter the tree.
+arboard = { version = "3.6.1", default-features = false }
+# Opens a link through `ShellExecuteW` with no shell between, so an `&` in a URL can't
+# truncate or inject.
+opener = "0.9.0"
 
 [dev-dependencies]
 tempfile = "3"

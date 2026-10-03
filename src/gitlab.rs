@@ -92,7 +92,7 @@ fn glab_raw(
     let mut cmd = crate::proc::command("glab");
     cmd.current_dir(repo).args(glab_args(host, endpoint));
     crate::forge::run_provider(
-        &mut cmd,
+        cmd,
         cancelled,
         GlabError::NoGlab,
         classify_failure,

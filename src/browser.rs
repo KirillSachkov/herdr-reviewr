@@ -2,7 +2,7 @@
 //!
 //! A configured opener wins; otherwise the host platform's default is used.
 
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 
@@ -10,31 +10,68 @@ use anyhow::{Context, Result};
 const OPENERS: &[&str] = &["open"];
 #[cfg(target_os = "linux")]
 const OPENERS: &[&str] = &["xdg-open"];
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 const OPENERS: &[&str] = &["open", "xdg-open"];
 
-/// Open `url` through the configured `url_opener`, else the first platform opener on `PATH`.
-/// The opener runs detached from the frame: it is started and reaped on a background thread,
+/// How a link opens when no `url_opener` is configured.
+#[derive(Debug, PartialEq, Eq)]
+enum DefaultOpener {
+    /// A platform opener program, found on `PATH`.
+    #[cfg(not(windows))]
+    Tool(&'static str),
+    /// The default browser, through `ShellExecuteW`. No shell parses the URL, so an `&` in it
+    /// can't cut it short or start a second command, as it would through `cmd /c start`.
+    #[cfg(windows)]
+    Shell,
+}
+
+/// The first platform opener the `present` predicate accepts, in list order. Windows needs
+/// none on `PATH`: its shell opens links itself.
+#[cfg(not(windows))]
+fn default_opener(present: impl Fn(&str) -> bool) -> Result<DefaultOpener> {
+    OPENERS
+        .iter()
+        .copied()
+        .find(|candidate| present(candidate))
+        .map(DefaultOpener::Tool)
+        .context("no link opener: install open or xdg-open, or set `url_opener`")
+}
+
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)] // One signature on every OS.
+fn default_opener(_present: impl Fn(&str) -> bool) -> Result<DefaultOpener> {
+    Ok(DefaultOpener::Shell)
+}
+
+/// Open `url` through the configured `url_opener`, else the platform default.
+pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
+    let Some(template) = configured else {
+        return match default_opener(crate::proc::on_path)? {
+            #[cfg(not(windows))]
+            DefaultOpener::Tool(tool) => {
+                let mut command = crate::proc::command(tool);
+                command.arg(url);
+                spawn_detached(tool, command)
+            }
+            // The call returns once the shell has handed the URL on, leaving nothing to reap.
+            #[cfg(windows)]
+            DefaultOpener::Shell => opener::open(url)
+                .map_err(|error| anyhow::anyhow!("the default browser could not start: {error}")),
+        };
+    };
+    let (program, args) = opener_argv(template, url).context("`url_opener` names no program")?;
+    let mut command = crate::proc::user_command(&program)
+        .with_context(|| format!("`url_opener` not found: {program}"))?;
+    command.args(&args);
+    spawn_detached(&program, command)
+}
+
+/// Run an opener detached from the frame: it is started and reaped on a background thread,
 /// never waited on, so a command that lingers (a browser launched in the foreground, a bridge
 /// to an unreachable host) can never freeze the pane. A command that cannot start is reported;
 /// what it does once running is its own.
-pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
-    let (tool, args, mut command) = if let Some(template) = configured {
-        let (program, args) =
-            opener_argv(template, url).context("`url_opener` names no program")?;
-        let command = crate::proc::user_command(&program)
-            .with_context(|| format!("`url_opener` not found: {program}"))?;
-        (program, args, command)
-    } else {
-        let tool = OPENERS
-            .iter()
-            .copied()
-            .find(|candidate| crate::proc::on_path(candidate))
-            .context("no link opener: install open or xdg-open, or set `url_opener`")?;
-        (tool.to_string(), vec![url.to_string()], crate::proc::command(tool))
-    };
+fn spawn_detached(tool: &str, mut command: Command) -> Result<()> {
     let mut child = command
-        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -74,12 +111,36 @@ pub fn openable_url(url: &str) -> Result<&str, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{open, openable_url, opener_argv};
+    use super::{default_opener, open, openable_url, opener_argv};
 
     #[test]
     fn a_configured_opener_that_cannot_start_is_reported_never_replaced() {
         let error = open("https://x.dev", Some("reviewr-no-such-opener {url}")).unwrap_err();
         assert!(error.to_string().contains("reviewr-no-such-opener"), "{error}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_default_opener_is_the_first_one_on_path_and_its_absence_says_what_to_install() {
+        use super::DefaultOpener::Tool;
+        let all = |_: &str| true;
+        #[cfg(target_os = "macos")]
+        assert_eq!(default_opener(all).unwrap(), Tool("open"));
+        #[cfg(target_os = "linux")]
+        assert_eq!(default_opener(all).unwrap(), Tool("xdg-open"));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        assert_eq!(default_opener(all).unwrap(), Tool("open"));
+        assert_eq!(
+            default_opener(|_| false).unwrap_err().to_string(),
+            "no link opener: install open or xdg-open, or set `url_opener`"
+        );
+    }
+
+    /// Windows opens a link through its shell, so nothing has to be on `PATH`.
+    #[cfg(windows)]
+    #[test]
+    fn the_default_opener_on_windows_is_the_shell_with_nothing_on_path() {
+        assert_eq!(default_opener(|_| false).unwrap(), super::DefaultOpener::Shell);
     }
 
     #[test]

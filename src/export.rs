@@ -4,10 +4,7 @@
 //! diff snippet, then the text. Export is consume-on-success: the caller removes
 //! a comment only after `export` returns `Ok`.
 
-use std::io::Write;
-use std::process::Stdio;
-
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
 use crate::herdr;
 use crate::model::Comment;
@@ -52,29 +49,8 @@ pub(crate) fn counted_comments(count: usize) -> String {
     format!("{count} {noun}")
 }
 
-/// A clipboard tool and the args that make it read stdin into the system clipboard. Tried in
-/// order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one of these
-/// installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 and Windows are roadmap.
-const CLIPBOARD_TOOLS: &[(&str, &[&str])] = &[
-    ("pbcopy", &[]),
-    ("wl-copy", &[]),
-    ("xclip", &["-selection", "clipboard"]),
-    ("xsel", &["--clipboard", "--input"]),
-];
-
-/// No clipboard tool on `PATH`: the one copy failure the reviewer can fix, so its line says how.
-#[derive(Debug)]
-struct NoClipboardTool;
-
-impl std::fmt::Display for NoClipboardTool {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "no clipboard tool found (wl-clipboard, xclip, or xsel)")
-    }
-}
-
-impl std::error::Error for NoClipboardTool {}
-
-/// The system clipboard, via the first available platform clipboard tool.
+/// The system clipboard: the first clipboard tool on `PATH`, or on Windows the Win32 clipboard
+/// itself.
 #[derive(Debug)]
 pub struct Clipboard;
 
@@ -88,16 +64,55 @@ impl ExportTarget for Clipboard {
     }
 
     fn failure_message(&self, error: &anyhow::Error) -> String {
-        if error.is::<NoClipboardTool>() {
-            "copy failed: install wl-clipboard, xclip, or xsel".to_string()
-        } else {
-            "copy failed".to_string()
+        match clipboard::remedy(error) {
+            Some(remedy) => format!("copy failed: {remedy}"),
+            None => "copy failed".to_string(),
         }
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        let (cmd, args) =
-            select_tool(CLIPBOARD_TOOLS, crate::proc::on_path).ok_or(NoClipboardTool)?;
+        clipboard::write(text)
+    }
+}
+
+/// macOS and Linux copy through a clipboard tool.
+#[cfg(not(windows))]
+mod clipboard {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    use anyhow::{Context, Result, bail};
+
+    /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried
+    /// in order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one
+    /// of these installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 is roadmap.
+    pub(super) const TOOLS: &[(&str, &[&str])] = &[
+        ("pbcopy", &[]),
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+
+    /// No clipboard tool on `PATH`: the one copy failure the reviewer can fix, so its line says
+    /// how.
+    #[derive(Debug)]
+    pub(super) struct NoTool;
+
+    impl std::fmt::Display for NoTool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "no clipboard tool found (wl-clipboard, xclip, or xsel)")
+        }
+    }
+
+    impl std::error::Error for NoTool {}
+
+    pub(super) fn remedy(error: &anyhow::Error) -> Option<&'static str> {
+        error.is::<NoTool>().then_some("install wl-clipboard, xclip, or xsel")
+    }
+
+    /// Pipe `text` into the first tool on `PATH`, succeeding only when it exits clean.
+    pub(super) fn write(text: &str) -> Result<()> {
+        let (cmd, args) = select_tool(TOOLS, crate::proc::on_path).ok_or(NoTool)?;
         let mut child = crate::proc::command(cmd)
             .args(args)
             .stdin(Stdio::piped())
@@ -114,14 +129,33 @@ impl ExportTarget for Clipboard {
         }
         Ok(())
     }
+
+    /// The first clipboard tool the `present` predicate accepts, preserving list order.
+    pub(super) fn select_tool(
+        tools: &'static [(&'static str, &'static [&'static str])],
+        present: impl Fn(&str) -> bool,
+    ) -> Option<(&'static str, &'static [&'static str])> {
+        tools.iter().copied().find(|(cmd, _)| present(cmd))
+    }
 }
 
-/// The first clipboard tool the `present` predicate accepts, preserving list order.
-fn select_tool(
-    tools: &'static [(&'static str, &'static [&'static str])],
-    present: impl Fn(&str) -> bool,
-) -> Option<(&'static str, &'static [&'static str])> {
-    tools.iter().copied().find(|(cmd, _)| present(cmd))
+/// Windows writes the Win32 clipboard directly, as Unicode text. No tool is needed, and
+/// `clip.exe` would read the text in the console's code page and mangle anything outside ASCII.
+#[cfg(windows)]
+mod clipboard {
+    use anyhow::{Context, Result};
+
+    /// Nothing to install, so no failure here has a remedy to name.
+    pub(super) fn remedy(_error: &anyhow::Error) -> Option<&'static str> {
+        None
+    }
+
+    /// The text outlives the handle: Windows keeps clipboard data after its writer lets go.
+    pub(super) fn write(text: &str) -> Result<()> {
+        arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(text))
+            .context("writing the Windows clipboard")
+    }
 }
 
 /// One chosen agent pane: fill its input via `herdr pane send-text`, then focus it.
@@ -168,25 +202,39 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Agent, CLIPBOARD_TOOLS, Clipboard, ExportTarget, format_all, format_comment, select_tool,
-    };
+    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment};
     use crate::model::{Comment, Side};
 
+    #[cfg(not(windows))]
     #[test]
     fn clipboard_tool_selection_prefers_list_order_and_can_be_empty() {
+        use super::clipboard::{TOOLS, select_tool};
         // None present -> no tool (the caller surfaces the "install one" error).
-        assert!(select_tool(CLIPBOARD_TOOLS, |_| false).is_none());
+        assert!(select_tool(TOOLS, |_| false).is_none());
         // Only an X11 tool present -> it's chosen, with its selection args.
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "xclip"),
+            select_tool(TOOLS, |c| c == "xclip"),
             Some(("xclip", &["-selection", "clipboard"][..]))
         );
         // When several are present, earlier in the list wins (pbcopy over xclip).
         assert_eq!(
-            select_tool(CLIPBOARD_TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
+            select_tool(TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
+    }
+
+    /// Windows needs no tool on `PATH`, and the text lands as Unicode: `clip.exe` would mangle
+    /// everything past ASCII. Whatever the clipboard held before is put back.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_copy_lands_on_the_clipboard_with_non_ascii_intact() {
+        let before = arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok();
+        Clipboard.export("src/café.rs:3\n+let 日本 = 1;\nnaming 👍").unwrap();
+        let copied = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap();
+        if let Some(before) = before {
+            let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(before));
+        }
+        assert_eq!(copied, "src/café.rs:3\n+let 日本 = 1;\nnaming 👍");
     }
 
     #[test]
@@ -204,15 +252,25 @@ mod tests {
     fn a_failed_send_or_copy_says_what_to_do() {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
         assert_eq!(agent.failure_message(&anyhow::anyhow!("herdr refused")), "release-bot closed");
-        let missing = anyhow::Error::from(super::NoClipboardTool);
-        assert_eq!(
-            Clipboard.failure_message(&missing),
-            "copy failed: install wl-clipboard, xclip, or xsel"
-        );
-        assert_eq!(
-            Clipboard.failure_message(&anyhow::anyhow!("pbcopy exited non-zero")),
-            "copy failed"
-        );
+        #[cfg(not(windows))]
+        {
+            let missing = anyhow::Error::from(super::clipboard::NoTool);
+            assert_eq!(
+                Clipboard.failure_message(&missing),
+                "copy failed: install wl-clipboard, xclip, or xsel"
+            );
+            assert_eq!(
+                Clipboard.failure_message(&anyhow::anyhow!("pbcopy exited non-zero")),
+                "copy failed"
+            );
+        }
+        // Windows has no tool to install, so a failed write never points at one.
+        #[cfg(windows)]
+        {
+            let busy = anyhow::Error::from(arboard::Error::ClipboardOccupied)
+                .context("writing the Windows clipboard");
+            assert_eq!(Clipboard.failure_message(&busy), "copy failed");
+        }
     }
 
     fn comment(file: &str, side: Side, start: u32, end: u32, lines: &str, text: &str) -> Comment {
