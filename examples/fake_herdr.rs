@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     match args.as_slice() {
         ["pane", "list", ..] => {
             if fs::remove_file(dir.join("list-hang")).is_ok() {
-                thread::sleep(Duration::from_secs(10));
+                thread::sleep(Duration::from_secs(30));
             }
             let opened = if dir.join("opened").exists() {
                 format!(r#",{{"pane_id":"{OPENED}"}}"#)

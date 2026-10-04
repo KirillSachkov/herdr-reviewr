@@ -137,9 +137,7 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let target = Target::read(event)?;
     let ws = target.ws.as_str();
     // Held through the close or open, so a concurrent action sees this one's effect.
-    let Some(_lock) = action_lock(action, ws)? else {
-        return Ok(None);
-    };
+    let _lock = action_lock(ws)?;
 
     // One listing serves the run; a failed one never reads as "no reviewr pane".
     let panes =
@@ -167,8 +165,8 @@ const LOCK_BOUND: Duration = Duration::from_secs(15);
 /// The pause between two lock attempts while an explicit action waits.
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Workspace `ws`'s action lock: an action waits up to [`LOCK_BOUND`], the event yields.
-fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
+/// Workspace `ws`'s action lock, waited for up to [`LOCK_BOUND`].
+fn action_lock(ws: &str) -> Result<File, Stop> {
     let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
@@ -187,11 +185,7 @@ fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
     let deadline = Instant::now() + LOCK_BOUND;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(Some(file)),
-            Err(TryLockError::WouldBlock) if action == Action::AutoOpen => {
-                logln!("auto-open yielded: another reviewr action holds {ws}'s lock");
-                return Ok(None);
-            }
+            Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(LOCK_POLL),
             Err(TryLockError::WouldBlock) => {
                 return Err(refused(format!(

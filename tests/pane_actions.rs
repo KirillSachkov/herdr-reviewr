@@ -1185,19 +1185,53 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
 }
 
 #[test]
-fn auto_open_yields_silently_to_a_held_lock() {
+fn auto_open_waits_out_a_held_lock_then_opens() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = hold_lock(dir.path(), "workspace-9");
+    let lock = hold_lock(dir.path(), "workspace-9");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(1));
+        drop(lock);
+    });
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
+
+    let output = run_auto_open(dir.path(), &event, None);
+    release.join().unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{}", stdout(&output));
+    assert!(herdr_calls(dir.path()).contains("plugin pane open"), "{}", herdr_calls(dir.path()));
+}
+
+#[test]
+fn workspace_ids_differing_only_in_case_hold_separate_locks() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = hold_lock(dir.path(), "wA");
+    let event = worktree_event("worktree_created", "wa", env!("CARGO_MANIFEST_DIR"), None);
 
     let started = Instant::now();
     let output = run_auto_open(dir.path(), &event, None);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(output.stdout.is_empty(), "{}", stdout(&output));
-    assert!(output.stderr.is_empty(), "{}", stderr(&output));
-    assert!(started.elapsed() < Duration::from_secs(3), "the event waited for the lock");
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(started.elapsed() < Duration::from_secs(5), "`wa` waited on `wA`'s lock");
+    assert!(herdr_calls(dir.path()).contains("pane list --workspace wa"));
+}
+
+#[test]
+fn a_wedged_herdr_call_frees_the_lock_for_the_next_action() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first toggle takes the lock, then its pane listing hangs past the call bound.
+    fs::write(dir.path().join("list-hang"), "").unwrap();
+    let mut wedged = start("toggle", dir.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !herdr_calls(dir.path()).contains("pane list") {
+        assert!(Instant::now() < deadline, "the first toggle never listed panes");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let output = run_with_context("toggle", dir.path(), &repo_context());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!wedged.wait().unwrap().success(), "the wedged toggle refuses");
 }
 
 #[test]

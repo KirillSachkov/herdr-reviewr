@@ -103,20 +103,53 @@ impl std::error::Error for HerdrError {}
 
 /// Run a herdr subcommand: its stdout, or the classified failure, logged in full.
 fn call(args: &[&str]) -> Result<String, HerdrError> {
-    let out = match crate::proc::command(herdr_bin()).args(args).output() {
-        Ok(out) => out,
+    use std::io::Read;
+    use std::process::Stdio;
+    let spawned = crate::proc::command(herdr_bin())
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
         Err(e) => {
             logln!("herdr {args:?} could not run: {e}");
             return Err(HerdrError::Unanswered);
         }
     };
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let drain = |pipe: Option<Box<dyn Read + Send>>| {
+        thread::spawn(move || {
+            let mut text = Vec::new();
+            pipe.map(|mut pipe| pipe.read_to_end(&mut text));
+            String::from_utf8_lossy(&text).into_owned()
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr = drain(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let deadline = Instant::now() + CALL_BOUND;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            waited => {
+                let _ = child.kill();
+                let _ = child.wait();
+                logln!("herdr {args:?} unanswered after {CALL_BOUND:?}: {waited:?}");
+                return Err(HerdrError::Unanswered);
+            }
+        }
+    };
+    let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    if !status.success() {
         logln!("herdr {args:?} failed: {}", stderr.trim());
         return Err(HerdrError::Refused(error_code(&stderr)));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(stdout)
 }
+
+/// How long one herdr CLI call may run, so a wedged herdr never holds an action's lock.
+const CALL_BOUND: Duration = Duration::from_secs(8);
 
 /// The `error.code` of the envelope a failed call writes to stderr, read line by line.
 fn error_code(stderr: &str) -> Option<String> {
