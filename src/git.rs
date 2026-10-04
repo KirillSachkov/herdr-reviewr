@@ -1254,7 +1254,7 @@ pub fn diff_sides(
         Origin::Same => path,
         Origin::Renamed(source) | Origin::Copied(source) => source,
     };
-    let context = format!("-U{}", crate::diff::MAX_BYTES);
+    let context = format!("-U{}", crate::diff::MAX_LINES);
     let mut args = vec![
         // An empty context line prints as a lone space, whatever the user set.
         "-c",
@@ -1295,13 +1295,13 @@ pub fn diff_sides(
 /// A hunk header `@@ -l,s +l,s @@`: each side's (first line, count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HunkHeader {
-    pub old: (usize, usize),
-    pub new: (usize, usize),
+    pub old: (u32, u32),
+    pub new: (u32, u32),
 }
 
 impl HunkHeader {
     pub(crate) fn parse(line: &str) -> Option<Self> {
-        let range = |r: &str| -> Option<(usize, usize)> {
+        let range = |r: &str| -> Option<(u32, u32)> {
             match r.split_once(',') {
                 Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
                 None => Some((r.parse().ok()?, 1)),
@@ -1319,7 +1319,7 @@ fn parse_sides(out: &str) -> Option<DiffSides> {
     let (mut old, mut new) = (String::new(), String::new());
     let mut hunks = false;
     // Lines the open hunk still holds on each side.
-    let (mut old_left, mut new_left) = (0usize, 0usize);
+    let (mut old_left, mut new_left) = (0u32, 0u32);
     // The side or sides the last body line went to: (old, new).
     let mut last = (false, false);
     for line in out.split_inclusive('\n') {

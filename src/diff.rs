@@ -190,7 +190,7 @@ pub struct FileDiff {
 }
 
 /// A file beyond either budget renders as `too_large` rather than stalling the diff.
-const MAX_LINES: usize = 50_000;
+pub(crate) const MAX_LINES: usize = 50_000;
 /// The byte budget. A file larger than this renders as a `too_large` notice.
 pub(crate) const MAX_BYTES: usize = 2_000_000;
 
@@ -352,43 +352,26 @@ pub const CR_MARKER: &str = "^M";
 
 /// Mark the CR of each edited line whose ending changed: on its exact twin first, else its pair.
 fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) {
+    if !old.iter().chain(new).any(|line| line.contains('\r')) {
+        return;
+    }
     let ends_cr = |lines: &[&str], no: u32| line_body(lines[no as usize - 1]).1;
-    let partner: HashMap<u32, u32> = pairs.iter().copied().collect();
-    let mut marked = Vec::new();
-    for (dels, inss) in change_blocks(rows) {
-        let mut by_text: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut by_no = HashMap::new();
-        for i in inss.clone().rev() {
-            by_text.entry(rows[i].text()).or_default().push(i);
-            by_no.extend(rows[i].new_no().map(|n| (n, i)));
-        }
-        let mut claimed = std::collections::HashSet::new();
-        for d in dels {
-            let Some(o) = rows[d].old_no() else { continue };
-            let twin = by_text.get_mut(&rows[d].text()).and_then(|same| {
-                while let Some(i) = same.pop() {
-                    if !claimed.contains(&i) {
-                        return Some(i);
-                    }
-                }
-                None
-            });
-            let Some(i) = twin.or_else(|| {
-                partner.get(&o).and_then(|n| by_no.get(n)).copied().filter(|i| !claimed.contains(i))
-            }) else {
-                continue;
-            };
-            claimed.insert(i);
-            let Some(n) = rows[i].new_no() else { continue };
-            match (ends_cr(old, o), ends_cr(new, n)) {
-                (true, false) => marked.push(d),
-                (false, true) => marked.push(i),
-                _ => {}
-            }
+    let (mut dels, mut inss) = (HashMap::new(), HashMap::new());
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            Row::Deletion { .. } => dels.extend(row.old_no().map(|o| (o, i))),
+            Row::Insertion { .. } => inss.extend(row.new_no().map(|n| (n, i))),
+            _ => {}
         }
     }
-    for i in marked {
-        if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[i] {
+    for &(o, n) in pairs {
+        let (Some(&d), Some(&i)) = (dels.get(&o), inss.get(&n)) else { continue };
+        let marked = match (ends_cr(old, o), ends_cr(new, n)) {
+            (true, false) => d,
+            (false, true) => i,
+            _ => continue,
+        };
+        if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[marked] {
             *cr = true;
         }
     }
@@ -443,7 +426,9 @@ fn pair_homologs(
     let mut next_ins = inss.start;
     for d in dels {
         let old = rows[d].text();
-        let mut p = next_ins;
+        // An exact twin first: a line whose ending alone changed is that line, not a neighbor.
+        let twin = (next_ins..inss.end).find(|&p| rows[p].text() == old);
+        let mut p = twin.unwrap_or(next_ins);
         while p < inss.end {
             let new = rows[p].text();
             let (ratio, old_e, new_e) = word_emphasis(&old, &new);
@@ -754,6 +739,8 @@ mod tests {
             changes(&d),
             [("-a = 1;".into(), false), ("+a = 2;".into(), false), ("+a = 1;".into(), true)]
         );
+        // The emphasis pairs the same twin the marker does.
+        assert_eq!(d.pairs, [(1, 2)]);
     }
 
     #[test]

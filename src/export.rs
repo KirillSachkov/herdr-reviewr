@@ -185,21 +185,7 @@ impl ExportTarget for Agent {
 #[cfg(test)]
 mod tests {
     use super::{Agent, Clipboard, ExportTarget, format_all, format_comment};
-    use crate::herdr::crlf_line_breaks;
     use crate::model::{Comment, Side};
-
-    #[test]
-    fn windows_line_breaks_are_crlf_and_never_doubled() {
-        let rows = [
-            ("a.rs:2\n+b\nok", "a.rs:2\r\n+b\r\nok"),
-            ("a\n\nb\n", "a\r\n\r\nb\r\n"),
-            ("a\r\nb", "a\r\nb"),
-            ("a\rb", "a\rb"),
-        ];
-        for (text, want) in rows {
-            assert_eq!(crlf_line_breaks(text), want, "{text:?}");
-        }
-    }
 
     #[cfg(not(windows))]
     #[test]

@@ -114,7 +114,6 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
         ends: None,
         changed,
     };
-    let from = |old: String, new: Option<String>| Some(DiffEnds { old, new });
     if !git::is_repo(&input.repo) {
         return Ok(plain(Vec::new()));
     }
@@ -123,14 +122,15 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             Some(t) => {
                 let now = git::snapshot_worktree(&input.repo)?;
                 let changed = git::changed_between(&input.repo, t, &now)?;
-                Ok(ScopeBuild { ends: from(t.to_string(), Some(now)), ..plain(changed) })
+                let ends = DiffEnds { old: t.to_string(), new: Some(now) };
+                Ok(ScopeBuild { ends: Some(ends), ..plain(changed) })
             }
             None => Ok(plain(Vec::new())),
         },
         Scope::Uncommitted => {
             let base = git::diff_base(&input.repo);
             let changed = git::changed_from(&input.repo, &base)?;
-            Ok(ScopeBuild { ends: from(base, None), ..plain(changed) })
+            Ok(ScopeBuild { ends: Some(DiffEnds { old: base, new: None }), ..plain(changed) })
         }
         Scope::Branch => {
             // A resolve failure fails the build, keeping the stale frame.
@@ -142,7 +142,10 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
                 .as_ref()
                 .and_then(|w| git::merge_base(&input.repo, w.oid()));
             let (changed, ends) = match merge_base {
-                Some(base) => (git::changed_from(&input.repo, &base)?, from(base, None)),
+                Some(base) => (
+                    git::changed_from(&input.repo, &base)?,
+                    Some(DiffEnds { old: base, new: None }),
+                ),
                 None => (Vec::new(), None),
             };
             Ok(ScopeBuild { branch_base: resolution.status, ends, ..plain(changed) })
@@ -150,29 +153,21 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
         Scope::Commits => {
             // A tag without a pick builds the empty changeset.
             let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
-            let (status, changed, old) = build_pick(&input.repo, pick)?;
-            let ends = old.and_then(|old| from(old, Some(pick.newest.clone())));
-            Ok(ScopeBuild { pick_status: Some(status), ends, ..plain(changed) })
+            build_pick(&input.repo, pick)
         }
     }
 }
 
-/// The pick's changeset, verdict and old end in one pass; a `gone` pick has none.
-fn build_pick(
-    repo: &Path,
-    pick: &CommitPick,
-) -> Result<(PickStatus, Vec<ChangedFile>, Option<String>)> {
-    let gone = |sha: &str| {
-        (
-            PickStatus {
-                verdict: PickVerdict::Gone(sha.to_string()),
-                subject: String::new(),
-                count: 0,
-            },
-            Vec::new(),
-            None,
-        )
+/// The pick's changeset, verdict and ends in one pass; a `gone` pick has neither.
+fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
+    let build = |verdict, subject, count, changed, ends| ScopeBuild {
+        branch_base: git::BaseStatus::default(),
+        pick_status: Some(PickStatus { verdict, subject, count }),
+        ends,
+        changed,
     };
+    let gone =
+        |sha: &str| build(PickVerdict::Gone(sha.to_string()), String::new(), 0, vec![], None);
     if !git::commit_exists(repo, &pick.newest) {
         return Ok(gone(&pick.newest));
     }
@@ -191,7 +186,8 @@ fn build_pick(
     } else {
         PickVerdict::OffBranch
     };
-    Ok((PickStatus { verdict, subject, count }, changed, Some(old)))
+    let ends = DiffEnds { old, new: Some(pick.newest.clone()) };
+    Ok(build(verdict, subject, count, changed, Some(ends)))
 }
 
 /// The changed-files map every consumer keys by path.

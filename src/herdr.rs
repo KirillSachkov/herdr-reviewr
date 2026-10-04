@@ -33,6 +33,7 @@ struct AgentPane {
     tab_id: String,
     workspace_id: String,
     /// Where the agent works: turn tracking maps it to a worktree.
+    #[serde(default, deserialize_with = "non_empty")]
     cwd: Option<String>,
     #[serde(default, deserialize_with = "non_empty")]
     name: Option<String>,
@@ -247,7 +248,7 @@ pub(crate) struct ProcessInfo {
 /// One foreground process, identified by its executable, never its rewritable title.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Process {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "non_empty")]
     pub(crate) argv0: Option<String>,
     #[serde(default)]
     pub(crate) argv: Vec<String>,
@@ -742,6 +743,19 @@ mod tests {
     use super::{
         AgentChoice, AgentPane, HashMap, HerdrError, Status, parse_agents, parse_tab_labels,
     };
+
+    #[test]
+    fn windows_line_breaks_are_crlf_and_never_doubled() {
+        let rows = [
+            ("a.rs:2\n+b\nok", "a.rs:2\r\n+b\r\nok"),
+            ("a\n\nb\n", "a\r\n\r\nb\r\n"),
+            ("a\r\nb", "a\r\nb"),
+            ("a\rb", "a\rb"),
+        ];
+        for (text, want) in rows {
+            assert_eq!(super::crlf_line_breaks(text), want, "{text:?}");
+        }
+    }
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {

@@ -88,12 +88,9 @@ impl Highlighter {
         let mut out = Vec::new();
         for &line in lines {
             // A CR-ended line highlights as its LF form.
-            let text = crate::diff::line_body(line).0;
-            let line: Cow<'_, str> = if line[text.len()..].starts_with('\r') {
-                Cow::Owned(format!("{text}\n"))
-            } else {
-                Cow::Borrowed(line)
-            };
+            let (text, cr) = crate::diff::line_body(line);
+            let line: Cow<'_, str> =
+                if cr { Cow::Owned(format!("{text}\n")) } else { Cow::Borrowed(line) };
             let spans = match h.highlight_line(&line, syntaxes) {
                 Ok(regions) => regions
                     .into_iter()

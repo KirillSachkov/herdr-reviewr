@@ -136,10 +136,8 @@ fn parse_hunk(hunk: &str) -> (Vec<Row>, bool) {
     let mut numbered = false;
     for raw in hunk.lines() {
         if raw.starts_with("@@ ") {
-            if let Some(hunk) = HunkHeader::parse(raw)
-                && let (Ok(o), Ok(n)) = (u32::try_from(hunk.old.0), u32::try_from(hunk.new.0))
-            {
-                (old_no, new_no) = (o, n);
+            if let Some(hunk) = HunkHeader::parse(raw) {
+                (old_no, new_no) = (hunk.old.0, hunk.new.0);
                 numbered = true;
             }
             continue;
