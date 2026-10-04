@@ -1209,14 +1209,14 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
         assert_eq!(output.status.code(), Some(1), "{mode}");
         assert_eq!(
             stderr(&output),
-            "reviewr: another reviewr action is still running after 5s\n",
+            "reviewr: another reviewr action is still running after 10s\n",
             "{mode}"
         );
         assert!(output.stdout.is_empty(), "{mode}");
     }
     let elapsed = started.elapsed();
 
-    assert!(elapsed >= Duration::from_millis(4500), "refused before the bound: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(9500), "refused before the bound: {elapsed:?}");
     assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
 }
 

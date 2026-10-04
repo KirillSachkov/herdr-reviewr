@@ -190,10 +190,11 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 }
 
 /// How long an explicit action waits for another action to release the lock. One action holds
-/// it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]: about 2 s at
-/// worst. Five seconds lets a double press wait out one full open with room to spare, and still
-/// ends a wait on a wedged holder before the user gives up on the key.
-const LOCK_BOUND: Duration = Duration::from_secs(5);
+/// it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]: under a second
+/// warm, and up to 5.5 s for a cold first open on a Windows VM. Ten seconds waits out that slow
+/// open with room to spare. The wait runs on herdr's action thread and blocks nothing, so the
+/// bound only ends a wait on a wedged holder.
+const LOCK_BOUND: Duration = Duration::from_secs(10);
 
 /// The pause between two lock attempts while an explicit action waits.
 const LOCK_POLL: Duration = Duration::from_millis(20);
