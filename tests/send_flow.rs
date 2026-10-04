@@ -441,7 +441,7 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
 }
 
 /// A review well past Windows' 32,767-character command line goes as one paste, and one over
-/// the half-MiB send cap refuses before reaching herdr, keeping every comment.
+/// the quarter-MiB send cap refuses before reaching herdr, keeping every comment.
 #[test]
 fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     if !in_child() {
@@ -468,9 +468,9 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
         )
     );
 
-    // The cap counts the request herdr reads, escaping included: 300 KB of quotes is under
-    // half a MiB as text and over it as JSON, where each `"` is two bytes.
-    for review in ["x".repeat(600 * 1024), "\"".repeat(300 * 1024)] {
+    // The cap counts the request herdr reads, escaping included: 150 KiB of quotes is under a
+    // quarter MiB as text and over it as JSON, where each `"` is two bytes.
+    for review in ["x".repeat(300 * 1024), "\"".repeat(150 * 1024)] {
         write_comment(&mut app, &review);
         let sent = socket.requests().len();
         press(&mut app, KeyCode::Char('s'), area, &keymap);

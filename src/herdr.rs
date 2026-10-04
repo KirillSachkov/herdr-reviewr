@@ -679,11 +679,13 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
 
 /// The largest request line a send writes, JSON escaping included. herdr caps a request at
 /// 1 MiB (`MAX_INITIAL_REQUEST_BYTES` in its `src/api/server.rs`), but the cap that binds is
-/// time: herdr reads the line one byte at a time, sleeps 100 ms whenever the socket is
-/// momentarily empty, and gives up 5 s after the connection opens. On macOS's 8 KB socket
-/// buffers that moved about 660 KB in the window, so a larger request would read as "herdr
-/// didn't answer" while every retry failed the same way. Half a MiB leaves that margin.
-const MAX_REQUEST_BYTES: usize = 512 * 1024;
+/// time: herdr reads the line one byte at a time and sleeps 100 ms whenever the socket is
+/// momentarily empty. On macOS's 8 KB socket buffers about 660 KB got through in herdr's 5 s
+/// read window. A Windows pipe has no such window, but its 512-byte buffer moved only about
+/// 90 KiB a second (Windows 11 ARM64 running herdr's x64 build), so 512 KiB took 5.7 s of
+/// [`SEND_BOUND`]'s 7. A send reviewr stops waiting on still lands, and the next `Send` would
+/// paste the review twice. A quarter MiB reads in under 3 s on both.
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 /// How long a send waits for herdr's reply. herdr gives up reading a request 5 s after the
 /// connection opens (`INITIAL_REQUEST_TIMEOUT`), and its write into the pane is a channel push,

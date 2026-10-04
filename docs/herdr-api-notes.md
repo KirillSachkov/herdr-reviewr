@@ -281,8 +281,9 @@ socket request is the same call without the argv.
 - The cap that binds is time. The server gives up reading a request 5 s after the connection
   opens (`INITIAL_REQUEST_TIMEOUT`), reads one byte per call, and sleeps 100 ms whenever the
   socket is momentarily empty. On macOS's 8 KB socket buffers about 660 KB got through in the
-  window. reviewr checks the serialized request against 512 KiB before connecting and refuses
-  a review over it.
+  window. A Windows named pipe has no read window, but its 512-byte buffer moved about 90 KiB a
+  second (Windows 11 ARM64, herdr's x64 build): 512 KiB took 5.7 s and 256 KiB 2.9 s. reviewr
+  checks the serialized request against 256 KiB before connecting and refuses a review over it.
 - reviewr waits 7 s for the reply: herdr's 5 s, plus 2 s for the answer. On unix every read and
   write on the connection ends at that deadline too. A Windows pipe takes no I/O timeout, so a
   herdr that accepts and never answers holds reviewr's worker thread until it closes the pipe.
