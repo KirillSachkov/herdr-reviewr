@@ -21,8 +21,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use tempfile::TempDir;
 
-// `cwd` rides every real `agent list` entry (api notes). Send ignores it and resolves from
-// the workspace, so it is here to keep the fixture honest rather than to steer the send.
+// `cwd` keeps the fixture honest; the send resolves from the workspace and ignores it.
 const TWO_AGENTS: &str = r#"{"result":{"agents":[
   {"agent":"claude","agent_status":"idle","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8","cwd":"/w/one"},
   {"agent":"codex","agent_status":"working","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","cwd":"/w/two"}
@@ -222,8 +221,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     )
     .unwrap();
 
-    // Several agents: `s` opens the picker over both rows, labelled from `tab list`, and with
-    // nothing sent yet the highlight arms on the first row.
+    // Several agents: the picker opens over both, labelled by tab, on the first row.
     agents(&fake_dir, TWO_AGENTS);
     write_comment(&mut app, "one");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
@@ -242,8 +240,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
     socket.reply(Reply::Result);
 
-    // One agent: `s` sends straight through, no picker frame in between — and the direct
-    // send arms its agent like a picker send.
+    // One agent: `s` sends with no picker, and arms that agent as a picker send would.
     agents(&fake_dir, ONE_AGENT);
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "one agent sends directly");
@@ -264,8 +261,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "answer codex's prompt first");
     assert_eq!(socket.sends_to("w8:p2"), sends, "nothing was pasted");
 
-    // `enter` sends to the digit-selected agent mid-turn, as a review into a running agent
-    // always has: the paste waits in its input. It consumes the set.
+    // `enter` sends to the digit-picked agent mid-turn, and consumes the set.
     agents(&fake_dir, TWO_AGENTS);
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     press(&mut app, KeyCode::Char('2'), area, &keymap);
@@ -314,8 +310,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
         "the digit-selected send and the armed-row click addressed the same pane"
     );
 
-    // No agent, and an enumeration herdr never answered, both refuse and name the clipboard —
-    // and neither opens a picker.
+    // No agent, or no answer from herdr: both refuse, name the clipboard, and open no picker.
     agents(&fake_dir, r#"{"result":{"agents":[]}}"#);
     write_comment(&mut app, "four");
     press(&mut app, KeyCode::Char('s'), area, &keymap);

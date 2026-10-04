@@ -269,8 +269,7 @@ mod tests {
         );
     }
 
-    /// A console whose input arrives in `batches`, each queued at its time, on a clock the test
-    /// moves: a wait with nothing queued sleeps until the next batch or its timeout.
+    /// A console on a test-driven clock; each batch becomes readable at its own time.
     struct FakeConsole {
         now: Instant,
         batches: VecDeque<(Instant, Vec<Record>)>,

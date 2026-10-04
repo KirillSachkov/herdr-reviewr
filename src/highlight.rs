@@ -1,8 +1,4 @@
-//! Syntax highlighting via `syntect`, themed by the active theme's paired syntax theme.
-//!
-//! The highlighter is rebuilt when the theme
-//! changes and produces per-line foreground spans; the pane keeps the terminal's own
-//! background, so only token colors come from the theme.
+//! Syntax highlighting via `syntect`: foreground spans per line, from the theme's syntax theme.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,22 +16,19 @@ use crate::theme::SyntaxChoice;
 /// The default text color when a theme carries none, or its syntax theme fails to load.
 const DEFAULT_FG: Rgb = (0xcd, 0xd6, 0xf4);
 
-/// The broad bat/two-face syntax set, built once per process (it is expensive to
-/// deserialize) and shared across every `Highlighter`.
+/// The two-face syntax set, deserialized once per process.
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
-/// The two-face embedded theme set, deserialized once and shared — like [`syntaxes`], so a
-/// theme switch clones one theme out of the cached set instead of rebuilding the whole dump.
+/// The two-face theme set, deserialized once; a theme switch clones one theme out of it.
 fn embedded_themes() -> &'static two_face::theme::EmbeddedLazyThemeSet {
     static THEMES: OnceLock<two_face::theme::EmbeddedLazyThemeSet> = OnceLock::new();
     THEMES.get_or_init(two_face::theme::extra)
 }
 
-/// Holds the active syntax theme (absent when it failed to load); highlights file content
-/// into spans against the shared syntax set.
+/// The active syntax theme, `None` when it failed to load, which highlights as plain spans.
 pub struct Highlighter {
     theme: Option<Theme>,
     default_fg: Rgb,
@@ -48,11 +41,7 @@ impl fmt::Debug for Highlighter {
 }
 
 impl Highlighter {
-    /// Build from a theme's paired syntax source: a bundled `.tmTheme` (parsed from vendored
-    /// bytes), or a theme from the `two-face` embedded set. A bundled theme that fails to
-    /// parse leaves the highlighter theme-less, so highlighting degrades to plain spans
-    /// rather than crashing. Most files color out of the box via the
-    /// broad two-face syntax set.
+    /// Build from a bundled `.tmTheme` or a `two-face` theme; one that fails to parse goes plain.
     pub fn new(syntax: SyntaxChoice) -> Self {
         let theme = match syntax {
             SyntaxChoice::Bundled(bytes) => {

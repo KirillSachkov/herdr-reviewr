@@ -1,6 +1,4 @@
-//! Open a URL in the user's browser — the `PR` tab's only outward action.
-//!
-//! A configured opener wins; otherwise the host platform's default is used.
+//! Open a URL in the browser: the configured `url_opener`, else the platform's default.
 
 use std::process::{Command, Stdio};
 
@@ -63,8 +61,7 @@ fn spawn_detached(tool: &str, mut command: Command) -> Result<()> {
     Ok(())
 }
 
-/// The configured opener's program and arguments: `template` split the way the `editor` key
-/// is, `{url}` substituted per word — so a URL never splits — and appended when absent.
+/// The configured opener's argv: `template` split like `editor`, `{url}` placed or appended.
 fn opener_argv(template: &str, url: &str) -> Option<(String, Vec<String>)> {
     let names_url = template.contains("{url}");
     let mut words =
@@ -77,10 +74,7 @@ fn opener_argv(template: &str, url: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
-/// Gate a markdown link destination before it reaches the OS opener
-/// : trimmed, case-insensitive `http://`/`https://` with something
-/// after the scheme, and no control or bidirectional-override character anywhere — a
-/// destination the display would sanitize must never open as different bytes.
+/// A link the OS opener may take: http(s) with a host, and no character the display would hide.
 pub fn openable_url(url: &str) -> Result<&str, &'static str> {
     let trimmed = url.trim();
     let hostile = trimmed.chars().any(crate::markdown::hostile_char);

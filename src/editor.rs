@@ -21,10 +21,7 @@ enum LineArg {
     Attached,
 }
 
-/// One editor family: the binary names that select it, how it takes a line, and where it draws.
-///
-/// A window editor hands the file to an instance of its own and returns, so reviewr keeps the
-/// pane. A terminal editor draws in the pane and is given it.
+/// One editor family: its binary names, how it takes a line, and whether it draws in a window.
 struct Dialect {
     names: &'static [&'static str],
     line: LineArg,
@@ -39,9 +36,7 @@ const DIALECTS: &[Dialect] = &[
         window: false,
     },
     Dialect { names: &["nano", "micro", "kak"], line: LineArg::Plus, window: false },
-    // Emacs is whichever its build and `DISPLAY` make it, and neither is readable from here.
-    // The pane is the survivable guess: a windowed Emacs handed the pane leaves the pane blank
-    // until it quits, where a terminal Emacs denied it is invisible.
+    // Emacs may or may not open a window; handing it the pane is the survivable guess.
     Dialect { names: &["emacs", "emacsclient"], line: LineArg::Plus, window: false },
     Dialect { names: &["hx", "helix"], line: LineArg::Suffix, window: false },
     // MacVim and gVim open a window and return, unlike every other vi-family binary.
@@ -53,13 +48,11 @@ const DIALECTS: &[Dialect] = &[
         window: true,
     },
     Dialect { names: &["subl", "sublime_text"], line: LineArg::Suffix, window: true },
-    // Plain `zed` collides with the OpenZFS event daemon, so Linux packages ship the CLI
-    // under a name of their own.
+    // Linux packages rename the CLI: plain `zed` is the OpenZFS event daemon.
     Dialect { names: &["zed", "zeditor", "zedit"], line: LineArg::Suffix, window: true },
     Dialect { names: &["bbedit", "gedit"], line: LineArg::Plus, window: true },
     Dialect { names: &["mate"], line: LineArg::Flag, window: true },
-    // `xed` names two editors. On macOS it is Xcode's opener, which takes `--line`. On Linux it
-    // is Mint's X-Apps editor, a gedit fork that takes `+LINE` and rejects `--line` outright.
+    // `xed` is Xcode's opener on macOS (`--line`) and Mint's gedit fork on Linux (`+LINE`).
     #[cfg(target_os = "macos")]
     Dialect { names: &["xed"], line: LineArg::Flag, window: true },
     #[cfg(not(target_os = "macos"))]
@@ -128,9 +121,7 @@ pub fn resolve(
         return Err(NoEditor::Unset);
     };
     let mut words = split_command(&value).into_iter();
-    // The same guard the template gets: a value of two quote characters is not empty and
-    // splits to one empty word, and handing that to the pane would flip the screen for a
-    // spawn that cannot succeed.
+    // `""` splits to one empty word, which names no program.
     let Some(program) = words.next().filter(|p| !p.is_empty()) else {
         return Err(NoEditor::NamesNoProgram);
     };
@@ -206,14 +197,7 @@ fn dialect_for(program: &str) -> Option<&'static Dialect> {
     DIALECTS.iter().find(|d| d.names.iter().any(|n| n.eq_ignore_ascii_case(name)))
 }
 
-/// Build the command from a user template, substituting every `{file}` and `{line}`.
-///
-/// `{line}` goes first, and that ordering is the whole trick: a path is only ever substituted
-/// into text nothing looks at again, so a file named `{line}.cshtml` stays a file name rather
-/// than becoming a second placeholder.
-///
-/// The config layer rejects an empty value, but a value of two quote characters is not empty and
-/// splits to one empty word, which names no program.
+/// Build the command from a template, `{line}` first so a path is never read as a placeholder.
 fn from_template(template: &str, file: &str, line: u32) -> Result<EditorCommand, NoEditor> {
     let named_file = template.contains("{file}");
     let line = line.to_string();
@@ -266,8 +250,7 @@ mod tests {
 
     #[test]
     fn window_editors_get_their_line_and_nothing_else() {
-        // reviewr adds no flag of its own: the launcher hands the file over and returns, and
-        // nothing waits on it.
+        // No flag of reviewr's own: nothing waits on a window editor.
         for name in ["code", "code-insiders", "codium", "cursor", "windsurf", "positron"] {
             assert_eq!(argv(&env(name).unwrap()), format!("{name} -g /repo/src/lib.rs:41"));
         }
@@ -304,8 +287,7 @@ mod tests {
 
     #[test]
     fn only_a_terminal_editor_is_handed_the_pane() {
-        // The one question the argv does not answer, so nothing else in this module asserts it:
-        // which of the two paths `run_editor` takes.
+        // Which path `run_editor` takes, the one thing the argv does not show.
         for name in ["vim", "nvim", "nano", "micro", "kak", "emacs", "hx", "helix"] {
             assert!(env(name).unwrap().wants_terminal, "{name} paints in the pane");
         }
