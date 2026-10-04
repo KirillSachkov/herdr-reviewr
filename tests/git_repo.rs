@@ -102,6 +102,14 @@ fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob()
     let moved =
         diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("same.txt")).unwrap();
     assert_eq!(moved, text("same\n", "same\n"), "a pure rename: both sides are the blob");
+    // A rename whose source path is back, re-created and staged: only the rename's own
+    // sections spell its sides, never the new file at the old path.
+    r.write("a.txt", "fresh\n");
+    r.git(&["add", "a.txt"]);
+    let renamed = diff_sides(r.path(), "HEAD", None, "b.txt", Origin::Renamed("a.txt")).unwrap();
+    assert_eq!(renamed, text("one\ntwo\nthree\nfour\n", "one\ntwo\nthree\nFOUR\n"));
+    r.git(&["rm", "-q", "--cached", "a.txt"]);
+    std::fs::remove_file(r.path().join("a.txt")).unwrap();
     // A copy's source is unchanged, so the old side is its committed content.
     r.write("copy.txt", "one\ntwo\nTHREE\nfour\n");
     r.git(&["add", "copy.txt"]);

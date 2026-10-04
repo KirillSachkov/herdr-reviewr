@@ -6577,10 +6577,10 @@ mod tests {
         app.scope = Scope::Commits;
         app.reload().unwrap();
         let commits = cost(&mut app, "a.txt", None);
-        // One `git diff` per tracked file, a rename included; an untracked file reads raw.
-        // The sides were sized by the build, and every scope's base rides the build it was
-        // named in, so neither is asked again.
-        assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
+        // One `git diff` per tracked file, and a rename's source blob read beside it; an
+        // untracked file reads raw. The sides were sized by the build, and every scope's base
+        // rides the build it was named in, so neither is asked again.
+        assert_eq!(uncommitted, (1, 0, 2), "a CRLF edit, an untracked file, a pure rename");
         assert_eq!((branch, last_turn, commits), (1, 1, 1));
         let rows: Vec<String> = app
             .diff

@@ -1387,9 +1387,9 @@ impl<'a> Origin<'a> {
 /// `path`'s diff sides from the tree-ish `old` to the tree-ish `new`, or to the worktree when
 /// `new` is `None`, its old side read where `origin` says.
 ///
-/// One `git diff`. A second, a `git show`, only where that diff spells no side: a copy's
-/// source, and a file git reports no line of (a mode change), whose two sides are the one
-/// blob. An error is a git that could not answer: a missing revision, an unborn `HEAD`.
+/// One `git diff`. A second, a `git show`, only where that diff spells no side: a rename's or
+/// copy's source, and a file git reports no line of (a mode change), whose two sides are the
+/// one blob. An error is a git that could not answer: a missing revision, an unborn `HEAD`.
 pub fn diff_sides(
     repo: &Path,
     old: &str,
@@ -1424,24 +1424,20 @@ pub fn diff_sides(
         old,
     ];
     args.extend(new);
-    args.push("--");
-    if let Origin::Renamed(source) = origin {
-        // A rename's target is a new file and its source a deleted one, so the two sections
-        // spell both sides.
-        args.extend(["--diff-filter=AD", source]);
-    }
-    args.push(path);
+    args.extend(["--", path]);
     let out = git(repo, &args)?;
     let same = |rev: &str, at: &str| {
         let text = file_content(repo, rev, at);
         DiffSides::Text { old: text.clone(), new: text }
     };
     Ok(match (parse_sides(&out), origin) {
-        // A copy's source is still there, in a section of its own if it changed too, so its
-        // old side is read rather than diffed.
-        (Some(DiffSides::Text { new: text, .. }), Origin::Copied(source)) => {
-            DiffSides::Text { old: file_content(repo, old, source), new: text }
-        }
+        // A rename's or copy's target diffs as a new file, and its old side is the source's
+        // blob, read rather than diffed: whatever stands at the source path now (a copy's
+        // source, a re-created file) is another file's change.
+        (
+            Some(DiffSides::Text { new: text, .. }),
+            Origin::Renamed(source) | Origin::Copied(source),
+        ) => DiffSides::Text { old: file_content(repo, old, source), new: text },
         (Some(sides), _) => sides,
         (None, _) => match new {
             Some(new) => same(new, path),
