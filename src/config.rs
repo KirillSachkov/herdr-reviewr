@@ -1,4 +1,7 @@
 //! Command-line flags and the shared plugin configuration boundary.
+//!
+//! Flags override defaults; the positional
+//! argument (if any) is the repo path, else the current directory.
 
 use std::fmt;
 use std::io::ErrorKind;
@@ -14,13 +17,16 @@ pub struct Config {
     pub theme: Option<String>,
     /// `Some(false)` when `--wrap off` is passed; `None` keeps the default (wrap on).
     pub wrap: Option<bool>,
-    /// The plugin config directory, resolved once at startup by [`resolve_config_dir`]; every later
-    /// config read rereads only the file inside it.
+    /// The plugin config directory, resolved once at startup by [`resolve_config_dir`];
+    /// every later config read rereads only the file inside it.
     pub plugin_config_dir: Option<PathBuf>,
 }
 
 impl Config {
     /// Parse `args` (the process arguments *after* argv\[0\]).
+    ///
+    /// Recognises `--poll <ms>` (min 200, default 2000), `--base <ref>`,
+    /// `--theme <name>`, and `--wrap on|off`; the first non-flag token is the repo path.
     pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
         let mut repo: Option<PathBuf> = None;
         let mut poll_ms: u64 = 2000;
@@ -210,12 +216,14 @@ impl PluginConfig {
         &self.theme
     }
 
-    /// The scope a fresh reviewr pane is built with — startup and config recovery.
+    /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
+    /// switches a running pane's scope.
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
     }
 
-    /// How a fresh pane shows markdown — startup and config recovery.
+    /// How a fresh pane shows markdown — startup and config recovery. A reread never flips a
+    /// running pane's view; `m` does.
     pub fn markdown_view(&self) -> MarkdownView {
         self.markdown_view
     }
@@ -300,7 +308,8 @@ impl PluginConfig {
     }
 }
 
-/// A whole-file configuration failure.
+/// A whole-file configuration failure. It keeps the path in the value so every entry point can
+/// show the same actionable diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfigError {
     path: PathBuf,
@@ -328,7 +337,9 @@ pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBu
     config_dir_from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
 }
 
-/// The resolution rule behind [`resolve_config_dir`], split out so tests can inject both inputs.
+/// The resolution rule behind [`resolve_config_dir`], split out so tests can inject both
+/// inputs. An empty value names no directory on either branch — otherwise an empty env var
+/// would read `./config.toml` from the repo under review and block the pane on it.
 fn config_dir_from(
     env: Option<std::ffi::OsString>,
     cli: impl FnOnce() -> Option<String>,
@@ -338,7 +349,8 @@ fn config_dir_from(
         .or_else(|| cli().filter(|dir| !dir.is_empty()).map(PathBuf::from))
 }
 
-/// Read one plugin config snapshot from the resolved config directory.
+/// Read one plugin config snapshot from the resolved config directory. No directory reads no
+/// config file, which is the missing-file outcome and uses every default.
 pub fn plugin_config(dir: Option<&Path>) -> Result<PluginConfig, PluginConfigError> {
     match dir {
         Some(dir) => plugin_config_in(dir),
@@ -384,8 +396,8 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             "uncommitted" => crate::model::Scope::Uncommitted,
             "branch" => crate::model::Scope::Branch,
             "last-turn" => crate::model::Scope::LastTurn,
-            // `commits` needs a pick the pane does not yet hold, so it is not a start scope and
-            // falls to the error.
+            // `commits` needs a pick the pane does not yet hold, so it is not a start scope
+            // and falls to the error.
             _ => {
                 return Err(value_error(
                     path,
@@ -481,8 +493,8 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             .as_str()
             .filter(|c| !c.trim().is_empty())
             .ok_or_else(|| value_error(path, value, "editor", "a non-empty command"))?;
-        // `{file}` and `{line}` are the whole grammar, so a typo for one of them would otherwise
-        // reach the editor as a literal word and open a file named after the typo
+        // `{file}` and `{line}` are the whole grammar, so a typo for one of them would
+        // otherwise reach the editor as a literal word and open a file named after the typo
         if let Some(unknown) = unknown_placeholder(command, &["file", "line"]) {
             return Err(placeholder_error(path, "editor", &unknown, "`{file}` and `{line}`"));
         }
@@ -508,8 +520,9 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.url_opener = Some(command.to_owned());
     }
-    // A hostname is recognized by at most one forge; a cross-key collision is an invalid value
-    // under CFG-WHOLE-FILE.
+    // A hostname is recognized by at most one forge; a cross-key collision is an invalid
+    // value under CFG-WHOLE-FILE. Scanned as a set so a new key joins by
+    // being listed, in the parse order above: the later key's error names the earlier owner.
     let host_keys = [
         ("github_host", &config.github_host),
         ("gitlab_host", &config.gitlab_host),
@@ -534,8 +547,10 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a named key,
-/// alone or behind a `ctrl+`/`alt+` prefix.
+/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
+/// named key, alone or behind a `ctrl+`/`alt+` prefix. The character is
+/// one visible cell — a positive display width also rejects the zero-width class `is_control`
+/// misses (format chars, combining marks).
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     use crate::keymap::KeyCode;
     let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
@@ -560,8 +575,9 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     }
 }
 
-/// Parse and resolve the `[keybindings]` table: action names from the keymap table in, each bound
-/// to a non-empty array of keys, a bare character or a `ctrl+`/`alt+` chord.
+/// Parse and resolve the `[keybindings]` table:
+/// action names from the keymap table in, each bound to a non-empty array of
+/// keys, a bare character or a `ctrl+`/`alt+` chord.
 fn parse_keybindings(
     path: &Path,
     value: &toml::Value,
@@ -630,8 +646,8 @@ fn string_value<'a>(
     value.as_str().ok_or_else(|| value_error(path, value, key, expected))
 }
 
-/// The one invalid-value grammar: the key, what it takes, and what it was given, so the line says
-/// what to fix without opening the file.
+/// The one invalid-value grammar: the key, what it takes, and what it was given, so the line
+/// says what to fix without opening the file.
 fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> PluginConfigError {
     // TOML's own spelling, so a string given where an array belongs reads as the string it is.
     let given = value.to_string();
@@ -641,7 +657,8 @@ fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> P
     )
 }
 
-/// A command template naming a placeholder the key does not know: the typo, then the ones it does.
+/// A command template naming a placeholder the key does not know: the typo, then the ones it
+/// does.
 fn placeholder_error(path: &Path, key: &str, unknown: &str, known: &str) -> PluginConfigError {
     PluginConfigError::new(
         path,
@@ -657,6 +674,9 @@ fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError
 }
 
 /// The first `{` in `command` that opens neither `{file}` nor `{line}`.
+///
+/// A brace that closes nothing opens nothing either: `code {fil` would otherwise reach the
+/// editor as the literal argument `{fil`, which is the typo this rule exists to catch
 fn unknown_placeholder(command: &str, known: &[&str]) -> Option<String> {
     let mut rest = command;
     while let Some(at) = rest.find('{') {
@@ -673,8 +693,9 @@ fn unknown_placeholder(command: &str, known: &[&str]) -> Option<String> {
     None
 }
 
-/// Parse one self-hosted forge key: a bare hostname naming no built-in forge host — a hostname is
-/// recognized by at most one forge.
+/// Parse one self-hosted forge key: a bare hostname naming no built-in forge host — a
+/// hostname is recognized by at most one forge. The built-in set has
+/// one authority, `git::forge_for_host`, asked here with no self-hosted keys.
 fn parse_forge_host(
     path: &Path,
     key: &str,
@@ -761,7 +782,8 @@ mod tests {
         let dir =
             super::config_dir_from(Some("/tmp/cfg".into()), || panic!("cli asked despite the env"));
         assert_eq!(dir, Some(PathBuf::from("/tmp/cfg")));
-        // Env unset: the CLI's directory is used.
+        // Env unset: the CLI's directory is used. An empty env value names no directory
+        // and falls through the same way.
         let dir = super::config_dir_from(None, || Some("/tmp/from-cli".to_string()));
         assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
         let dir = super::config_dir_from(Some("".into()), || Some("/tmp/from-cli".to_string()));
@@ -943,8 +965,8 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.gitlab_host(), Some("git.corp.example"));
 
-        // The same hostname under two forge keys is an invalid file (CFG-WHOLE-FILE): a hostname is
-        // recognized by at most one forge.
+        // The same hostname under two forge keys is an invalid file (CFG-WHOLE-FILE): a
+        // hostname is recognized by at most one forge.
         std::fs::write(
             &path,
             "github_host = \"code.corp.example\"\ngitlab_host = \"code.corp.example\"\n",

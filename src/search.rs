@@ -1,4 +1,9 @@
 //! The search worker: the `fff-search` engine behind request/completion channels.
+//!
+//! The engine owns matching, ranking, and indexing; reviewr passes the query through and
+//! renders results in the engine's order. The worker owns the picker and
+//! its background scan, so a query never runs on the frame loop. Completions are
+//! generation-tagged and land latest-wins, like the world worker's.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -9,14 +14,15 @@ use fff_search::{
     GrepSearchOptions, PaginationArgs, SharedFilePicker, SharedFrecency,
 };
 
-/// The most results one query fetches per group.
+/// The most results one query fetches per group. The overlay list scrolls, so every
+/// fetched result is reachable; anything past the cap shows in the `… N more` count.
 const FILE_LIMIT: usize = 50;
 const CODE_LIMIT: usize = 200;
-/// Cap on one grep's runtime, so a pathological query returns partial results instead of pinning
-/// the worker while newer keystrokes queue.
+/// Cap on one grep's runtime, so a pathological query returns partial results instead of
+/// pinning the worker while newer keystrokes queue.
 const GREP_BUDGET_MS: u64 = 80;
-/// How long a not-yet-warm worker waits for the next keystroke before re-checking whether the scan
-/// finished and the pending query can run for real.
+/// How long a not-yet-warm worker waits for the next keystroke before re-checking whether
+/// the scan finished and the pending query can run for real.
 const WARMUP_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's cache home. The frecency store lives here, never the worktree
@@ -29,7 +35,8 @@ pub fn cache_dir() -> PathBuf {
 pub enum SearchJob {
     /// Run `query`; the completion echoes the generation back.
     Query { generation: u64, query: String },
-    /// Record a picked result in the engine's frecency store, so ranking improves with use.
+    /// Record a picked result in the engine's frecency store, so ranking improves with
+    /// use.
     Track { path: String },
 }
 
@@ -52,7 +59,8 @@ pub struct CodeHit {
     pub spans: Vec<(u32, u32)>,
 }
 
-/// One query's results, both groups.
+/// One query's results, both groups. `file_total` is the engine's full match count;
+/// `code_more` marks a grep the page cap or time budget cut short.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchResults {
     pub files: Vec<FileHit>,
@@ -61,13 +69,14 @@ pub struct SearchResults {
     pub code_more: bool,
 }
 
-/// A finished query's outcome — the three states the overlay's phases mirror, at the wire layer.
+/// A finished query's outcome — the three states the overlay's phases mirror, at the wire
+/// layer.
 #[derive(Debug)]
 pub enum SearchOutcome {
     /// Results for the query; the previously landed set stays painted until this lands.
     Ready(SearchResults),
-    /// The engine's first scan is still running — the overlay shows `indexing…` and the worker
-    /// re-runs the query when the scan lands.
+    /// The engine's first scan is still running — the overlay shows `indexing…` and the
+    /// worker re-runs the query when the scan lands.
     Indexing,
     /// The engine failed; its message shows in the results pane.
     Failed(String),
@@ -88,7 +97,8 @@ struct Engine {
 }
 
 impl Engine {
-    /// Start the picker's background scan, watcher, and content indexing.
+    /// Start the picker's background scan, watcher, and content indexing. The frecency
+    /// store opens under `cache_dir`, never the worktree.
     fn start(repo: PathBuf, cache_dir: &Path) -> Result<Self, String> {
         let shared = SharedFilePicker::default();
         let frecency = SharedFrecency::default();
@@ -160,8 +170,9 @@ impl Engine {
                 ..Default::default()
             },
         );
-        // Drop each match line's leading indentation so the row text aligns at the left in the
-        // narrow pane; the engine adjusts its match offsets as it trims.
+        // Drop each match line's leading indentation so the row text aligns at the left in
+        // the narrow pane; the engine adjusts its match offsets as it trims. The preview
+        // keeps the true indentation.
         for m in &mut grep.matches {
             m.trim_leading_whitespace();
         }
@@ -195,7 +206,9 @@ impl Engine {
     }
 }
 
-/// Run the search worker until the request channel closes.
+/// Run the search worker until the request channel closes. Queued queries coalesce into
+/// the newest; a query that arrives before the first scan finishes completes as
+/// `indexing…` and re-runs when the scan lands.
 pub fn spawn(
     repo: PathBuf,
     cache_dir: PathBuf,
@@ -208,8 +221,8 @@ pub fn spawn(
             let engine = match Engine::start(repo, &cache_dir) {
                 Ok(engine) => engine,
                 Err(e) => {
-                    // Report on the first query, then exit: without an engine every later request
-                    // would fail the same way.
+                    // Report on the first query, then exit: without an engine every later
+                    // request would fail the same way.
                     if let Ok(SearchJob::Query { generation, .. }) = rx.recv() {
                         let outcome = SearchOutcome::Failed(e);
                         let _ = tx.send(SearchCompletion { generation, outcome });
@@ -250,8 +263,8 @@ pub fn spawn(
                         SearchJob::Track { path } => engine.track(&path),
                     }
                 }
-                // A fresh job supersedes any query still parked for warm-up, so a stale generation
-                // never burns a grep after the scan lands.
+                // A fresh job supersedes any query still parked for warm-up, so a stale
+                // generation never burns a grep after the scan lands.
                 if job.is_some() {
                     pending = None;
                 }

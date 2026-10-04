@@ -1,4 +1,8 @@
 //! Formatting comments and exporting them to the agent or clipboard.
+//!
+//! A comment becomes a block of `location`, the
+//! diff snippet, then the text. Export is consume-on-success: the caller removes
+//! a comment only after `export` returns `Ok`.
 
 use anyhow::Result;
 
@@ -10,8 +14,8 @@ pub fn format_comment(comment: &Comment) -> String {
     format!("{}\n{}\n{}", comment.location(), comment.lines, normalize_text(&comment.text))
 }
 
-/// Comment text for export: drop `\r`, trim trailing space per line, and drop blank lines so a
-/// multi-line comment can never introduce the blank-line block separator.
+/// Comment text for export: drop `\r`, trim trailing space per line, and drop blank
+/// lines so a multi-line comment can never introduce the blank-line block separator.
 fn normalize_text(text: &str) -> String {
     text.replace('\r', "")
         .lines()
@@ -34,7 +38,9 @@ pub trait ExportTarget {
     fn label(&self) -> &'static str;
     /// Destination-specific confirmation shown after a successful export.
     fn success_message(&self, count: usize) -> String;
-    /// Destination-specific line shown after a failed one, given the error [`Self::export`] returned.
+    /// Destination-specific line shown after a failed one, given the error [`Self::export`]
+    /// returned. It is the whole status, so it is one short sentence a reviewer can read, never
+    /// the underlying error. The cause goes to the log.
     fn failure_message(&self, error: &anyhow::Error) -> String;
 }
 
@@ -160,7 +166,8 @@ impl ExportTarget for Agent {
         "agent"
     }
 
-    /// Names the agent it addressed.
+    /// Names the agent it addressed. The send is irreversible and consumes the whole set, so
+    /// this line is the reviewer's only record of where the review went.
     fn success_message(&self, count: usize) -> String {
         format!("sent {} to {}", counted_comments(count), self.name)
     }

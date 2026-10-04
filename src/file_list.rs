@@ -1,5 +1,9 @@
-//! The file-list directory tree: the scope's changed files grouped into a collapsible tree of
-//! directories and files, flattened to the rows the navigator paints.
+//! The file-list directory tree: the scope's changed files grouped into a collapsible
+//! tree of directories and files, flattened to the rows the navigator paints.
+//!
+//! This module is pure — it turns a `&[Entry]` plus the set of directory paths toggled
+//! from the tab's resting state into a flat `Vec<Row>`; selection, expansion state, and
+//! rendering live in `app.rs` and `ui.rs`.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
@@ -11,8 +15,8 @@ use crate::model::{ChangeKind, ChangedFile};
 pub struct Row {
     /// Nesting level, for indentation.
     pub depth: usize,
-    /// The segment(s) shown — a directory name, a file basename, or a collapsed chain joined with
-    /// `/` (single-child directories fold into their child).
+    /// The segment(s) shown — a directory name, a file basename, or a collapsed chain
+    /// joined with `/` (single-child directories fold into their child).
     pub name: String,
     pub kind: RowKind,
     /// Whether git ignores this row's path — rendered dimmed in `All files`.
@@ -22,19 +26,24 @@ pub struct Row {
 /// What a [`Row`] is: a directory (togglable) or a file (opens the read pane).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RowKind {
-    /// A directory: its full path keys its expansion state.
+    /// A directory: its full path keys its expansion state. `has_change` says a listed
+    /// annotated entry lies under it, in either state, so the renderer can mark a collapsed
+    /// `All files` folder that holds a change.
     Dir { path: String, expanded: bool, has_change: bool },
     /// A file: its index into the source `&[Entry]`, plus its annotation when changed.
     File { index: usize, annotation: Option<Annotation> },
 }
 
-/// The change a file carries in the active scope, shown inline in the tree.
+/// The change a file carries in the active scope, shown inline in the tree. Absent on an
+/// unchanged `All files` file.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Annotation {
     pub change: ChangeKind,
     pub additions: u32,
     pub deletions: u32,
-    /// Git reports no text diff for this change — binary content, or an unset `diff` attribute.
+    /// Git reports no text diff for this change — binary content, or an unset `diff`
+    /// attribute. Carried for the read pane, not painted here:
+    /// such a change has no countable lines, so it already shows no stats.
     pub binary: bool,
     /// The rename or copy source, from the same build as `change`.
     pub previous_path: Option<String>,
@@ -44,8 +53,8 @@ pub struct Annotation {
 }
 
 impl From<&ChangedFile> for Annotation {
-    /// The scope annotation a changed file carries — the one mapping, shared by the `Changes` entry
-    /// build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
+    /// The scope annotation a changed file carries — the one mapping, shared by the `Changes`
+    /// entry build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
     fn from(f: &ChangedFile) -> Self {
         Self {
             change: f.kind,
@@ -59,7 +68,8 @@ impl From<&ChangedFile> for Annotation {
     }
 }
 
-/// The navigator's source row: a path, plus the rename source and the scope annotation when it has one.
+/// The navigator's source row: a path, plus the rename source and the scope annotation when
+/// it has one. `Changes` annotates every entry; `All files` annotates only changed files.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
     pub path: String,
@@ -67,8 +77,8 @@ pub struct Entry {
     pub annotation: Option<Annotation>,
     /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
-    /// A wholly-ignored directory placeholder whose children load lazily on expand; never set on a
-    /// `Changes` entry.
+    /// A wholly-ignored directory placeholder whose children load lazily on expand; never
+    /// set on a `Changes` entry.
     pub is_dir: bool,
 }
 
@@ -103,19 +113,27 @@ impl Row {
     }
 }
 
-/// One directory node: its sub-directories and the files directly in it, both keyed by name so
-/// iteration is alphabetical.
+/// One directory node: its sub-directories and the files directly in it, both keyed by name
+/// so iteration is alphabetical.
 #[derive(Default)]
 struct Dir {
     dirs: BTreeMap<String, Dir>,
     files: BTreeMap<String, usize>,
-    /// Set when a wholly-ignored directory placeholder created this node — its row renders dimmed.
+    /// Set when a wholly-ignored directory placeholder created this node — its row renders
+    /// dimmed. A directory derived from tracked file paths stays `false`.
     ignored: bool,
-    /// Whether a listed annotated entry lies under this node at any depth.
+    /// Whether a listed annotated entry lies under this node at any depth. Marked on every
+    /// ancestor as an annotated entry is inserted, so no later walk is needed. An ignored
+    /// placeholder's unloaded children are not entries, so they do not count until it is
+    /// expanded.
     has_change: bool,
 }
 
-/// Flatten `entries` into the visible tree rows.
+/// Flatten `entries` into the visible tree rows. `default_expanded` sets a directory's
+/// resting state — `true` for `Changes` (expanded unless toggled), `false` for `All files`
+/// (collapsed unless toggled); `toggled` holds the paths flipped from that default.
+/// Single-child directories fold into their child; directories sort before files,
+/// alphabetically within a parent.
 pub fn build<S: BuildHasher>(
     entries: &[Entry],
     toggled: &HashSet<String, S>,
@@ -130,7 +148,9 @@ pub fn build<S: BuildHasher>(
     rows
 }
 
-/// Insert `entry` at `index` into the tree, creating directories along the way.
+/// Insert `entry` at `index` into the tree, creating directories along the way. A directory
+/// placeholder (`is_dir`) creates its node and marks it ignored, holding no file — its
+/// children arrive later when the app expands it.
 fn insert(root: &mut Dir, entry: &Entry, index: usize) {
     let mut segments: Vec<&str> = entry.path.split('/').filter(|s| !s.is_empty()).collect();
     if entry.is_dir {
@@ -241,7 +261,8 @@ mod tests {
         files.iter().map(Entry::from_changed).collect()
     }
 
-    /// Render the rows as `<depth>:<dir|file>:<name>` lines, for compact assertions.
+    /// Render the rows as `<depth>:<dir|file>:<name>` lines, for compact assertions. Uses the
+    /// `Changes` default (expanded unless toggled).
     fn shape(files: &[ChangedFile], collapsed: &HashSet<String>) -> Vec<String> {
         shape_rows(&build(&entries(files), collapsed, true))
     }
@@ -391,8 +412,8 @@ mod tests {
 
     #[test]
     fn an_ignored_dir_placeholder_renders_as_a_collapsed_ignored_row() {
-        // A wholly-ignored directory shows as one dimmed dir row, with no children until the app
-        // loads them on expand.
+        // A wholly-ignored directory shows as one dimmed dir row, with no children until the
+        // app loads them on expand.
         let rows = build(&[ignored_dir("target")], &HashSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ignored, "the placeholder row is marked ignored (dimmed)");
