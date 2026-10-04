@@ -53,6 +53,9 @@ pub struct WorldSnapshot {
     /// The `commits` scope's pick verdict, from the same build as the changeset it heads
     /// `None` on every other scope.
     pub pick_status: Option<PickStatus>,
+    /// The worktree snapshot the `last-turn` changeset diffs its baseline to. `None` on every
+    /// other scope.
+    pub turn_snapshot: Option<String>,
     /// The commit `HEAD` named when the build ran, the commit picker's universe key
     /// `None` in an unborn repository.
     pub head: Option<String>,
@@ -84,6 +87,7 @@ pub struct PickStatus {
 pub struct ScopeBuild {
     pub branch_base: git::BaseStatus,
     pub pick_status: Option<PickStatus>,
+    pub turn_snapshot: Option<String>,
     pub changed: Vec<ChangedFile>,
 }
 
@@ -100,10 +104,11 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
             entries: Vec::new(),
             branch_base: git::BaseStatus::default(),
             pick_status: None,
+            turn_snapshot: None,
             head: None,
         });
     }
-    let ScopeBuild { branch_base, pick_status, changed } = build_changed(input)?;
+    let ScopeBuild { branch_base, pick_status, turn_snapshot, changed } = build_changed(input)?;
     let head = git::head_oid(&input.repo);
     let changed_map = annotate(&changed);
     let entries = match input.tab {
@@ -112,7 +117,14 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changed.iter().map(Entry::from_changed).collect(),
     };
-    Ok(WorldSnapshot { changed: changed_map, entries, branch_base, pick_status, head })
+    Ok(WorldSnapshot {
+        changed: changed_map,
+        entries,
+        branch_base,
+        pick_status,
+        turn_snapshot,
+        head,
+    })
 }
 
 /// The active scope's changed files and, on the `branch` scope, the base they diff against —
@@ -122,6 +134,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     let plain = |changed| ScopeBuild {
         branch_base: git::BaseStatus::default(),
         pick_status: None,
+        turn_snapshot: None,
         changed,
     };
     if !git::is_repo(&input.repo) {
@@ -129,7 +142,10 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     }
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
-            Some(t) => Ok(plain(git::changed_against_tree(&input.repo, t)?)),
+            Some(t) => {
+                let (changed, snapshot) = git::changed_against_tree(&input.repo, t)?;
+                Ok(ScopeBuild { turn_snapshot: Some(snapshot), ..plain(changed) })
+            }
             None => Ok(plain(Vec::new())),
         },
         Scope::Uncommitted => Ok(plain(git::changed_files(&input.repo, input.scope, None)?)),
@@ -142,18 +158,14 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
             let base_oid = resolution.status.winner.as_ref().map(|w| w.oid().to_string());
             let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
-            Ok(ScopeBuild { branch_base: resolution.status, pick_status: None, changed })
+            Ok(ScopeBuild { branch_base: resolution.status, ..plain(changed) })
         }
         Scope::Commits => {
             // The scope is never entered without a pick; a tag without one
             // builds the empty changeset rather than failing the landing.
             let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
             let (status, changed) = build_pick(&input.repo, pick)?;
-            Ok(ScopeBuild {
-                branch_base: git::BaseStatus::default(),
-                pick_status: Some(status),
-                changed,
-            })
+            Ok(ScopeBuild { pick_status: Some(status), ..plain(changed) })
         }
     }
 }

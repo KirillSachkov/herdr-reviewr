@@ -9547,12 +9547,12 @@ fn quitting_with_unsent_comments_asks_first() {
     assert!(!app.confirming_quit && !app.should_quit);
 }
 
-// --- Canonical worktree text ------------------------------------------
+// --- Diff sides from git ----------------------------------------------
 
-/// `git diff`'s changed lines for `path` against `HEAD`, a line-ending CR spelled as the
+/// `git diff`'s changed lines for `path` against `rev`, a line-ending CR spelled as the
 /// marker reviewr paints for it. Split on `\n` alone, so a CR survives to be spelled.
-fn git_changed_lines(r: &Repo, path: &str) -> Vec<String> {
-    let out = r.git(&["diff", "--no-color", "HEAD", "--", path]);
+fn git_changed_lines(r: &Repo, rev: &str, path: &str) -> Vec<String> {
+    let out = r.git(&["diff", "--no-color", rev, "--", path]);
     out.split('\n')
         .skip_while(|l| !l.starts_with("@@"))
         .filter(|l| l.starts_with('-') || l.starts_with('+'))
@@ -9579,66 +9579,100 @@ fn loose_objects(r: &Repo) -> String {
     r.git(&["count-objects"]).split(' ').next().unwrap_or_default().to_string()
 }
 
+/// Whether reviewr's change rows say what `git diff` says: the same lines, a painted marker
+/// only where git's line has the CR. An unpaired line keeps its CR unpainted, since it has no
+/// old ending to have changed from.
+fn rows_agree_with_git(rows: &[String], git: &[String]) -> bool {
+    let cr = herdr_reviewr::diff::CR_MARKER;
+    rows.len() == git.len()
+        && rows.iter().zip(git).all(|(row, git)| row == git || format!("{row}{cr}") == *git)
+}
+
 #[test]
 fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
     // `core.autocrlf=true`, as Git for Windows installs it. Set per repo, so the scenario
-    // runs the same on every OS. The agent rewrites a committed LF file.
+    // runs the same on every OS. The agent rewrites a committed file.
     const BASE: &str = "one\ntwo\nthree\n";
     const CRLF: &str = "one\r\ntwo\r\nthree\r\n";
     const CRLF_EDIT: &str = "one\r\nTWO\r\nthree\r\n";
     const LF_EDIT: &str = "one\nTWO\nthree\n";
     const MIXED_EDIT: &str = "one\r\nTWO\nthree\r\n";
     let edit: &[&str] = &["-two", "+TWO"];
-    let cases: &[(&str, &str, &[&str])] = &[
-        // (.gitattributes, what the agent writes, the changed rows)
-        ("", CRLF, &[]),
-        ("", CRLF_EDIT, edit),
-        ("", LF_EDIT, edit),
-        ("", MIXED_EDIT, edit),
-        ("* text eol=crlf\n", CRLF, &[]),
-        ("* text eol=crlf\n", CRLF_EDIT, edit),
-        ("* text eol=crlf\n", LF_EDIT, edit),
-        ("* text eol=crlf\n", MIXED_EDIT, edit),
+    let cases: &[(&str, &str, &str, &[&str])] = &[
+        // (.gitattributes, the committed file, what the agent writes, the changed rows)
+        ("", BASE, CRLF, &[]),
+        ("", BASE, CRLF_EDIT, edit),
+        ("", BASE, LF_EDIT, edit),
+        ("", BASE, MIXED_EDIT, edit),
+        ("* text eol=crlf\n", BASE, CRLF, &[]),
+        ("* text eol=crlf\n", BASE, CRLF_EDIT, edit),
+        ("* text eol=crlf\n", BASE, LF_EDIT, edit),
+        ("* text eol=crlf\n", BASE, MIXED_EDIT, edit),
         // `-text`: git keeps every CR, so a changed ending is a change, and shows.
-        ("* -text\n", CRLF, &["-one", "-two", "-three", "+one^M", "+two^M", "+three^M"]),
-        ("* -text\n", LF_EDIT, edit),
-        ("* -text\n", MIXED_EDIT, &["-one", "-two", "-three", "+one^M", "+TWO", "+three^M"]),
+        ("* -text\n", BASE, CRLF, &["-one", "-two", "-three", "+one^M", "+two^M", "+three^M"]),
+        ("* -text\n", BASE, LF_EDIT, edit),
+        ("* -text\n", BASE, MIXED_EDIT, &["-one", "-two", "-three", "+one^M", "+TWO", "+three^M"]),
+        // A lone CR in the committed blob (`i/-text`), gone from the rewrite: `auto` converts.
+        (
+            "",
+            "one\rx\ntwo\nthree\n",
+            "one x\r\nTWO\r\nthree\r\n",
+            &["-one\rx", "-two", "+one x", "+TWO"],
+        ),
+        // A blob committed with its CRLFs beside a lone CR is binary to git, so its CRLFs
+        // don't keep the rewrite's: every line changed, and the one twin line shows its CR.
+        (
+            "",
+            "one\rx\r\ntwo\r\nthree\r\n",
+            "one x\r\nTWO\r\nthree\r\n",
+            &["-one\rx", "-two", "-three^M", "+one x", "+TWO", "+three"],
+        ),
+        // The same CR, still there: `auto` sees binary content and converts nothing.
+        (
+            "",
+            "one\rx\ntwo\nthree\n",
+            "one\rx\r\nTWO\r\nthree\r\n",
+            &["-one\rx", "-two", "-three", "+one\rx^M", "+TWO", "+three^M"],
+        ),
+        // `ident` collapses the expanded keyword on the way in, so only the edit shows.
+        ("* ident\n", "$Id$\none\n", "$Id: 0123 $\r\nONE\r\n", &["-one", "+ONE"]),
     ];
-    for &(attributes, written, want) in cases {
-        let case = format!("{attributes:?} writing {written:?}");
+    for &(attributes, base, written, want) in cases {
+        let case = format!("{attributes:?} {base:?} writing {written:?}");
         let r = Repo::init();
         r.git(&["config", "core.autocrlf", "true"]);
         r.write(".gitattributes", attributes);
-        r.write("a.txt", BASE);
+        r.write("a.txt", base);
         r.commit_all("init");
         r.set_origin_default("main", "HEAD");
+        let baseline = r.git(&["rev-parse", "HEAD^{tree}"]).trim().to_string();
         let objects = loose_objects(&r);
         r.write("a.txt", written);
-        assert_eq!(git_changed_lines(&r, "a.txt"), want, "git agrees: {case}");
+        let git = git_changed_lines(&r, "HEAD", "a.txt");
+        assert!(want.is_empty() == git.is_empty(), "git agrees: {case}: {git:?}");
 
         let mut app = app_on(&r);
         for scope in [Scope::Uncommitted, Scope::Branch] {
             app.set_scope(scope).unwrap();
             if want.is_empty() {
-                // Unchanged to git: no row anywhere, and the text reviewr reads is the blob.
+                // Unchanged to git: no row anywhere.
                 assert!(changed_paths(&app).is_empty(), "{case} under {scope:?}");
-                assert_eq!(
-                    herdr_reviewr::git::worktree_text(r.path(), "a.txt"),
-                    r.git(&["cat-file", "blob", "HEAD:a.txt"]),
-                    "{case}"
-                );
             } else {
                 app.select_file(0).unwrap();
-                assert_eq!(change_rows(&app), want, "{case} under {scope:?}");
+                let rows = change_rows(&app);
+                assert_eq!(rows, want, "{case} under {scope:?}");
+                assert!(rows_agree_with_git(&rows, &git), "{case}: {rows:?} vs git {git:?}");
             }
         }
 
-        // Every view of the file reads the canonical text, and a content comment's export
-        // carries no CR.
+        // Every view of the file reads it as is, the highlighter drops each ending CR, and a
+        // content comment's export carries no CR.
         enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
         app.select_file(file_row_of(&app, "a.txt").expect("a.txt listed")).unwrap();
         let lines: Vec<String> = app.visible.iter().map(Row::text).collect();
-        assert!(lines.iter().all(|l| !l.contains('\r')), "{case}: {lines:?}");
+        let raw: Vec<&str> = written.split_inclusive('\n').collect();
+        let bodies: Vec<&str> = raw.iter().map(|l| l.trim_end_matches(['\r', '\n'])).collect();
+        assert_eq!(lines, bodies, "{case}: the file's lines, no ending CR");
         app.focus = Focus::Diff;
         app.diff_cursor = 1;
         app.start_comment();
@@ -9665,9 +9699,42 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
         assert_eq!(previewed, lines, "{case}: the preview reads what All files reads");
         app.close_search();
 
-        // No writes: reviewr asked git for line-ending rules and stored nothing.
+        // No writes: reviewr asked git for the diff and stored nothing.
         assert_eq!(loose_objects(&r), objects, "{case}");
+
+        // `last-turn` reads the baseline against the snapshot its changeset came from (a
+        // snapshot is the turn tracker's own write, so it comes after the no-writes check).
+        enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
+        app.sync_turn_baseline(Some(baseline));
+        app.set_scope(Scope::LastTurn).unwrap();
+        if want.is_empty() {
+            assert!(changed_paths(&app).is_empty(), "{case} under last-turn");
+        } else {
+            app.select_file(0).unwrap();
+            assert_eq!(change_rows(&app), want, "{case} under last-turn");
+        }
     }
+}
+
+#[test]
+fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
+    // The file is in neither `HEAD` nor the index, only in the turn's snapshots: a diff of
+    // the baseline against the worktree would call it deleted. Under autocrlf the agent's
+    // CRLF rewrite is one edited line, as the changeset counts it.
+    let r = Repo::init();
+    r.git(&["config", "core.autocrlf", "true"]);
+    r.write("a.txt", "a\n");
+    r.commit_all("init");
+    r.write("notes.txt", "one\ntwo\n");
+    let baseline = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    r.write("notes.txt", "one\r\nTWO\r\n");
+
+    let mut app = app_on(&r);
+    app.sync_turn_baseline(Some(baseline));
+    app.set_scope(Scope::LastTurn).unwrap();
+    assert_eq!(changed_paths(&app), ["notes.txt"]);
+    app.select_file(0).unwrap();
+    assert_eq!(change_rows(&app), ["-two", "+TWO"]);
 }
 
 #[test]

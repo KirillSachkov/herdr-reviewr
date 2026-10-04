@@ -1335,289 +1335,141 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
-// --- canonical worktree text ---------------------------------------------------
+// --- diff sides ----------------------------------------------------------------
 //
-// A blob is already in git's canonical form. The worktree is not: under `core.autocrlf` or
-// an `eol` attribute its text files carry CRLF, and `git diff` cleans them (git's
-// `convert_to_git`) before comparing. Reading the raw bytes instead paints every line of
-// such a file as changed. So every worktree read that reaches the screen or an export goes
-// through `worktree_text`, which replays git's line-ending step.
-//
-// Only that step. A `filter=` driver, `ident`, and `working-tree-encoding` are not
-// replayed, so a file using them reads as its eol-cleaned worktree bytes. Git LFS marks its
-// files `-text`, so they read raw, as before.
+// A tracked file's two sides come from git: one full-context `git diff`, whose context and
+// `-` lines are the old side and whose context and `+` lines are the new side. git cleans the
+// worktree side the way every `git diff` does (line endings under `core.autocrlf` and the
+// `text`/`eol` attributes, `ident`, filter drivers, working-tree encoding), so the sides
+// compare exactly what `git diff` compares. reviewr never replays that step itself.
 
-/// What git's clean step does to a path's line endings on the way into the object store:
-/// the `text`/`eol` attributes and `core.autocrlf`, resolved for one path.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Crlf {
-    /// No conversion: `-text`, no attribute under `core.autocrlf=false`, or an `auto` path
-    /// whose index blob already holds CRLF (git's safer autocrlf).
-    Keep,
-    /// `text`, with any `eol`: every CRLF becomes LF.
-    Text,
-    /// `text=auto`, or no attribute under `core.autocrlf=true`/`input`: every CRLF becomes
-    /// LF unless the content looks binary.
-    Auto,
+/// One file's diff sides, or git's verdict that the change has no text diff.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DiffSides {
+    Text {
+        old: String,
+        new: String,
+    },
+    /// "Binary files … differ": binary content, or a path whose `diff` attribute is unset.
+    Binary,
 }
 
-/// The working-tree content of `path` in git's canonical form, the text `git diff` compares,
-/// lossily as UTF-8. Empty when the file is absent (a deletion) or unreadable. The one reader
-/// for worktree text.
-pub fn worktree_text(repo: &Path, path: &str) -> String {
-    let Ok(bytes) = std::fs::read(repo.join(path)) else { return String::new() };
-    // git's own shortcut: content with no CRLF converts to itself under every rule, so the
-    // common file pays no git call.
-    let rule =
-        if bytes.windows(2).any(|w| w == b"\r\n") { crlf_rule(repo, path) } else { Crlf::Keep };
-    clean(&bytes, rule)
-}
-
-/// `bytes` as git's clean step leaves them under `rule`, lossily as UTF-8. A CR that does not
-/// end a line stays, as it does in git.
-pub fn clean(bytes: &[u8], rule: Crlf) -> String {
-    let convert = match rule {
-        Crlf::Keep => false,
-        Crlf::Text => true,
-        Crlf::Auto => !looks_binary(bytes),
-    };
-    if !convert {
-        return String::from_utf8_lossy(bytes).into_owned();
-    }
-    let mut out = Vec::with_capacity(bytes.len());
-    for (i, &b) in bytes.iter().enumerate() {
-        if !(b == b'\r' && bytes.get(i + 1) == Some(&b'\n')) {
-            out.push(b);
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// git's text sniff for `auto` conversion (`convert_is_binary`): a lone CR, a NUL, or more
-/// than one non-printable byte per 128 printable ones. A trailing DOS end-of-file (`^Z`)
-/// does not count.
-fn looks_binary(bytes: &[u8]) -> bool {
-    let (mut printable, mut nonprintable) = (0usize, 0usize);
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\r' if bytes.get(i + 1) == Some(&b'\n') => i += 1,
-            b'\r' | 0 => return true,
-            b'\n' => {}
-            // Backspace, tab, escape, and form feed read as text.
-            0x08 | b'\t' | 0x1b | 0x0c => printable += 1,
-            c if c < 0x20 || c == 0x7f => nonprintable += 1,
-            _ => printable += 1,
-        }
-        i += 1;
-    }
-    if bytes.last() == Some(&0x1a) {
-        nonprintable -= 1;
-    }
-    (printable >> 7) < nonprintable
-}
-
-/// The [`Crlf`] rule git applies to `path`, decided once and reused while nothing it was
-/// decided from has changed ([`EolMemo`]). A git that cannot answer leaves the bytes as they
-/// are, the raw read, and is asked again next time.
-fn crlf_rule(repo: &Path, path: &str) -> Crlf {
-    static MEMOS: std::sync::Mutex<Option<HashMap<PathBuf, EolMemo>>> = std::sync::Mutex::new(None);
-    let mut memos = MEMOS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let memo = memos.get_or_insert_with(HashMap::new).entry(repo.to_path_buf()).or_default();
-    memo.rule(repo, path).unwrap_or(Crlf::Keep)
-}
-
-/// One repository's decided line-ending rules, each kept with the files it was decided from.
+/// `path`'s diff sides from the tree-ish `old` to the tree-ish `new`, or to the worktree when
+/// `new` is `None`. A rename or copy names its source in `previous_path`, whose content is
+/// the old side.
 ///
-/// A decision reads the index (the path's index line endings), the attributes files, and the
-/// config files (`core.autocrlf`). Each of those files is stamped with its size and mtime
-/// before git reads it, so a decision stands while every stamp does, and a file that changed
-/// while git ran misses next time. The stamped set is every file git could read: the
-/// standard locations, whether or not they exist yet, and the ones a decision learned git
-/// reads (an included config, a custom `core.attributesFile`, the system files). A learned
-/// file not yet stamped makes git decide again with it stamped, so no decision rests on an
-/// unstamped input. One gap remains: a system config or attributes file created, by an
-/// administrator, where none existed, is not seen until another input changes.
-#[derive(Default)]
-struct EolMemo {
-    /// The git dir and the common dir, fixed for the worktree's life.
-    dirs: Option<(PathBuf, PathBuf)>,
-    /// Config and attributes files decisions learned git reads.
-    learned: HashSet<PathBuf>,
-    rules: HashMap<String, (Vec<(PathBuf, Stamp)>, Crlf)>,
-}
-
-/// A file's size and modification time, `None` when it is absent.
-type Stamp = Option<(u64, std::time::SystemTime)>;
-
-fn stamp(file: &Path) -> Stamp {
-    let meta = std::fs::metadata(file).ok()?;
-    Some((meta.len(), meta.modified().ok()?))
-}
-
-/// A memo holds this many paths at most, then starts over, so browsing a large tree can't
-/// grow it without bound.
-const EOL_MEMO_CAP: usize = 4096;
-
-impl EolMemo {
-    fn rule(&mut self, repo: &Path, path: &str) -> Option<Crlf> {
-        if let Some((inputs, rule)) = self.rules.get(path)
-            && inputs.iter().all(|(file, was)| stamp(file) == *was)
-        {
-            return Some(*rule);
-        }
-        let (git_dir, common_dir) = match &self.dirs {
-            Some(dirs) => dirs.clone(),
-            None => self.dirs.insert(git_dirs(repo)?).clone(),
-        };
-        // A learned file joins the stamped set and git decides again, once: a second new
-        // file means the config changed under the first decision, which the next read sees.
-        for _ in 0..2 {
-            let mut files = eol_files(repo, path, &git_dir, &common_dir);
-            files.extend(self.learned.iter().cloned());
-            let inputs: Vec<(PathBuf, Stamp)> =
-                files.into_iter().map(|f| (f.clone(), stamp(&f))).collect();
-            #[cfg(test)]
-            EOL_DECISIONS.with(|n| n.set(n.get() + 1));
-            let (rule, learned) = decide_crlf(repo, path)?;
-            let unstamped: Vec<PathBuf> =
-                learned.into_iter().filter(|f| !inputs.iter().any(|(i, _)| i == f)).collect();
-            if unstamped.is_empty() {
-                if self.rules.len() >= EOL_MEMO_CAP {
-                    self.rules.clear();
-                }
-                self.rules.insert(path.to_string(), (inputs, rule));
-                return Some(rule);
-            }
-            self.learned.extend(unstamped);
-        }
-        None
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// How many times this thread asked git for a line-ending rule: the memo's test seam.
-    static EOL_DECISIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// The git dir and the common dir of `repo`, absolute.
-fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
-    let out = git(repo, &["rev-parse", "--absolute-git-dir", "--git-common-dir"]).ok()?;
-    let mut lines = out.lines();
-    let git_dir = PathBuf::from(lines.next()?);
-    // The common dir prints relative to `repo` unless it lies elsewhere.
-    let common_dir = repo.join(lines.next()?);
-    Some((git_dir, common_dir))
-}
-
-/// The files git reads to decide `path`'s rule that need no git to name: the index, the
-/// repository's config files, the global config and attributes files, and a `.gitattributes`
-/// in every directory above the path. A directory above the top level costs a stat and
-/// changes nothing.
-fn eol_files(repo: &Path, path: &str, git_dir: &Path, common_dir: &Path) -> Vec<PathBuf> {
-    let mut files = vec![
-        git_dir.join("index"),
-        git_dir.join("config.worktree"),
-        common_dir.join("config"),
-        common_dir.join("info").join("attributes"),
+/// One `git diff`. A second, a `git show`, only where that diff spells no side: a copy's
+/// unchanged source, and a file git reports no line of (a mode change), whose two sides are
+/// the one blob. An error is a git that could not answer: a missing revision, an unborn
+/// `HEAD`.
+pub fn diff_sides(
+    repo: &Path,
+    old: &str,
+    new: Option<&str>,
+    path: &str,
+    previous_path: Option<&str>,
+) -> Result<DiffSides> {
+    // Context as wide as the byte budget holds every line of a file the diff can render
+    // (each line is at least a byte), so the one hunk is the whole file. A file past the
+    // budget renders its too-large notice, whatever part of it this reads.
+    let context = format!("-U{}", crate::diff::MAX_BYTES);
+    let mut args = vec![
+        // Under this setting git prints an empty context line as a bare newline.
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        // A path is a path, never a glob: `a[1].txt` must not match `a1.txt`.
+        "--literal-pathspecs",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules",
+        // A rename spells its source as a deleted file and its target as an added one, so
+        // even a pure rename prints both sides in full.
+        "--no-renames",
+        &context,
+        old,
     ];
-    let home = std::env::var_os("HOME").map(PathBuf::from).or_else(dirs::home_dir);
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|h| h.join(".config")))
-        .map(|x| x.join("git"));
-    if let Some(global) = std::env::var_os("GIT_CONFIG_GLOBAL") {
-        files.push(PathBuf::from(global));
-    } else {
-        files.extend(home.map(|h| h.join(".gitconfig")));
-        files.extend(xdg.as_ref().map(|x| x.join("config")));
+    args.extend(new);
+    if previous_path.is_some() {
+        // A rename or copy target is a new file, and a rename source a deleted one. A copy
+        // source edited in its own right is neither, and stays out of the target's sides.
+        args.push("--diff-filter=AD");
     }
-    files.extend(xdg.map(|x| x.join("attributes")));
-    files.extend(std::env::var_os("GIT_CONFIG_SYSTEM").map(PathBuf::from));
-    let file = repo.join(path);
-    files.extend(file.ancestors().skip(1).map(|dir| dir.join(".gitattributes")));
-    files
-}
-
-/// Ask git for `path`'s rule. One `ls-files --eol` reads the path's attributes and its index
-/// blob's line endings, and the config listing gives `core.autocrlf` and names every file git
-/// read config from, returned as the files this decision learned git reads.
-fn decide_crlf(repo: &Path, path: &str) -> Option<(Crlf, Vec<PathBuf>)> {
-    // `-o` lists an untracked or ignored path too, whose rule comes from its attributes alone.
-    let args = ["--literal-pathspecs", "ls-files", "-z", "--eol", "-c", "-o", "--", path];
-    let out = git(repo, &args).ok()?;
-    let config = git(repo, &["config", "--list", "-z", "--show-origin", "--show-scope"]).ok()?;
-    let config = ConfigListing::parse(repo, &config);
-    // `i/<index eol> w/<worktree eol> attr/<attributes>\t<path>`, the attributes possibly
-    // two words (`text eol=lf`).
-    let info = out.split('\0').next().and_then(|r| r.split_once('\t')).map_or("", |(i, _)| i);
-    let index = info.split_whitespace().find_map(|t| t.strip_prefix("i/")).unwrap_or("");
-    let attr = info.split_once("attr/").map_or("", |(_, a)| a.trim());
-    // git skips the `auto` conversion when the index blob holds CRLF, so a file committed
-    // with CRLF keeps it.
-    let auto = if matches!(index, "crlf" | "mixed") { Crlf::Keep } else { Crlf::Auto };
-    let rule = match attr {
-        "-text" => Crlf::Keep,
-        "text" | "text eol=lf" | "text eol=crlf" => Crlf::Text,
-        "text=auto" | "text=auto eol=lf" | "text=auto eol=crlf" => auto,
-        _ if config.autocrlf => auto,
-        _ => Crlf::Keep,
+    args.push("--");
+    args.extend(previous_path);
+    args.push(path);
+    let out = git(repo, &args)?;
+    // A copy's source is still there, so no section spells it. Every other source is a
+    // deleted file. Only a header line starts with a letter.
+    let copied_from = previous_path.filter(|_| !out.contains("\ndeleted file mode "));
+    let same = |rev: &str, at: &str| {
+        let text = file_content(repo, rev, at);
+        DiffSides::Text { old: text.clone(), new: text }
     };
-    Some((rule, config.files))
-}
-
-/// What a decision reads from `git config --list --show-origin --show-scope -z`.
-struct ConfigListing {
-    /// Whether `core.autocrlf` asks for conversion: `true` (any of git's spellings) or `input`.
-    autocrlf: bool,
-    /// Every config file git read, the files their includes name, the custom attributes file,
-    /// and the system attributes file beside the system config.
-    files: Vec<PathBuf>,
-}
-
-impl ConfigListing {
-    /// Each entry is three NUL-ended fields: the scope, the origin, and `key\nvalue` (a bare
-    /// `key` for a value-less boolean). A relative origin is relative to `repo`, and a
-    /// relative include to the file that names it.
-    fn parse(repo: &Path, listing: &str) -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from).or_else(dirs::home_dir);
-        let expand = |value: &str, base: &Path| match value.strip_prefix("~/") {
-            Some(rest) => home.as_ref().map(|h| h.join(rest)),
-            None => Some(base.join(value)),
-        };
-        let mut autocrlf = String::new();
-        let mut files = Vec::new();
-        let fields: Vec<&str> = listing.split('\0').collect();
-        for entry in fields.chunks_exact(3) {
-            let [scope, origin, item] = entry else { continue };
-            let file = origin.strip_prefix("file:").map(|f| repo.join(f));
-            let (key, value) = item.split_once('\n').unwrap_or((item, "true"));
-            let key = key.to_ascii_lowercase();
-            if key == "core.autocrlf" {
-                autocrlf = value.trim().to_ascii_lowercase();
-            } else if key == "core.attributesfile" {
-                files.extend(expand(value, repo));
-            } else if key
-                .rsplit_once('.')
-                .is_some_and(|(s, k)| s.starts_with("include") && k == "path")
-            {
-                let base = file.as_deref().and_then(Path::parent).unwrap_or(repo);
-                files.extend(expand(value, base));
-            }
-            if let Some(file) = file {
-                if *scope == "system" {
-                    files.extend(file.parent().map(|etc| etc.join("gitattributes")));
-                }
-                files.push(file);
-            }
+    Ok(match (parse_sides(&out), copied_from) {
+        (Some(DiffSides::Text { new: text, .. }), Some(source)) => {
+            DiffSides::Text { old: file_content(repo, old, source), new: text }
         }
-        files.sort();
-        files.dedup();
-        let autocrlf = matches!(autocrlf.as_str(), "true" | "yes" | "on" | "input")
-            || autocrlf.parse::<i64>().is_ok_and(|n| n != 0);
-        Self { autocrlf, files }
+        (Some(sides), _) => sides,
+        (None, _) => match new {
+            Some(new) => same(new, path),
+            None => same(old, previous_path.unwrap_or(path)),
+        },
+    })
+}
+
+/// The sides a full-context `git diff` spells, `None` when it printed no hunk (the sides are
+/// equal). Each hunk header counts its lines, so a body line is never mistaken for a header:
+/// `--- x` inside a hunk is the deletion of `-- x`. `\ No newline at end of file` takes the
+/// newline off the line before it, on the side or sides that line belongs to. A CR git keeps
+/// (under `-text`) stays in the line's text.
+fn parse_sides(out: &str) -> Option<DiffSides> {
+    let (mut old, mut new) = (String::new(), String::new());
+    let mut hunks = false;
+    // Lines the open hunk still holds on each side.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
+    // The side or sides the last body line went to: (old, new).
+    let mut last = (false, false);
+    for line in out.split_inclusive('\n') {
+        if line.starts_with('\\') {
+            for (side, took) in [(&mut old, last.0), (&mut new, last.1)] {
+                if took && side.ends_with('\n') {
+                    side.pop();
+                }
+            }
+            continue;
+        }
+        if old_left + new_left > 0 {
+            let (tag, body) = line.split_at(line.len().min(1));
+            last = match tag {
+                "-" => (true, false),
+                "+" => (false, true),
+                // A context line; a bare newline is an empty one.
+                _ => (true, true),
+            };
+            let body = if tag == "\n" { line } else { body };
+            if last.0 {
+                old.push_str(body);
+                old_left = old_left.saturating_sub(1);
+            }
+            if last.1 {
+                new.push_str(body);
+                new_left = new_left.saturating_sub(1);
+            }
+        } else if let Some(range) = line.strip_prefix("@@ -") {
+            // `@@ -l,s +l,s @@`, a count of one left out.
+            let count = |r: &str| r.split_once(',').map_or(Some(1), |(_, n)| n.parse().ok());
+            let mut ranges = range.split(' ');
+            let old_range = ranges.next()?;
+            let new_range = ranges.next()?.strip_prefix('+')?;
+            (old_left, new_left) = (count(old_range)?, count(new_range)?);
+            hunks = true;
+        } else if line.starts_with("Binary files ") {
+            return Some(DiffSides::Binary);
+        }
     }
+    hunks.then_some(DiffSides::Text { old, new })
 }
 
 // --- base pick (branch scope) --------------------------------------------------
@@ -1851,12 +1703,13 @@ pub fn changed_files(
 /// unstaged, untracked, and committed-this-turn changes all show, with no phantom
 /// deletion for a file that is untracked at both ends (which a tree-vs-worktree diff
 /// would mis-report). Untracked files ride in the current snapshot, so no separate
-/// untracked pass is needed.
-pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>> {
+/// untracked pass is needed. Returns the snapshot tree too: a file's diff reads its sides
+/// from the same two trees ([`diff_sides`]), so its rows match these counts.
+pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<(Vec<ChangedFile>, String)> {
     let current = snapshot_worktree(repo)?;
     let numstat = git(repo, &["diff", tree, &current, "--numstat", "-z"])?;
     let name_status = git(repo, &["diff", tree, &current, "--name-status", "-z"])?;
-    assemble(repo, &numstat, &name_status, false)
+    Ok((assemble(repo, &numstat, &name_status, false)?, current))
 }
 
 /// The changed files between two commits, `old` against `new`, for the `commits` scope:
@@ -2378,32 +2231,6 @@ mod tests {
     }
 
     #[test]
-    fn a_crlf_file_rereads_without_git_until_its_rule_changes() {
-        let repo = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let status =
-                std::process::Command::new("git").arg("-C").arg(repo.path()).args(args).status();
-            assert!(status.unwrap().success());
-        };
-        git(&["init", "-q"]);
-        git(&["config", "core.autocrlf", "true"]);
-        std::fs::write(repo.path().join("a.txt"), "one\r\ntwo\r\n").unwrap();
-        let read = || super::worktree_text(repo.path(), "a.txt");
-        let decisions = || super::EOL_DECISIONS.with(std::cell::Cell::get);
-
-        assert_eq!(read(), "one\ntwo\n");
-        let asked = decisions();
-        assert_eq!(read(), "one\ntwo\n");
-        assert_eq!(decisions(), asked, "an unchanged file rereads without asking git");
-
-        // Each input the rule comes from changes it: the config, then the attributes.
-        git(&["config", "core.autocrlf", "false"]);
-        assert_eq!(read(), "one\r\ntwo\r\n");
-        std::fs::write(repo.path().join(".gitattributes"), "* text\n").unwrap();
-        assert_eq!(read(), "one\ntwo\n");
-    }
-
-    #[test]
     fn core_editor_reads_the_configured_value_verbatim() {
         // The repository's own level outranks whatever the machine's global config says, so
         // this reads the same on every runner. The value keeps its quotes: splitting it is the
@@ -2791,25 +2618,44 @@ mod tests {
     }
 
     #[test]
-    fn clean_follows_each_git_line_ending_rule() {
-        use super::{Crlf, clean};
-        let cases: &[(&[u8], Crlf, &str)] = &[
-            // `-text`, or nothing asks: the bytes as they are.
-            (b"a\r\nb\r\n", Crlf::Keep, "a\r\nb\r\n"),
-            // `text`: every CRLF, binary or not. A CR inside a line is content.
-            (b"a\r\nb\rc\r\n", Crlf::Text, "a\nb\rc\n"),
-            (b"a\0\r\n", Crlf::Text, "a\0\n"),
-            // `auto`: CRLF and mixed endings convert...
-            (b"a\r\nb\nc\r\n", Crlf::Auto, "a\nb\nc\n"),
-            // ...a DOS end-of-file byte does not make text binary...
-            (b"a\r\n\x1a", Crlf::Auto, "a\n\x1a"),
-            // ...and content git calls binary stays: a lone CR, a NUL, control bytes.
-            (b"a\r\nb\rc\r\n", Crlf::Auto, "a\r\nb\rc\r\n"),
-            (b"a\0\r\n", Crlf::Auto, "a\0\r\n"),
-            (b"\x01\x02\r\n", Crlf::Auto, "\x01\x02\r\n"),
+    fn a_full_context_diff_spells_both_sides_exactly() {
+        use super::{DiffSides, parse_sides};
+        let text = |old: &str, new: &str| {
+            Some(DiffSides::Text { old: old.to_string(), new: new.to_string() })
+        };
+        let header = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n";
+        let cases: &[(&str, Option<DiffSides>)] = &[
+            // Context lands on both sides, `-` on the old, `+` on the new. A body line that
+            // looks like a header is still body: here the deletion of `-- x`.
+            (" a\n--- x\n+b\n c\n", text("a\n-- x\nc\n", "a\nb\nc\n")),
+            // A bare newline is an empty context line.
+            (" a\n\n-b\n", text("a\n\nb\n", "a\n\n")),
+            // The marker takes the newline off the line before it, on that line's side only.
+            (" x\n-y\n\\ No newline at end of file\n+z\n", text("x\ny", "x\nz\n")),
+            (" x\n\\ No newline at end of file\n", text("x", "x")),
+            // A CR git keeps is the line's text.
+            ("-one\n+one\r\n", text("one\n", "one\r\n")),
         ];
-        for &(bytes, rule, want) in cases {
-            assert_eq!(clean(bytes, rule), want, "{bytes:?} under {rule:?}");
+        for (body, want) in cases {
+            let lines = body.lines().filter(|l| !l.starts_with('\\')).count();
+            let olds = body.lines().filter(|l| !l.starts_with(['+', '\\'])).count();
+            let news = lines - body.lines().filter(|l| l.starts_with('-')).count();
+            let out = format!("{header}@@ -1,{olds} +1,{news} @@\n{body}");
+            assert_eq!(parse_sides(&out), *want, "{body:?}");
         }
+        // An added file, its one-line hunk count left out.
+        let added =
+            "diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+a\n";
+        assert_eq!(parse_sides(added), text("", "a\n"));
+        // Two sections (a rename git did not pair): the old path's lines, then the new one's.
+        let unpaired = format!("{header}@@ -1 +0,0 @@\n-old\n{header}@@ -0,0 +1 @@\n+new\n");
+        assert_eq!(parse_sides(&unpaired), text("old\n", "new\n"));
+        assert_eq!(
+            parse_sides(&format!("{header}Binary files a/f and b/f differ\n")),
+            Some(DiffSides::Binary)
+        );
+        // No hunk: the sides are equal, and the caller reads the one blob.
+        assert_eq!(parse_sides("diff --git a/f b/g\nsimilarity index 100%\n"), None);
+        assert_eq!(parse_sides(""), None);
     }
 }

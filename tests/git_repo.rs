@@ -7,10 +7,10 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
+    DiffSides, ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
     changed_files as changed_files_oid, checked_out_branch, default_branch_name, delete_base_pick,
-    file_content, list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref,
-    resolve_base, resolve_commit, snapshot_worktree, worktree_text, write_base_pick,
+    diff_sides, file_content, list_branches, merge_base as merge_base_oid, read_base_pick,
+    read_baseline_ref, resolve_base, resolve_commit, snapshot_worktree, write_base_pick,
     write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
@@ -34,47 +34,85 @@ fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
 }
 
 #[test]
-fn worktree_text_is_the_text_git_would_store() {
-    // git itself is the oracle: what `git add` stores is the canonical form `git diff`
-    // compares against. Every line-ending rule, read before the add that answers it.
-    let contents = ["a\r\nb\r\n", "a\nb\n", "a\r\nb\nc\r\n", "a\r\nb\rc\r\n", "a\0\r\n", "a\r\nb"];
-    // core.autocrlf, .gitattributes, and content committed first with no conversion.
+fn a_diffs_sides_are_the_committed_blob_and_the_text_git_would_store() {
+    // git itself is the oracle: the old side is the committed blob, and the new side is what
+    // `git add` would store, the canonical form `git diff` compares. Every line-ending rule,
+    // `ident`, and a filter driver, read before the add that answers it.
+    let contents =
+        ["a\r\nb\r\n", "a\nb\n", "a\r\nb\nc\r\n", "a\r\nb\rc\r\n", "a\r\nb", "$Id: x $\r\nb\r\n"];
+    // core.autocrlf, .gitattributes, and the content each file was committed with.
+    let lf = "x\ny\n";
     let regimes = [
-        ("true", "", None),
-        ("input", "", None),
-        ("false", "", None),
-        ("false", "* text\n", None),
-        ("false", "* text=auto\n", None),
-        ("false", "* eol=lf\n", None),
-        ("true", "* -text\n", None),
-        ("true", "* text eol=crlf\n", None),
+        ("true", "", lf),
+        ("input", "", lf),
+        ("false", "", lf),
+        ("false", "* text\n", lf),
+        ("false", "* text=auto\n", lf),
+        ("false", "* eol=lf\n", lf),
+        ("true", "* -text\n", lf),
+        ("true", "* text eol=crlf\n", lf),
+        ("true", "* ident\n", lf),
+        ("true", "* filter=upper\n", lf),
         // `auto` keeps the CRLF of a file whose index blob already holds it.
-        ("true", "", Some("x\r\ny\r\n")),
-        ("false", "* text=auto\n", Some("x\r\ny\r\n")),
+        ("true", "", "x\r\ny\r\n"),
+        ("false", "* text=auto\n", "x\r\ny\r\n"),
+        // An index blob with a lone CR under `-text`, then read under autocrlf.
+        ("true", "", "x\ry\n"),
     ];
     for (autocrlf, attributes, committed) in regimes {
         let r = Repo::init();
         r.git(&["config", "core.autocrlf", "false"]);
-        if let Some(committed) = committed {
-            for i in 0..contents.len() {
-                r.write(&format!("f{i}.txt"), committed);
-            }
-            r.commit_all("crlf");
+        r.git(&["config", "filter.upper.clean", "tr a-z A-Z"]);
+        r.write(".gitattributes", "* -text\n");
+        for i in 0..contents.len() {
+            r.write(&format!("f{i}.txt"), committed);
         }
+        r.commit_all("base");
         r.git(&["config", "core.autocrlf", autocrlf]);
         r.write(".gitattributes", attributes);
         for (i, content) in contents.iter().enumerate() {
             let path = format!("f{i}.txt");
+            let case = format!("{content:?}, autocrlf={autocrlf}, {attributes:?}, {committed:?}");
             r.write(&path, content);
-            let ours = worktree_text(r.path(), &path);
+            let sides = diff_sides(r.path(), "HEAD", None, &path, None).expect(&case);
             r.git(&["add", &path]);
-            let stored = r.git(&["cat-file", "blob", &format!(":{path}")]);
-            assert_eq!(
-                ours, stored,
-                "{content:?}, autocrlf={autocrlf}, {attributes:?}, committed {committed:?}"
-            );
+            let old = r.git(&["cat-file", "blob", &format!("HEAD:{path}")]);
+            let new = r.git(&["cat-file", "blob", &format!(":{path}")]);
+            assert_eq!(sides, DiffSides::Text { old, new }, "{case}");
         }
     }
+}
+
+#[test]
+fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob() {
+    let r = Repo::init();
+    r.write("a.txt", "one\ntwo\nthree\nfour\n");
+    r.write("same.txt", "same\n");
+    r.write("[x].txt", "glob\n");
+    r.write("x.txt", "not me\n");
+    r.commit_all("init");
+    r.git(&["mv", "a.txt", "b.txt"]);
+    r.write("b.txt", "one\ntwo\nthree\nFOUR\n");
+    r.git(&["mv", "same.txt", "moved.txt"]);
+    r.write("x.txt", "edited\n");
+    let text = |old: &str, new: &str| DiffSides::Text { old: old.into(), new: new.into() };
+
+    let renamed = diff_sides(r.path(), "HEAD", None, "b.txt", Some("a.txt")).unwrap();
+    assert_eq!(renamed, text("one\ntwo\nthree\nfour\n", "one\ntwo\nthree\nFOUR\n"));
+    let moved = diff_sides(r.path(), "HEAD", None, "moved.txt", Some("same.txt")).unwrap();
+    assert_eq!(moved, text("same\n", "same\n"), "a pure rename: both sides are the blob");
+    // A copy's source is unchanged, so the old side is its committed content.
+    r.write("copy.txt", "one\ntwo\nTHREE\nfour\n");
+    r.git(&["add", "copy.txt"]);
+    let copy = diff_sides(r.path(), "HEAD", None, "copy.txt", Some("x.txt")).unwrap();
+    assert_eq!(copy, text("not me\n", "one\ntwo\nTHREE\nfour\n"));
+    // A path is literal: `[x].txt` is not a glob that reaches the edited `x.txt`.
+    let literal = diff_sides(r.path(), "HEAD", None, "[x].txt", None).unwrap();
+    assert_eq!(literal, text("glob\n", "glob\n"));
+    // Tree to tree, the way `commits` and `last-turn` read.
+    r.commit_all("second");
+    let between = diff_sides(r.path(), "HEAD~1", Some("HEAD"), "x.txt", None).unwrap();
+    assert_eq!(between, text("not me\n", "edited\n"));
 }
 
 #[test]
@@ -831,7 +869,7 @@ fn ignored_paths_never_enter_changes() {
     // baseline snapshot and the live snapshot both honor .gitignore.
     let base = snapshot_worktree(r.path()).unwrap();
     r.write("ignored/note.md", "scratch v2\n");
-    assert!(!has_ignored(&changed_against_tree(r.path(), &base).unwrap()), "last-turn");
+    assert!(!has_ignored(&changed_against_tree(r.path(), &base).unwrap().0), "last-turn");
 }
 
 #[test]
@@ -977,7 +1015,7 @@ fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
     r.write("created.rs", "new\n");
     r.remove("doomed.rs");
 
-    let files = changed_against_tree(r.path(), &base).unwrap();
+    let files = changed_against_tree(r.path(), &base).unwrap().0;
     let files = by_path(&files);
     assert_eq!(files["tracked.rs"].kind, ChangeKind::Modified);
     assert_eq!(files["created.rs"].kind, ChangeKind::Added);
@@ -997,7 +1035,7 @@ fn changed_against_tree_sees_an_untracked_only_turn() {
     r.commit_all("init");
     let base = snapshot_worktree(r.path()).unwrap();
     r.write("fresh.rs", "x\n");
-    let files = changed_against_tree(r.path(), &base).unwrap();
+    let files = changed_against_tree(r.path(), &base).unwrap().0;
     assert_eq!(by_path(&files)["fresh.rs"].kind, ChangeKind::Added);
 }
 

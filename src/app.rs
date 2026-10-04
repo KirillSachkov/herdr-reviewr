@@ -20,7 +20,7 @@ use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines};
-use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
+use crate::model::{ChangeKind, Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::theme::{self, Palette};
 use crate::world::{PickStatus, PickVerdict};
@@ -880,6 +880,9 @@ pub struct App {
     /// The worker-owned turn baseline, mirrored from completions so the sync `last-turn`
     /// paths (the diff's old side, the scope-switch rebuild) read it without a round-trip.
     turn_baseline: Option<String>,
+    /// The worktree snapshot the landed `last-turn` changeset diffs the baseline to, so a
+    /// file's diff reads the same two trees its counts came from. `None` on other scopes.
+    turn_snapshot: Option<String>,
     /// Whether any agent is in this worktree — the one home for the answer, held here
     /// because this is what paints it. `None` until a sample observes it, so a frame that
     /// has seen nothing waits instead of asserting an emptiness nobody looked for: stale is
@@ -1025,6 +1028,7 @@ impl App {
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
             snippet_cache: std::cell::RefCell::new(crate::snippet::SnippetRowCache::default()),
             turn_baseline,
+            turn_snapshot: None,
             agents_present: None,
         }
     }
@@ -1166,6 +1170,7 @@ impl App {
                 // a fresh app would paint `no base` beside a populated frame
                 self.branch_base = std::mem::take(&mut old.branch_base);
                 self.pick_status = old.pick_status.take();
+                self.turn_snapshot = old.turn_snapshot.take();
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
@@ -1376,6 +1381,7 @@ impl App {
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
         self.adopt_pick_status(snapshot.pick_status);
+        self.turn_snapshot = snapshot.turn_snapshot;
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -1491,14 +1497,22 @@ impl App {
         // Git already reported no text diff for this change — binary content, or a path whose
         // `diff` attribute `.gitattributes` unsets. Take that verdict rather than re-deciding
         // from content, which would paint a `-diff` lockfile as a full text diff, and skip
-        // both blob reads while we are at it.
-        let (old, new) = if self.changed.get(&path).is_some_and(|a| a.binary) {
-            self.diff = FileDiff::binary_notice(path, previous_path);
-            (String::new(), String::new())
+        // the diff read while we are at it. The read itself carries git's verdict too, for a
+        // change that turned binary since the changeset landed.
+        let sides = if self.changed.get(&path).is_some_and(|a| a.binary) {
+            git::DiffSides::Binary
         } else {
-            let (old, new) = self.content_sides(&path, previous_path.as_deref());
-            self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
-            (old, new)
+            self.content_sides(&path, previous_path.as_deref())
+        };
+        let (old, new) = match sides {
+            git::DiffSides::Binary => {
+                self.diff = FileDiff::binary_notice(path, previous_path);
+                (String::new(), String::new())
+            }
+            git::DiffSides::Text { old, new } => {
+                self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
+                (old, new)
+            }
         };
         // Hold the new side as the render input, the same current content the File view
         // renders, and the old side the marks read deletions against. A non-markdown file, a
@@ -1533,17 +1547,18 @@ impl App {
     /// Build the read pane's File view for `path`: an over-budget blob (a model weight, a
     /// vendored bundle) previews as the too-large notice without a read — reading it whole
     /// would spike the UI thread before `build_file`'s budget could discard it — else the
-    /// worktree content, in git's canonical form, is highlighted through the shared
-    /// content-hash cache. Returns the diff and the content read (empty for the notice), for a
-    /// caller that also keeps the content. The one build the source view and the search
-    /// preview share.
+    /// worktree content, as the file has it, is highlighted through the shared content-hash
+    /// cache. The highlighter drops each line's ending CR, so no row carries one. Returns the
+    /// diff and the content read (empty for the notice), for a caller that also keeps the
+    /// content. The one build the source view and the search preview share.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
         let oversize = std::fs::metadata(self.repo.join(path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
         if oversize {
             (FileDiff::too_large_notice(path.to_string()), String::new())
         } else {
-            let content = git::worktree_text(&self.repo, path);
+            let bytes = std::fs::read(self.repo.join(path)).unwrap_or_default();
+            let content = String::from_utf8_lossy(&bytes).into_owned();
             let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
             (diff, content)
         }
@@ -1925,46 +1940,49 @@ impl App {
         // bottom half: leave diff_scroll — the content above the fold stays put, grow downward
     }
 
-    /// The old and new content of `file` for the current scope: old from `HEAD` (or the
-    /// merge-base on the branch scope), new from the worktree in git's canonical form, so the
-    /// sides compare the way `git diff` compares them. A rename reads its old side
-    /// from `previous_path`, so the diff shows real edits, not a wholesale delete-and-add.
-    fn content_sides(&self, path: &str, previous_path: Option<&str>) -> (String, String) {
-        let new_path = path;
-        let old_path = previous_path.unwrap_or(new_path);
-        match self.scope {
-            Scope::Uncommitted => {
-                let old = git::file_content(&self.repo, "HEAD", old_path);
-                let new = git::worktree_text(&self.repo, new_path);
-                (old, new)
-            }
+    /// The old and new content of `path` for the current scope, from one `git diff` of the
+    /// scope's two ends ([`git::diff_sides`]), so the sides are exactly what `git diff`
+    /// compares: the worktree against `HEAD` or the branch's merge-base, the turn baseline
+    /// against the snapshot its changeset came from, `A^` against `B` for a commit run. A
+    /// rename reads its old side from `previous_path`, so the diff shows real edits, not a
+    /// wholesale delete-and-add. An untracked file is in no `git diff`: it reads raw, all
+    /// additions. A git that can't answer shows no sides.
+    fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
+        let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
+        if self.changed.get(path).is_some_and(|a| a.change == ChangeKind::Untracked) {
+            let new = std::fs::read(self.repo.join(path)).unwrap_or_default();
+            return git::DiffSides::Text {
+                old: String::new(),
+                new: String::from_utf8_lossy(&new).into_owned(),
+            };
+        }
+        let sides = |old: &str, new: Option<&str>| {
+            git::diff_sides(&self.repo, old, new, path, previous_path)
+        };
+        let sides = match self.scope {
+            // A repository with no commits has no `HEAD`: its changeset diffs against the
+            // empty tree, and so does its file.
+            Scope::Uncommitted => sides("HEAD", None).or_else(|_| sides(git::EMPTY_TREE, None)),
             Scope::Branch => {
-                let mb = self
-                    .branch_base
-                    .winner
-                    .as_ref()
-                    .and_then(|b| git::merge_base(&self.repo, b.oid()));
-                let old =
-                    mb.map(|m| git::file_content(&self.repo, &m, old_path)).unwrap_or_default();
-                (old, git::worktree_text(&self.repo, new_path))
+                let Some(base) = self.branch_base.winner.as_ref() else { return empty() };
+                let Some(mb) = git::merge_base(&self.repo, base.oid()) else { return empty() };
+                sides(&mb, None)
             }
             Scope::LastTurn => {
-                let old = self
-                    .turn_baseline
-                    .as_deref()
-                    .map(|b| git::file_content(&self.repo, b, old_path))
-                    .unwrap_or_default();
-                (old, git::worktree_text(&self.repo, new_path))
+                let (Some(baseline), Some(now)) = (&self.turn_baseline, &self.turn_snapshot) else {
+                    return empty();
+                };
+                sides(baseline, Some(now))
             }
-            // Both sides from the commits: `A^` and `B`.
             Scope::Commits => {
-                let Some(pick) = &self.commit_pick else { return (String::new(), String::new()) };
-                let old = git::parent_or_empty(&self.repo, &pick.oldest)
-                    .map(|a| git::file_content(&self.repo, &a, old_path))
-                    .unwrap_or_default();
-                (old, git::file_content(&self.repo, &pick.newest, new_path))
+                let Some(pick) = &self.commit_pick else { return empty() };
+                let Some(parent) = git::parent_or_empty(&self.repo, &pick.oldest) else {
+                    return empty();
+                };
+                sides(&parent, Some(&pick.newest))
             }
-        }
+        };
+        sides.unwrap_or_else(|_| empty())
     }
 
     /// Whether the `commits` scope is active over a pruned pick: the empty state both panes
@@ -2696,6 +2714,7 @@ impl App {
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
+            self.turn_snapshot = build.turn_snapshot;
             self.changed = crate::world::annotate(&build.changed);
             // Re-mark the tree in place — the rows are base-independent, only their
             // badges move, so the switch frame never shows the old base's badges
@@ -3173,7 +3192,11 @@ impl App {
             {
                 continue;
             }
-            let (old, new) = self.content_sides(&entry.path, entry.previous_path.as_deref());
+            let git::DiffSides::Text { old, new } =
+                self.content_sides(&entry.path, entry.previous_path.as_deref())
+            else {
+                continue;
+            };
             let diff =
                 self.cache.get(entry.path, entry.previous_path, &old, &new, &self.highlighter);
             if hunk_row(&diff.rows, None, forward).is_some() {
@@ -6436,5 +6459,71 @@ mod tests {
         app.start_edit();
         assert!(!app.composing(), "the card is off screen, so it does not claim the key");
         assert!(app.editor_request.is_some(), "the file row under the eye wins");
+    }
+
+    /// Git commands the current thread has built so far.
+    fn git_commands() -> usize {
+        crate::proc::GIT_COMMANDS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_file_build_spends_one_git_diff_and_only_what_its_scope_needs_to_name_a_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
+            let out = out.unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["config", "core.autocrlf", "true"]);
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(repo.join("same.txt"), "same\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        let baseline = git(&["rev-parse", "HEAD^{tree}"]);
+        git(&["mv", "same.txt", "moved.txt"]);
+        std::fs::write(repo.join("a.txt"), "one\r\nTWO\r\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        let cost = |app: &mut App, path: &str, previous: Option<&str>| {
+            let before = git_commands();
+            app.set_diff(path.to_string(), previous.map(str::to_string));
+            git_commands() - before
+        };
+        app.reload().unwrap();
+        let uncommitted = (
+            cost(&mut app, "a.txt", None),
+            cost(&mut app, "new.txt", None),
+            cost(&mut app, "moved.txt", Some("same.txt")),
+        );
+        app.set_scope(Scope::Branch).unwrap();
+        let branch = cost(&mut app, "a.txt", None);
+        app.sync_turn_baseline(Some(baseline));
+        app.set_scope(Scope::LastTurn).unwrap();
+        let last_turn = cost(&mut app, "a.txt", None);
+        app.commit_pick = Some(CommitPick::single(&base));
+        app.scope = Scope::Commits;
+        app.reload().unwrap();
+        let commits = cost(&mut app, "a.txt", None);
+        // One `git diff` per tracked file, a rename included; an untracked file reads raw.
+        // `branch` also names its merge-base and `commits` the run's parent, as before.
+        assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
+        assert_eq!((branch, last_turn, commits), (2, 1, 2));
+        let rows: Vec<String> = app
+            .diff
+            .rows
+            .iter()
+            .filter(|r| r.marker() != ' ')
+            .map(crate::diff::Row::marker_text)
+            .collect();
+        assert_eq!(rows, ["+one", "+two"], "the root commit adds the file, read in that one diff");
     }
 }
