@@ -1690,6 +1690,9 @@ fn truncate_width(s: &str, max: usize) -> String {
     out
 }
 
+/// The notice for a file git failed to read.
+const UNREADABLE: &str = "git couldn't read this file";
+
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let mut title = match (&app.diff_path, &app.diff.previous_path) {
@@ -1715,6 +1718,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             Tab::AllFiles => match app.diff.state {
                 FileState::Binary => "binary file · no line comments",
                 FileState::TooLarge => "file too large to show",
+                FileState::Unreadable => UNREADABLE,
                 FileState::Normal if app.diff_path.is_some() => "empty file",
                 FileState::Normal => "select a file to read",
             },
@@ -1723,6 +1727,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
             _ => match app.diff.state {
                 FileState::Binary => "binary file · no line comments",
                 FileState::TooLarge => "file too large to show",
+                FileState::Unreadable => UNREADABLE,
                 FileState::Normal => "no diff",
             },
         };
@@ -3678,6 +3683,7 @@ fn render_search_preview(
     let notice = match pv.diff.state {
         FileState::Binary => Some("binary file · no line comments"),
         FileState::TooLarge => Some("file too large to show"),
+        FileState::Unreadable => Some(UNREADABLE),
         FileState::Normal if pv.diff.rows.is_empty() => Some("no preview"),
         FileState::Normal => None,
     };

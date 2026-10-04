@@ -103,8 +103,8 @@ pub struct ChangedFile {
     pub binary: bool,
     /// The bytes git stores on the old side, 0 where there is none.
     pub old_size: u64,
-    /// The bytes git stores on the new side; 0 for none or for the worktree.
-    pub new_size: u64,
+    /// The bytes git stores on the new side, 0 where there is none; `None` for the worktree.
+    pub new_size: Option<u64>,
 }
 
 /// Which side of the diff a comment's lines live on.

@@ -38,7 +38,7 @@ pub struct Annotation {
     pub previous_path: Option<String>,
     /// The sides' sizes as git stores them ([`ChangedFile::old_size`], [`ChangedFile::new_size`]).
     pub old_size: u64,
-    pub new_size: u64,
+    pub new_size: Option<u64>,
 }
 
 impl From<&ChangedFile> for Annotation {
@@ -226,7 +226,7 @@ mod tests {
             previous_path: None,
             binary: false,
             old_size: 0,
-            new_size: 0,
+            new_size: None,
         }
     }
 

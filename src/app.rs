@@ -614,8 +614,8 @@ pub struct App {
     toggled_dirs: HashSet<String>,
     /// The inactive tab's saved state, swapped in on a tab switch.
     stash: TabStash,
-    /// The active scope's changed files by path, on every tab.
-    changed: HashMap<String, Annotation>,
+    /// The active scope's changed files and the ends they were diffed between, on every tab.
+    changeset: Changeset,
     pub diff: FileDiff,
     /// `diff.rows` with folds applied: what the cursor and hit tests index.
     pub visible: Vec<Row>,
@@ -746,8 +746,6 @@ pub struct App {
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
     /// The worker's turn baseline, mirrored for the next build and the empty state.
     turn_baseline: Option<String>,
-    /// The ends the landed changeset was diffed between; a file's diff reads these.
-    diff_ends: Option<crate::world::DiffEnds>,
     /// Whether any agent is in this worktree; `None` until a sample has looked.
     agents_present: Option<bool>,
 }
@@ -812,7 +810,7 @@ impl App {
             resume_list: false,
             toggled_dirs: HashSet::new(),
             stash: TabStash::default(),
-            changed: HashMap::new(),
+            changeset: Changeset::default(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
             expanded_folds: HashSet::new(),
@@ -886,7 +884,6 @@ impl App {
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
             snippet_cache: std::cell::RefCell::new(crate::snippet::SnippetRowCache::default()),
             turn_baseline,
-            diff_ends: None,
             agents_present: None,
         }
     }
@@ -1000,11 +997,10 @@ impl App {
                 self.file_scroll = old.file_scroll;
                 self.reveal_files = old.reveal_files;
                 self.reveal_diff = old.reveal_diff;
-                self.changed = std::mem::take(&mut old.changed);
+                self.changeset = std::mem::take(&mut old.changeset);
                 // The header describes the carried list, so it carries too.
                 self.branch_base = std::mem::take(&mut old.branch_base);
                 self.pick_status = old.pick_status.take();
-                self.diff_ends = old.diff_ends.take();
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
@@ -1138,7 +1134,7 @@ impl App {
         // Outside a git repo, show an empty state rather than failing.
         if !git::is_repo(&self.repo) {
             self.entries.clear();
-            self.changed.clear();
+            self.changeset = Changeset::default();
             self.file_rows.clear();
             self.file_cursor = 0;
             self.file_scroll = 0;
@@ -1190,11 +1186,10 @@ impl App {
         // The cursor keeps its target, else the open file, else the first file.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
-        self.changed = snapshot.changed;
+        self.changeset = Changeset { files: snapshot.changed, ends: snapshot.ends };
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
         self.adopt_pick_status(snapshot.pick_status);
-        self.diff_ends = snapshot.ends;
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -1283,14 +1278,14 @@ impl App {
         self.diff_path = Some(path.clone());
         // The rename source from the landed build, the painted row's only as a fallback.
         let previous_path =
-            self.changed.get(&path).map_or(previous_path, |a| a.previous_path.clone());
+            self.changeset.files.get(&path).map_or(previous_path, |a| a.previous_path.clone());
         let (old, new) = match self.content_sides(&path) {
             Sides::Text { old, new } => {
                 self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
                 (old, new)
             }
-            Sides::Notice(state) => {
-                self.diff = FileDiff::notice(path, previous_path, state, View::Diff);
+            Sides::Notice(notice) => {
+                self.diff = FileDiff::notice(path, previous_path, notice, View::Diff);
                 (String::new(), String::new())
             }
         };
@@ -1323,8 +1318,8 @@ impl App {
         let oversize = std::fs::metadata(self.repo.join(path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
         if oversize {
-            let state = crate::diff::FileState::TooLarge;
-            (FileDiff::notice(path.to_string(), None, state, View::File), String::new())
+            let notice = crate::diff::Notice::TooLarge;
+            (FileDiff::notice(path.to_string(), None, notice, View::File), String::new())
         } else {
             let content = worktree_content(&self.repo, path);
             let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
@@ -1664,37 +1659,39 @@ impl App {
 
     /// `path`'s sides from the landed build's record: a notice, or one `git diff` of the scope's ends.
     fn content_sides(&self, path: &str) -> Sides {
-        use crate::diff::FileState;
+        use crate::diff::Notice;
         let empty = || Sides::Text { old: String::new(), new: String::new() };
         // A path outside the landed changeset is a stale row: empty until the next reconcile.
-        let Some(annotation) = self.changed.get(path) else { return empty() };
+        let (Some(annotation), Some(ends)) = (self.changeset.files.get(path), &self.changeset.ends)
+        else {
+            return empty();
+        };
         if annotation.binary {
-            return Sides::Notice(FileState::Binary);
+            return Sides::Notice(Notice::Binary);
         }
-        // No ends means the scope lists nothing.
-        let Some(ends) = &self.diff_ends else { return empty() };
         let untracked = annotation.change == ChangeKind::Untracked;
-        let new_size = if ends.new.is_some() {
-            annotation.new_size
-        } else {
+        let new_size = annotation.new_size.unwrap_or_else(|| {
             // git diffs a tracked symlink as its target path; an untracked file reads through it.
             let at = self.repo.join(path);
             let stat =
                 if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
             stat.map_or(0, |m| m.len())
-        };
+        });
         let total = annotation.old_size.saturating_add(new_size);
         if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
-            return Sides::Notice(FileState::TooLarge);
+            return Sides::Notice(Notice::TooLarge);
         }
         if untracked {
             return Sides::Text { old: String::new(), new: worktree_content(&self.repo, path) };
         }
-        let origin = git::Origin::of(annotation.change, annotation.previous_path.as_deref());
-        match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, origin) {
+        let source = annotation.previous_path.as_deref();
+        match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, source) {
             Ok(git::DiffSides::Text { old, new }) => Sides::Text { old, new },
-            Ok(git::DiffSides::Binary) => Sides::Notice(FileState::Binary),
-            Err(_) => empty(),
+            Ok(git::DiffSides::Binary) => Sides::Notice(Notice::Binary),
+            Err(error) => {
+                logln!("diff of {path} failed: {error:#}");
+                Sides::Notice(Notice::Unreadable)
+            }
         }
     }
 
@@ -2341,11 +2338,11 @@ impl App {
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
-            self.diff_ends = build.ends;
-            self.changed = crate::world::annotate(&build.changed);
+            let files = crate::world::annotate(&build.changed);
+            self.changeset = Changeset { files, ends: build.ends };
             // Re-mark the badges in place, so none belongs to the old base.
             for entry in &mut self.entries {
-                entry.annotation = self.changed.get(&entry.path).cloned();
+                entry.annotation = self.changeset.files.get(&entry.path).cloned();
             }
             self.rebuild_file_rows();
             self.request_world_refresh(false, false);
@@ -2899,7 +2896,8 @@ impl App {
     fn apply_dir_change(&mut self) {
         // An expanded ignored directory loads its children first.
         if self.tab == Tab::AllFiles
-            && let Ok(entries) = crate::world::all_files_entries(&self.world_input(), &self.changed)
+            && let Ok(entries) =
+                crate::world::all_files_entries(&self.world_input(), &self.changeset.files)
         {
             self.entries = entries;
         }
@@ -3803,7 +3801,7 @@ impl App {
 
     /// The active scope's annotation for `path`.
     pub(crate) fn changed_annotation(&self, path: &str) -> Option<&Annotation> {
-        self.changed.get(path)
+        self.changeset.files.get(path)
     }
 
     /// `/`: open the search screen, from any tab, from either pane.
@@ -4745,12 +4743,12 @@ impl App {
 
     /// The scope's changed-file count, on every tab.
     pub fn changed_count(&self) -> usize {
-        self.changed.len()
+        self.changeset.files.len()
     }
 
     /// The scope's line totals, saturating.
     pub fn changed_totals(&self) -> (u32, u32) {
-        self.changed.values().fold((0, 0), |(added, removed), a| {
+        self.changeset.files.values().fold((0, 0), |(added, removed), a| {
             (added.saturating_add(a.additions), removed.saturating_add(a.deletions))
         })
     }
@@ -4758,7 +4756,7 @@ impl App {
     /// Whether a comment's anchor may have moved: its file left the changeset, or the disk.
     pub fn is_stale(&self, c: &Comment) -> bool {
         if c.diff_anchored {
-            !self.changed.contains_key(&c.file)
+            !self.changeset.files.contains_key(&c.file)
         } else {
             !self.repo.join(&c.file).exists()
         }
@@ -4961,10 +4959,18 @@ fn is_markdown_path(path: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
+/// A scope's changed files and the ends they were diffed between, landed together.
+#[derive(Debug, Default)]
+struct Changeset {
+    files: HashMap<String, Annotation>,
+    /// `None` exactly when the scope lists nothing.
+    ends: Option<crate::world::DiffEnds>,
+}
+
 /// What reading a changed file's sides found: their text, or the notice for them.
 enum Sides {
     Text { old: String, new: String },
-    Notice(crate::diff::FileState),
+    Notice(crate::diff::Notice),
 }
 
 /// `path`'s worktree text, regular files only, capped past the render budget.
@@ -5774,6 +5780,25 @@ mod tests {
         let before = git_commands();
         app.set_diff("gone.txt".to_string(), None);
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
+    }
+
+    /// A failed `git diff` shows a notice, never an empty diff that reads as unchanged.
+    #[test]
+    fn a_failed_read_of_a_changed_file_is_a_notice() {
+        let (dir, git) = test_repo();
+        let repo = dir.path();
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        app.reload().unwrap();
+        // The landed ends name a commit git no longer has.
+        app.changeset.ends = Some(crate::world::DiffEnds { old: "0".repeat(40), new: None });
+        app.set_diff("a.txt".to_string(), None);
+        assert_eq!(app.diff.state, crate::diff::FileState::Unreadable);
+        assert!(app.diff.rows.is_empty());
     }
 
     /// An over-budget rename's notice keeps its source and its Diff view.

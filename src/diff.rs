@@ -166,6 +166,26 @@ pub enum FileState {
     Normal,
     Binary,
     TooLarge,
+    /// git failed to read the sides; the next refresh tries again.
+    Unreadable,
+}
+
+/// A notice that stands in for a file's rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Notice {
+    Binary,
+    TooLarge,
+    Unreadable,
+}
+
+impl From<Notice> for FileState {
+    fn from(notice: Notice) -> Self {
+        match notice {
+            Notice::Binary => Self::Binary,
+            Notice::TooLarge => Self::TooLarge,
+            Notice::Unreadable => Self::Unreadable,
+        }
+    }
 }
 
 /// How the pane renders the model: the `Changes` diff, or the `All files` whole-file content.
@@ -191,7 +211,7 @@ pub struct FileDiff {
 }
 
 /// The line budget; the byte budget below catches one huge line.
-pub(crate) const MAX_LINES: usize = 50_000;
+const MAX_LINES: usize = 50_000;
 /// The byte budget. A file larger than this renders as a `too_large` notice.
 pub(crate) const MAX_BYTES: usize = 2_000_000;
 
@@ -314,14 +334,9 @@ impl FileDiff {
         Self { rows, ..Self::rowless(path, None, FileState::Normal, View::File) }
     }
 
-    /// A notice in `state` for a file the caller declines to read.
-    pub fn notice(
-        path: String,
-        previous_path: Option<String>,
-        state: FileState,
-        view: View,
-    ) -> Self {
-        Self::rowless(path, previous_path, state, view)
+    /// A notice for a file the caller declines, or failed, to read.
+    pub fn notice(path: String, previous_path: Option<String>, notice: Notice, view: View) -> Self {
+        Self::rowless(path, previous_path, notice.into(), view)
     }
 }
 

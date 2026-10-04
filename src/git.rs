@@ -1219,38 +1219,14 @@ pub enum DiffSides {
     Binary,
 }
 
-/// Where a changed path's old side lives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Origin<'a> {
-    /// At the path itself.
-    Same,
-    /// At the source of a rename, which the change deleted.
-    Renamed(&'a str),
-    /// At the source of a copy, which is still there.
-    Copied(&'a str),
-}
-
-impl<'a> Origin<'a> {
-    /// Only a rename or copy has a source; any other kind reads at its own path.
-    pub fn of(kind: ChangeKind, previous_path: Option<&'a str>) -> Self {
-        match (kind, previous_path) {
-            (ChangeKind::Renamed, Some(source)) => Self::Renamed(source),
-            (ChangeKind::Copied, Some(source)) => Self::Copied(source),
-            _ => Self::Same,
-        }
-    }
-}
-
-/// `path`'s sides from `old` to `new` (the worktree when `None`), the old side read per `origin`.
+/// `path`'s sides from `old` to `new` (the worktree when `None`); a rename or copy reads `source`.
 pub fn diff_sides(
     repo: &Path,
     old: &str,
     new: Option<&str>,
     path: &str,
-    origin: Origin<'_>,
+    source: Option<&str>,
 ) -> Result<DiffSides> {
-    // Context this wide makes the one hunk the whole file.
-    let context = format!("-U{}", crate::diff::MAX_LINES);
     let mut args = vec![
         // An empty context line prints as a lone space, whatever the user set.
         "-c",
@@ -1264,28 +1240,27 @@ pub fn diff_sides(
         "--ignore-submodules",
         // So even a pure rename prints both sides in full.
         "--no-renames",
-        &context,
+        // The widest context git takes, so the one hunk is the whole file at any length.
+        "-U2147483647",
         old,
     ];
     args.extend(new);
     args.extend(["--", path]);
     let out = git(repo, &args)?;
-    let same = |rev: &str, at: &str| {
-        let text = file_content(repo, rev, at);
-        DiffSides::Text { old: text.clone(), new: text }
-    };
-    Ok(match (parse_sides(&out), origin) {
+    Ok(match (parse_sides(&out), source) {
         // A rename's or copy's old side is its source blob, never what stands at that path now.
-        (
-            Some(DiffSides::Text { new: text, .. }),
-            Origin::Renamed(source) | Origin::Copied(source),
-        ) => DiffSides::Text { old: file_content(repo, old, source), new: text },
+        (Some(DiffSides::Text { new, .. }), Some(source)) => {
+            DiffSides::Text { old: file_content(repo, old, source), new }
+        }
         (Some(sides), _) => sides,
         // No hunk on a rename's target: it is empty now, against its source.
-        (None, Origin::Renamed(source) | Origin::Copied(source)) => {
+        (None, Some(source)) => {
             DiffSides::Text { old: file_content(repo, old, source), new: String::new() }
         }
-        (None, Origin::Same) => same(new.unwrap_or(old), path),
+        (None, None) => {
+            let text = file_content(repo, new.unwrap_or(old), path);
+            DiffSides::Text { old: text.clone(), new: text }
+        }
     })
 }
 
@@ -1852,7 +1827,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
             deletions,
             binary: verdict.is_none(),
             old_size: size(&row.old_oid),
-            new_size: if worktree { 0 } else { size(&row.new_oid) },
+            new_size: (!worktree).then(|| size(&row.new_oid)),
             path: row.path,
             previous_path: row.previous_path,
         });
@@ -1886,7 +1861,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
                 previous_path: None,
                 binary,
                 old_size: 0,
-                new_size: 0,
+                new_size: None,
             });
         }
     }
