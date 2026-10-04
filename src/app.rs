@@ -2998,14 +2998,22 @@ impl App {
             clamp_scroll(self.pr_read_scroll, delta, self.pr_read_max_scroll.get());
     }
 
-    /// Open the pull request in the browser. A resolved PR always carries a
-    /// `url`, so there is nothing to guard against.
+    /// Open the pull request in the browser. The forge's `url` passes the same gate a
+    /// clicked link does: the OS opener runs whatever a non-http(s) target names
+    /// (`ShellExecuteW` on Windows), so anything else is refused.
     pub fn pr_open(&mut self) {
         let Some(url) = self.pr_snapshot().map(|s| s.url.clone()) else {
             return;
         };
+        let url = match crate::browser::openable_url(&url) {
+            Ok(url) => url,
+            Err(refusal) => {
+                self.status = refusal.to_string();
+                return;
+            }
+        };
         let opener = self.plugin_config().and_then(crate::config::PluginConfig::url_opener);
-        match crate::browser::open(&url, opener) {
+        match crate::browser::open(url, opener) {
             Ok(()) => self.status = format!("opened {} in browser", self.pr_forge.abbr()),
             Err(e) => self.status = e.to_string(),
         }

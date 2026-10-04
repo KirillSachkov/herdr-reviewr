@@ -1016,6 +1016,31 @@ fn the_pr_footer_offers_open_for_any_resolved_pr() {
 }
 
 #[test]
+fn opening_the_pr_refuses_a_url_that_is_not_http() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::forge::{PrSnapshot, PrView};
+
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    // An opener that is nowhere, so an accepted URL reports reaching it and opens nothing.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.toml"), "url_opener = \"reviewr-no-such-opener\"\n")
+        .unwrap();
+    app.set_plugin_config(herdr_reviewr::config::plugin_config_in(dir.path()).unwrap());
+    app.set_tab(Tab::Pr).unwrap();
+    let with_url =
+        |url: &str| PrView::Pr(Box::new(PrSnapshot { url: url.into(), ..common::pr_snapshot() }));
+
+    app.pr = with_url("file:///C:/Windows/System32/calc.exe");
+    app.pr_open();
+    assert_eq!(app.status, "unsupported link scheme");
+
+    app.pr = with_url("https://github.com/o/r/pull/7");
+    app.pr_open();
+    assert_eq!(app.status, "`url_opener` not found: reviewr-no-such-opener");
+}
+
+#[test]
 fn the_footer_offers_send_only_once_a_comment_exists() {
     let mut app = composing_app();
     app.cancel_comment();
