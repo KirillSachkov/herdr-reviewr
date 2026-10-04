@@ -15,6 +15,9 @@ Two files carry the version — keep them equal:
 - `Cargo.toml` → `[package] version`
 - `herdr-plugin.toml` → `version`
 
+A manifest change that needs a new binary (a new action, a new flag) lands in the same push as
+its release, or installs from `main` run the new manifest on the old binary.
+
 ## Steps
 
 Pick the new version with semver: a behavior change or new feature is a minor bump in `0.x`

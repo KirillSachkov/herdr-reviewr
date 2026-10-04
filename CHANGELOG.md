@@ -9,14 +9,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 - **Windows**: install, toggle, review, and send on native Windows, with the same plugin and keybindings.
 - **Git's editor as a fallback**: with no editor variable set, `e` opens the editor in `core.editor`.
+- **Changed line endings**: a line whose only change is its ending shows a `^M` marker.
+- **Copies**: with git's copy detection on, a copied file is marked `C`, not `R`.
 
 ### Changed
-- **Requires herdr 0.9.0.** The plugin actions run in the binary, so bash and jq are no longer needed.
+- **Requires herdr 0.9.0.** The plugin actions run in the binary, so bash and jq are no longer needed at runtime.
+- **Send cap**: a review over 256 KiB refuses with a copy hint, since herdr cannot read more in time.
 
 ### Fixed
 - **Diffs under `core.autocrlf`**: a file whose only difference is line endings no longer shows every line changed.
 - **Line numbers after a stray CR**: a carriage return inside a line no longer shifts the diff's rows off git's numbering.
 - **Quick double toggle**: two fast presses open reviewr and then close it, and never stack two panes.
+- **PR link**: `o` opens only an http(s) pull request URL.
 
 ## [0.42.0] — 2026-10-02
 

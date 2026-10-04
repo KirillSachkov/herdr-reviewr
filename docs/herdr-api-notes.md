@@ -133,8 +133,8 @@ herdr plugin pane close <pane_id>
 `HERDR_BIN_PATH`, `HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`, `HERDR_PLUGIN_STATE_DIR`,
 `HERDR_PLUGIN_ENTRYPOINT_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PLUGIN_EVENT_JSON` (events).
-reviewr prepends the common host bin dirs when it resolves `git` and `herdr` (`src/proc.rs`), so
-a stripped `PATH` cannot hide them.
+On macOS and Linux reviewr prepends the common host bin dirs when it resolves `git` and `herdr`
+(`src/proc.rs`), so a stripped `PATH` cannot hide them. Windows has no such dirs to trust.
 
 - **Action context** (`HERDR_PLUGIN_CONTEXT_JSON`): `workspace_id`, `tab_id`, `focused_pane_id`,
   `focused_pane_cwd`, `worktree:{repo_root, checkout_path, ...}`. The open action places a
