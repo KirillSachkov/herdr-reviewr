@@ -230,6 +230,8 @@ pub(crate) fn all_files_entries(
 pub struct TurnHost {
     tracker: TurnTracker,
     repo: PathBuf,
+    /// The reviewed worktree's [`canonical`] root, which a member's top level equals.
+    root: PathBuf,
     /// Each agent `cwd` resolved to whether it is a member of the reviewed worktree.
     resolved: HashMap<String, bool>,
 }
@@ -254,18 +256,10 @@ fn worktree_cwd(cwd: Option<&str>) -> Option<&str> {
     cwd.filter(|c| Path::new(c).is_absolute())
 }
 
-/// Whether two top levels name one worktree: case-insensitive on Windows, exact elsewhere.
-fn same_root(a: &Path, b: &Path) -> bool {
-    if cfg!(windows) {
-        let same = |x: &std::ffi::OsStr, y: &std::ffi::OsStr| match (x.to_str(), y.to_str()) {
-            (Some(x), Some(y)) => x.to_lowercase() == y.to_lowercase(),
-            _ => x == y,
-        };
-        a.components().count() == b.components().count()
-            && a.components().zip(b.components()).all(|(x, y)| same(x.as_os_str(), y.as_os_str()))
-    } else {
-        a == b
-    }
+/// `path` as the OS resolves it: on-disk case, short names and links expanded, so two
+/// spellings of one directory compare equal. `path` itself where it cannot be resolved.
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Fold the members' statuses, or `None` when any membership is undetermined.
@@ -288,7 +282,7 @@ impl TurnHost {
     /// Resume any persisted turn baseline for this worktree.
     pub fn open(repo: PathBuf) -> Self {
         let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
-        Self { tracker, repo, resolved: HashMap::new() }
+        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new() }
     }
 
     pub fn baseline(&self) -> Option<&str> {
@@ -325,7 +319,7 @@ impl TurnHost {
         match git::worktree_of(Path::new(cwd)) {
             // A resolved root is stable: record its membership once.
             git::Worktree::Root(top) => {
-                let member = same_root(&top, &self.repo);
+                let member = canonical(&top) == self.root;
                 self.resolved.insert(cwd.to_string(), member);
                 if member { Membership::Member } else { Membership::NotMember }
             }
@@ -434,10 +428,9 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use super::{Membership, classify, same_root, worktree_cwd};
+    use super::{Membership, classify, worktree_cwd};
     use crate::herdr::AgentSample;
     use crate::turn::{Status, WorktreeState};
-    use std::path::Path;
 
     fn working_at(cwd: &str) -> AgentSample {
         AgentSample { cwd: Some(cwd.into()), status: Status::Working }
@@ -451,18 +444,6 @@ mod tests {
         assert_eq!(worktree_cwd(Some("relative/path")), None);
         assert_eq!(worktree_cwd(Some("")), None);
         assert_eq!(worktree_cwd(None), None);
-    }
-
-    #[test]
-    fn a_root_in_another_case_is_the_same_worktree_only_on_windows() {
-        // The literal pair, not git's output, pins the comparison itself.
-        let same = |a: &str, b: &str| same_root(Path::new(a), Path::new(b));
-        assert!(same("C:/Work/Repo", "C:/Work/Repo"));
-        assert!(!same("C:/Work/Repo", "C:/Work/Other"));
-        assert!(!same("C:/Work/Repo", "C:/Work/Repo/sub"), "a subdirectory is not the root");
-        assert_eq!(same("C:/Work/Repo", "c:/work/REPO"), cfg!(windows));
-        assert_eq!(same("C:/Users/Jürgen", "C:/Users/JÜRGEN"), cfg!(windows), "beyond ASCII");
-        assert_eq!(same("/work/Repo", "/work/repo"), cfg!(windows));
     }
 
     /// An agent whose cwd spells the root in another case is a member.
