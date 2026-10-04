@@ -10,12 +10,11 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::{ChangeKind, ChangedFile, Scope};
 
-/// Run `git -C <repo> <args>` and return stdout. Errors on non-zero exit.
-/// Every git process reviewr runs, in `repo`. Reads only, so nothing here may write the
-/// repository (the **No writes** invariant): `git diff` would otherwise refresh a stat-dirty
-/// index entry and take `index.lock` under the agent's own `git add`, and
-/// `GIT_OPTIONAL_LOCKS=0` turns off the same opportunistic write in `status`. `GIT_DIFF_OPTS`
-/// would override the full context the diff sides are read with.
+/// Every git process reviewr runs, in `repo`. Nothing here may write the real index (the
+/// **No writes** invariant): `git diff` would otherwise refresh a stat-dirty entry and take
+/// `index.lock` under the agent's own `git add`, and `GIT_OPTIONAL_LOCKS=0` turns off the same
+/// opportunistic write in `status`. A run that needs the refresh runs on an [`IndexCopy`].
+/// `GIT_DIFF_OPTS` would override the full context the diff sides are read with.
 fn git_command(repo: &Path) -> std::process::Command {
     #[cfg(test)]
     GIT_COMMANDS.with(|n| n.set(n.get() + 1));
@@ -1621,90 +1620,74 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 // a temporary index, never touching the real index, the worktree, or any branch, and
 // persists the baseline at `refs/worktree/reviewr/turn-base`.
 
-/// A non-disruptive snapshot of the worktree as a tree object. Seeds a temporary index
-/// from the repo's real index so unchanged files keep their cached hash, then `add -A`
-/// and `write-tree`. Captures staged, unstaged, and untracked content alike. Touches
-/// only the object database and the temp index — never the real index or any ref.
+/// A non-disruptive snapshot of the worktree as a tree object: `add -A` and `write-tree` on
+/// an [`IndexCopy`], so unchanged files keep their cached hash. Captures staged, unstaged,
+/// and untracked content alike. Touches only the object database and the copy, never the
+/// real index or any ref.
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
-    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
-    let tmp_index = git_dir.join("reviewr-turn-index");
-    let real_index = git_dir.join("index");
-    // Two reviewr panes on one worktree share the temp index, so their snapshots take turns:
-    // one clearing the index the other is adding into would fail both. An OS lock on an empty
-    // file beside it, released when this returns or the process dies.
-    let turn = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(git_dir.join("reviewr-turn.lock"))
-        .context("opening the snapshot lock")?;
-    turn.lock().context("taking the snapshot lock")?;
-    // Clear whatever a prior hard crash left — the temp index and the `.lock` git holds
-    // while writing it (a leftover lock fails every later `add` with "File exists") — then
-    // drop both on every exit path via the guard, so even a failed snapshot leaves nothing
-    // behind in the git dir.
-    let guard = TempIndex(&tmp_index);
-    guard.clear();
-    // Seed from the real index so git's stat cache lets unchanged files skip hashing;
-    // a fresh repo may have no index yet, so start empty in that case.
-    if real_index.exists() {
-        // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
-        // older than its index gets its content compared, since a same-size edit in that
-        // tick matches every stat field. A copy stamped now (Linux's copy does) would pass
-        // that edit as clean. macOS and Windows copies keep the mtime already. Read before
-        // the copy: an index the agent swaps in meanwhile is newer, so the stamp errs old,
-        // the safe side, never new.
-        let modified = std::fs::metadata(&real_index).and_then(|m| m.modified());
-        std::fs::copy(&real_index, &tmp_index).context("seeding the snapshot index")?;
-        // Best effort, like the read: a copy left undated costs the racy-clean edge case,
-        // never the snapshot.
-        if let (Ok(modified), Ok(tmp)) =
-            (modified, std::fs::File::options().write(true).open(&tmp_index))
-        {
-            let _ = tmp.set_modified(modified);
-        }
-    }
-    git_with_index(repo, &tmp_index, &["add", "-A"])?;
-    let tree = git_with_index(repo, &tmp_index, &["write-tree"])?;
-    Ok(tree.trim().to_string())
+    let index = IndexCopy::of(repo)?;
+    index.git(repo, &["add", "-A"])?;
+    Ok(index.git(repo, &["write-tree"])?.trim().to_string())
 }
 
-/// Removes a temporary index and its git lock file on drop, so a snapshot that fails midway
-/// never leaves either behind.
-struct TempIndex<'a>(&'a Path);
+/// A private copy of the worktree's index, in the OS temp dir, named to git by
+/// `GIT_INDEX_FILE` for the runs that write an index: a snapshot's `add`, and the refresh a
+/// worktree diff needs to tell a touched file from a changed one. git writes only the copy
+/// (the **No writes** invariant). Each copy is its own file, so two panes on one worktree
+/// never share one, and dropping it removes it along with any `.lock` git left beside it.
+struct IndexCopy(tempfile::TempPath);
 
-impl TempIndex<'_> {
-    /// Removes the index and the `<index>.lock` git creates beside it while writing. Safe at
-    /// any point we run: the lock's only legitimate holder is a live `git add` this process
-    /// spawned and has already waited on.
-    fn clear(&self) {
-        let _ = std::fs::remove_file(self.0);
+impl IndexCopy {
+    fn of(repo: &Path) -> Result<Self> {
+        let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
+        let real = git_dir.join("index");
+        let copy = tempfile::Builder::new()
+            .prefix("reviewr-index-")
+            .tempfile()
+            .context("creating the index copy")?
+            .into_temp_path();
+        // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
+        // older than its index gets its content compared, since a same-size edit in that tick
+        // matches every stat field. A copy stamped now (Linux's copy does) would pass that edit
+        // as clean. Read before the copy: an index the agent swaps in meanwhile is newer, so
+        // the stamp errs old, the safe side, never new.
+        match std::fs::metadata(&real).and_then(|m| m.modified()) {
+            Ok(modified) => {
+                std::fs::copy(&real, &copy).context("copying the index")?;
+                // Best effort: an undated copy costs the racy-clean edge case, never the run.
+                if let Ok(file) = std::fs::File::options().write(true).open(&copy) {
+                    let _ = file.set_modified(modified);
+                }
+            }
+            // A fresh repository has no index yet. git reads a missing one as empty, and an
+            // empty file as corrupt.
+            Err(_) => std::fs::remove_file(&copy).context("clearing the index copy")?,
+        }
+        Ok(Self(copy))
+    }
+
+    /// Like [`git`], on the copy, with the diff refresh on: a stat-dirty entry whose content
+    /// is unchanged drops out of the diff, as in the reviewer's own `git diff`.
+    fn git(&self, repo: &Path, args: &[&str]) -> Result<String> {
+        let out = git_command(repo)
+            .args(["-c", "diff.autoRefreshIndex=true", "-c", "core.quotepath=false"])
+            .args(args)
+            .env("GIT_INDEX_FILE", &*self.0)
+            .output()
+            .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
+        if !out.status.success() {
+            bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+}
+
+impl Drop for IndexCopy {
+    fn drop(&mut self) {
         let mut lock = self.0.as_os_str().to_owned();
         lock.push(".lock");
         let _ = std::fs::remove_file(Path::new(&lock));
     }
-}
-
-impl Drop for TempIndex<'_> {
-    fn drop(&mut self) {
-        self.clear();
-    }
-}
-
-/// Like [`git`], but runs against a throwaway index via `GIT_INDEX_FILE` so the snapshot
-/// never disturbs the repo's real index.
-fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
-    let out = git_command(repo)
-        .args(["-c", "core.quotepath=false"])
-        .args(args)
-        .env("GIT_INDEX_FILE", index)
-        .output()
-        .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
-    if !out.status.success() {
-        bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
@@ -1732,8 +1715,9 @@ pub fn diff_base(repo: &Path) -> String {
 /// The changed files from the tree-ish `base` to the worktree, untracked files included,
 /// sorted by path: the changeset of the `uncommitted` and `branch` scopes.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
-    let numstat = git(repo, &["diff", base, "--numstat", "-z"])?;
-    let name_status = git(repo, &["diff", base, "--name-status", "-z"])?;
+    let index = IndexCopy::of(repo)?;
+    let numstat = index.git(repo, &["diff", base, "--numstat", "-z"])?;
+    let name_status = index.git(repo, &["diff", base, "--name-status", "-z"])?;
     assemble(repo, &numstat, &name_status, true)
 }
 
@@ -2026,16 +2010,7 @@ fn assemble(
         if !seen.insert(path.clone()) {
             continue;
         }
-        // A modified path missing from the numstat is only stat-dirty: touched, its content
-        // and mode unchanged. The diff runs without refreshing the index (see
-        // [`git_command`]), so git names it here but finds no change to count. A mode change
-        // still counts, as 0/0. Any other kind missing from the numstat reads as an ordinary
-        // empty change rather than as git's no-text-diff verdict.
-        let Some(verdict) =
-            counts.get(&path).copied().or((kind != ChangeKind::Modified).then_some(Some((0, 0))))
-        else {
-            continue;
-        };
+        let verdict = counts.get(&path).copied().unwrap_or(Some((0, 0)));
         let (additions, deletions) = verdict.unwrap_or((0, 0));
         files.push(ChangedFile {
             path,

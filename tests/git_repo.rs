@@ -1111,24 +1111,22 @@ fn snapshot_worktree_never_mutates_the_repo() {
     assert_eq!(r.git(&["status", "--porcelain"]), status_before, "working tree status unchanged");
     assert_eq!(r.git(&["rev-parse", "HEAD"]), head_before, "HEAD unchanged");
     assert_eq!(r.git(&["branch", "-a"]), branches_before, "no branch created");
-    assert!(!git_dir.join("reviewr-turn-index").exists(), "the temp index is cleaned up");
+    assert!(!git_dir.join("reviewr-turn-index").exists(), "no index lands in the git dir");
 }
 
 #[test]
-fn snapshot_worktree_recovers_from_a_stale_index_lock() {
+fn a_crashed_snapshots_leftover_lock_never_blocks_the_next() {
     let r = Repo::init();
     r.write("a.rs", "x\n");
     r.commit_all("init");
-
+    // A hard crash mid-`add` once left git's lock on a shared temp index in `.git`, failing
+    // every later snapshot with "File exists". Each snapshot now adds into its own copy.
     let git_dir = r.git(&["rev-parse", "--absolute-git-dir"]);
-    let git_dir = std::path::Path::new(git_dir.trim());
-    // A hard crash mid-`add` leaves git's lock on the temp index behind; a later snapshot
-    // must clear it instead of failing "Unable to create ... File exists" forever after.
-    std::fs::write(git_dir.join("reviewr-turn-index.lock"), "").unwrap();
+    std::fs::write(std::path::Path::new(git_dir.trim()).join("reviewr-turn-index.lock"), "")
+        .unwrap();
 
     let tree = snapshot_worktree(r.path()).unwrap();
     assert_eq!(tree.len(), 40, "a tree object id");
-    assert!(!git_dir.join("reviewr-turn-index.lock").exists(), "the stale lock is cleared");
 }
 
 #[test]
@@ -1461,12 +1459,14 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     let r = Repo::init();
     r.write("a.txt", "one\n");
     r.write("run.sh", "x\n");
+    r.write("b.bin", "\0\u{1}binary\n");
     r.commit_all("init");
     let index = r.path().join(".git/index");
     let stamp = || std::fs::metadata(&index).unwrap().modified().unwrap();
     // A later mtime on unchanged content, past the index's own stamp.
     std::thread::sleep(std::time::Duration::from_millis(1100));
     r.write("a.txt", "one\n");
+    r.write("b.bin", "\0\u{1}binary\n");
     // A real mode change still lists, as an empty change.
     #[cfg(unix)]
     {
@@ -1481,13 +1481,19 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     let expected: &[&str] = if cfg!(unix) { &["run.sh"] } else { &[] };
     assert_eq!(paths, expected, "a touched file with the same content is no change");
     diff_sides(r.path(), "HEAD", None, "a.txt", Origin::Same).unwrap();
+    snapshot_worktree(r.path()).unwrap();
 
     assert_eq!(stamp(), before, ".git/index was rewritten");
+    let ours: Vec<_> = std::fs::read_dir(r.path().join(".git"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("reviewr"))
+        .collect();
+    assert!(ours.is_empty(), "reviewr left {ours:?} in .git");
 }
 
-/// Two reviewr panes on one worktree snapshot it through the same temp index. Taking turns,
-/// neither clears the index the other is adding into, so every snapshot lands, and lands the
-/// same tree.
+/// Two reviewr panes on one worktree snapshot it at once. Each adds into its own index copy,
+/// so every snapshot lands, and lands the same tree.
 #[test]
 fn concurrent_snapshots_of_one_worktree_all_land_the_same_tree() {
     let r = Repo::init();
