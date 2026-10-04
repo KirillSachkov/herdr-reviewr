@@ -6,11 +6,6 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::Event;
 
-/// How long an open paste may wait for a byte before it closes as a paste of what arrived.
-pub(super) const PASTE_IDLE: Duration = Duration::from_millis(500);
-
-const PASTE_START: &[u8] = super::PASTE_START.as_bytes();
-
 /// One console record the reader takes: a key's UTF-16 unit, or a resize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Record {
@@ -34,13 +29,11 @@ pub(super) struct VtInput {
     surrogate: Option<u16>,
     /// Parsed events, oldest first.
     events: VecDeque<Event>,
-    /// Console wait since the last input, which an open paste's bound counts.
-    waited: Duration,
 }
 
 impl VtInput {
     /// Take one UTF-16 unit from a key record.
-    pub(super) fn feed(&mut self, unit: u16) {
+    fn feed(&mut self, unit: u16) {
         let ch = match unit {
             0xD800..=0xDBFF => {
                 self.surrogate = Some(unit);
@@ -62,20 +55,19 @@ impl VtInput {
         }
     }
 
-    /// Nothing more is queued: a lone ESC is the Esc key, and the paste's wait starts over.
-    pub(super) fn settle(&mut self) {
+    /// Nothing more is queued: a lone ESC is the Esc key.
+    fn settle(&mut self) {
         self.parse(false);
-        self.waited = Duration::ZERO;
     }
 
-    /// Read `console` until an event parses or `deadline` passes.
+    /// Read `console` until an event parses or `deadline` passes; an open paste waits for its end.
     pub(super) fn poll(
         &mut self,
         console: &mut impl Console,
         deadline: Option<Instant>,
     ) -> io::Result<bool> {
         loop {
-            // Everything queued is read, and settled, before an open paste's bound can close it.
+            // Everything queued is read, then settled once, so a split sequence stays whole.
             let mut fed = false;
             while console.wait(Some(Duration::ZERO))? {
                 fed |= self.take(console.read()?);
@@ -83,18 +75,12 @@ impl VtInput {
             if fed {
                 self.settle();
             }
-            self.expire();
-            if self.has_events() {
+            if !self.events.is_empty() {
                 return Ok(true);
             }
-            // Only the wait counts toward an open paste's bound, never a frame's draw.
-            let started = console.now();
-            let left = deadline.map(|deadline| deadline.saturating_duration_since(started));
-            let input = console.wait(left.into_iter().chain(self.paste_left()).min())?;
-            self.waited += console.now().saturating_duration_since(started);
-            if !input && deadline.is_some_and(|deadline| console.now() >= deadline) {
-                self.expire();
-                return Ok(self.has_events());
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(console.now()));
+            if !console.wait(left)? {
+                return Ok(false);
             }
         }
     }
@@ -112,24 +98,6 @@ impl VtInput {
             }
         }
         fed
-    }
-
-    /// The wait an open paste has left before it counts as complete, if one is open.
-    pub(super) fn paste_left(&self) -> Option<Duration> {
-        self.pending.starts_with(PASTE_START).then(|| PASTE_IDLE.saturating_sub(self.waited))
-    }
-
-    /// Close a paste past its bound as a paste, never as keys.
-    pub(super) fn expire(&mut self) {
-        if self.paste_left() == Some(Duration::ZERO) {
-            let text = String::from_utf8_lossy(&self.pending[PASTE_START.len()..]).into_owned();
-            self.pending.clear();
-            self.events.push_back(Event::Paste(text));
-        }
-    }
-
-    pub(super) fn has_events(&self) -> bool {
-        !self.events.is_empty()
     }
 
     pub(super) fn pop(&mut self) -> Option<Event> {
@@ -171,7 +139,7 @@ mod tests {
             }
             vt.settle();
         }
-        std::iter::from_fn(|| vt.pop()).collect()
+        drain(vt)
     }
 
     fn parse(batches: &[&str]) -> Vec<Event> {
@@ -316,17 +284,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unterminated_paste_closes_as_a_paste_after_its_bound_of_waiting() {
+    fn a_paste_stalled_mid_way_never_runs_its_rest_as_keys() {
         let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
-        console.queue(Duration::ZERO, "\x1b[200~abc\rx");
-        let tick = Some(console.now + PASTE_IDLE / 2);
-        assert!(!vt.poll(&mut console, tick).unwrap(), "still inside the bound");
-        // More input restarts the bound.
-        console.queue(Duration::ZERO, "y");
-        let tick = Some(console.now + PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
-        assert!(!vt.poll(&mut console, tick).unwrap(), "the bound counts from the last input");
+        console.queue(Duration::ZERO, "\x1b[200~abc\r");
+        console.queue(Duration::from_secs(5), "\nx\x1b[201~");
+        let tick = Some(console.now + Duration::from_secs(1));
+        assert!(!vt.poll(&mut console, tick).unwrap(), "an open paste waits for its end");
         assert!(vt.poll(&mut console, None).unwrap());
-        assert_eq!(drain(&mut vt), [Event::Paste("abc\rxy".into())]);
+        assert_eq!(drain(&mut vt), [Event::Paste("abc\r\nx".into())]);
     }
 
     #[test]
