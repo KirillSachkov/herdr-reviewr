@@ -1082,6 +1082,20 @@ fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
     assert!(opened_pane_reads(dir.path()) > 1, "{}", herdr_calls(dir.path()));
 }
 
+#[test]
+fn an_open_whose_pane_dies_at_launch_refuses_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(fixture(dir.path(), "procfail", "w1:p9", ".json"), herdr_error("pane_not_found"))
+        .unwrap();
+
+    let started = Instant::now();
+    let output = run_open(dir.path());
+
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert_eq!(stderr(&output), "reviewr: pane w1:p9 exited at launch in workspace-1\n");
+    assert!(started.elapsed() < Duration::from_secs(3), "waited out the bound");
+}
+
 // --- Actions serialize on the lock in the plugin state dir.
 
 /// Workspace `ws`'s action lock, held by the test process as another action would hold it.
@@ -1164,14 +1178,14 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
         assert_eq!(output.status.code(), Some(1), "{mode}");
         assert_eq!(
             stderr(&output),
-            "reviewr: another reviewr action in workspace-1 is still running after 22s\n",
+            "reviewr: another reviewr action in workspace-1 is still running after 46s\n",
             "{mode}"
         );
         assert!(output.stdout.is_empty(), "{mode}");
     }
     let elapsed = started.elapsed();
 
-    assert!(elapsed >= Duration::from_millis(21500), "refused before the bound: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(45500), "refused before the bound: {elapsed:?}");
     assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 

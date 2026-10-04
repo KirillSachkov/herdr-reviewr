@@ -162,8 +162,9 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
-/// How long an action waits for its workspace's lock: a holder's wedged call, then its open.
-const LOCK_BOUND: Duration = herdr::CALL_BOUND.saturating_mul(2).saturating_add(VISIBLE_BOUND);
+/// How long an action waits for its workspace's lock: a holder's worst case, every call wedged.
+/// Its list, probes, open, and rename, then the visibility wait and the probe in flight at its end.
+const LOCK_BOUND: Duration = herdr::CALL_BOUND.saturating_mul(5).saturating_add(VISIBLE_BOUND);
 
 /// The pause between two lock attempts.
 const LOCK_POLL: Duration = Duration::from_millis(20);
@@ -253,16 +254,18 @@ fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
             .iter()
             .map(|entry| {
                 let pane = entry.pane_id.as_str();
-                (pane, scope.spawn(move || runs_review_ui(pane)))
+                let probe =
+                    thread::Builder::new().spawn_scoped(scope, move || runs_review_ui(pane));
+                (pane, probe)
             })
             .collect();
         let mut existing = Vec::new();
         for (pane, probe) in probes {
-            // A probe that panicked never settled, so it refuses like a failed read.
-            match probe.join() {
-                Ok(Ok(true)) => existing.push(pane),
-                Ok(Ok(false)) => {}
-                Ok(Err(_)) | Err(_) => return None,
+            // A probe that never ran or panicked never settled, so it refuses like a failed read.
+            match probe.map(thread::ScopedJoinHandle::join) {
+                Ok(Ok(Ok(true))) => existing.push(pane),
+                Ok(Ok(Ok(false))) => {}
+                _ => return None,
             }
         }
         Some(existing)
@@ -290,14 +293,26 @@ fn is_review_ui(process: &Process) -> bool {
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 
-/// Close every pane in `existing`; a pane already gone counts as closed.
+/// Close every pane in `existing` concurrently; a pane already gone counts as closed.
 fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
+    let results = thread::scope(|scope| {
+        let closes: Vec<_> = existing
+            .iter()
+            .map(|&pane| {
+                (pane, thread::Builder::new().spawn_scoped(scope, move || herdr::close_pane(pane)))
+            })
+            .collect();
+        let joined = closes
+            .into_iter()
+            .map(|(pane, close)| (pane, close.map(thread::ScopedJoinHandle::join)));
+        joined.collect::<Vec<_>>()
+    });
     let mut closed = Vec::new();
     let mut failed = Vec::new();
-    for &pane in existing {
-        match herdr::close_pane(pane) {
-            Ok(()) | Err(HerdrError::PaneGone) => closed.push(pane),
-            Err(_) => failed.push(pane),
+    for (pane, result) in results {
+        match result {
+            Ok(Ok(Ok(()) | Err(HerdrError::PaneGone))) => closed.push(pane),
+            _ => failed.push(pane),
         }
     }
     if !failed.is_empty() {
@@ -309,8 +324,8 @@ fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
 /// How long an open waits for its pane to read as reviewr: a cold Windows open, with room.
 const VISIBLE_BOUND: Duration = Duration::from_secs(6);
 
-/// The pause between two reads of the new pane while an open waits.
-const VISIBLE_POLL: Duration = Duration::from_millis(50);
+/// The pause between two reads of the new pane; Windows herdr caches its process snapshot 250 ms.
+const VISIBLE_POLL: Duration = Duration::from_millis(if cfg!(windows) { 250 } else { 50 });
 
 /// Open a reviewr pane in the target's workspace and return the success line.
 fn open(
@@ -367,7 +382,8 @@ fn open(
         let _ = herdr::rename_tab(tab, herdr::LABEL);
     }
 
-    wait_until_visible(&opened.pane_id);
+    wait_until_visible(&opened.pane_id)
+        .map_err(|_| refused(format!("pane {} exited at launch in {ws}", opened.pane_id)))?;
     Ok(format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str()))
 }
 
@@ -376,16 +392,18 @@ fn has_worktree(dir: &str) -> bool {
     crate::git::toplevel(Path::new(dir)).is_some()
 }
 
-/// Return once pane `pane` reads as reviewr, or past [`VISIBLE_BOUND`].
-fn wait_until_visible(pane: &str) {
+/// Return once pane `pane` reads as reviewr, or past [`VISIBLE_BOUND`]; `Err` once it is gone.
+fn wait_until_visible(pane: &str) -> Result<(), HerdrError> {
     let deadline = Instant::now() + VISIBLE_BOUND;
     loop {
-        if runs_review_ui(pane).unwrap_or(false) {
-            return;
+        match ProcessInfo::of(pane) {
+            Ok(info) if info.foreground_processes.iter().any(is_review_ui) => return Ok(()),
+            Err(HerdrError::PaneGone) => return Err(HerdrError::PaneGone),
+            _ => {}
         }
         if Instant::now() >= deadline {
             logln!("opened pane {pane} not visible as reviewr after {VISIBLE_BOUND:?}");
-            return;
+            return Ok(());
         }
         thread::sleep(VISIBLE_POLL);
     }
