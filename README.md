@@ -47,7 +47,7 @@ GitLab, or Azure DevOps and never posts.
 - **herdr ≥ 0.9.0** (the plugin system).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
-- **macOS or Linux.**
+- **macOS, Linux, or Windows.**
 - **`gh`** (GitHub), **`glab`** (GitLab), or **`az`** (Azure DevOps, with the `azure-devops` extension), authenticated. Only the **PR** tab needs one.
 
 ## Install
@@ -324,7 +324,8 @@ editor = "code -g {file}:{line}"
 
 ### URL opener
 
-`o` and link clicks open URLs with `open` (macOS) or `xdg-open` (Linux). Under `herdr --remote`
+`o` and link clicks open URLs with `open` (macOS), `xdg-open` (Linux), or the default browser
+(Windows). Under `herdr --remote`
 that runs on the server, so point `url_opener` at a command that reaches your browser:
 
 ```toml
@@ -437,9 +438,10 @@ A layout places reviewr like any other program. Give one pane the command:
 command = "herdr-reviewr"
 ```
 
-That pane is a full reviewr pane. The install links the binary at `~/.local/bin/herdr-reviewr`
-and at `~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr`. Use the long path
-if `~/.local/bin` is not on your `PATH`.
+That pane is a full reviewr pane. On macOS and Linux, the install links the binary at
+`~/.local/bin/herdr-reviewr` and at
+`~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr`. Use the long path if
+`~/.local/bin` is not on your `PATH`.
 
 A layout hook can also invoke the actions, once its panes are in place:
 
@@ -463,9 +465,15 @@ The known constraints:
 - **Box-drawing glyphs required**, but no Nerd Font.
 
 **Platform**
-- **macOS and Linux only** — no Windows.
 - **Clipboard export** uses `pbcopy`, `wl-copy`, `xclip`, or `xsel`. With none installed it
-  says so, and **Send** still works.
+  says so, and **Send** still works. Windows writes the clipboard directly.
+- **Windows: one process per pane** — herdr reports a single process for each Windows pane. A
+  reviewr you start by hand inside a PowerShell pane doesn't count as a reviewr pane, so toggle
+  opens one beside it.
+- **Windows: the launch folder** — a PowerShell pane may report the folder it started in, not
+  the one you `cd`'d to. Toggle can open reviewr on the launch folder.
+- **Windows: no stable launch path** — layouts reference the plugin's own `bin` folder, since
+  the `~/.local` links need symlink rights Windows doesn't grant by default.
 
 **herdr coupling**
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and

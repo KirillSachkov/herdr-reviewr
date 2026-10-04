@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Windows**: install, toggle, review, and send on native Windows, with the same plugin and keybindings.
+- **Git's editor as a fallback**: with no editor variable set, `e` opens the editor in `core.editor`.
+
+### Changed
+- **Requires herdr 0.9.0.** The plugin actions run in the binary, so bash and jq are no longer needed.
+
+### Fixed
+- **Diffs under `core.autocrlf`**: a file whose only difference is line endings no longer shows every line changed.
+
 ## [0.42.0] — 2026-10-02
 
 ### Changed
