@@ -74,3 +74,39 @@ just qa-restore
 It swaps the release binary back through a fresh inode and restores the release manifest.
 Then close and reopen the panes, same as any other swap. A full reinstall
 (`herdr plugin install persiyanov/herdr-reviewr`) also restores the released binary.
+
+## Windows
+
+Windows QA runs in a local VM, not on the user's machine: Windows 11 ARM64 under QEMU with
+Apple's hypervisor. herdr's Windows build is x64, and ARM64 Windows runs it under emulation,
+the same way a user on an ARM laptop gets it. The automated suite stays on CI's
+`windows-latest`. The VM covers what only a real seat shows: paste, mouse, editors, and a real
+plugin install.
+
+Build the VM once, unattended, in about 30 minutes (needs `brew install qemu` and 40 GB free):
+
+```
+scripts/windows-vm/create.sh
+```
+
+It downloads the Windows ISO from Microsoft, installs Windows with no setup screens, and leaves
+a local admin `reviewr` logged in with OpenSSH, Git for Windows, and herdr. The VM lives in
+`~/VMs/reviewr-windows` (`VM_DIR` overrides it).
+
+| To | Run |
+| --- | --- |
+| Start it after a Mac restart | `scripts/windows-vm/run-vm.sh` |
+| Run PowerShell in it | `scripts/windows-vm/vm '<command>'` |
+| Watch the screen | Screen Sharing to `vnc://127.0.0.1:5905` |
+| Type into the desktop | `scripts/windows-vm/vmkeys.py '<text>' --enter` |
+| Screenshot the desktop | `printf 'screendump /tmp/vm.png -f png\n' \| nc -U ~/VMs/reviewr-windows/monitor.sock` |
+
+A QA build is a cross-compile on the Mac (`cargo install cargo-xwin` once), copied in:
+
+```
+cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+Run a pane journey with `scripts/windows-herdr.ps1` copied into the VM, the same harness the
+CI smoke uses. The QA rules above apply inside the VM too: actions and keys go to panes the
+journey opened itself.
