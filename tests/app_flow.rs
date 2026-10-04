@@ -943,9 +943,7 @@ fn the_diff_shows_an_edit_made_in_the_editor_after_the_refresh() {
     };
     assert!(!text(&app).contains("sixth-line-from-the-editor"), "not on screen before the refresh");
 
-    // `reload` is the synchronous build-and-reconcile pair; the refresh `run_editor` requests
-    // lands through the world worker and reconciles the same way, so this covers the half that
-    // could fail to rebuild the open file.
+    // `reload` reconciles as a landed refresh does.
     app.reload().unwrap();
     assert!(
         text(&app).contains("sixth-line-from-the-editor"),
@@ -5306,9 +5304,7 @@ mod search_overlay {
         out
     }
 
-    /// The real engine, end to end: spawn the worker, run a query, and check the contract —
-    /// results arrive, ignored files and `.git` never appear, and the worktree gains no
-    /// file (the no-writes invariant).
+    /// The real engine end to end: no ignored files, no `.git`, no writes.
     #[test]
     fn engine_worker_end_to_end() {
         let repo = Repo::init();
@@ -5751,9 +5747,7 @@ fn typing_filters_and_enter_picks_the_highlight() {
 
 #[test]
 fn a_pick_retags_the_world_input() {
-    // The pick is read from its ref at build time, so it is not input identity on its
-    // own: the pick must bump the tag, or a build launched before it lands afterwards
-    // and reverts the picked base.
+    // A pick must bump the tag, or an older build reverts it.
     let r = based_repo();
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
@@ -6301,9 +6295,7 @@ fn last_copy() -> Option<String> {
     SEL_COPIES.with(|c| c.borrow().last().cloned())
 }
 
-/// Dispatch one mouse event at an absolute cell through the event loop's dispatcher,
-/// painting a frame first — hit tests resolve against the recorded painted layout, exactly
-/// as the event loop paints before it reads input.
+/// Dispatch one mouse event after painting a frame.
 fn sel_mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
     let backend = ratatui::backend::TestBackend::new(SEL_AREA.width, SEL_AREA.height);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
@@ -6391,9 +6383,7 @@ fn ts_one_surface_a_drag_clamps_to_its_pane_and_skips_cards() {
     assert!(drag.extent.row < app.visible.len());
     press(&mut app, &Keymap::default(), KeyCode::Esc);
 
-    // A code drag driven across a spliced comment card's screen rows copies no card text:
-    // the card sits under row 1 as three display lines (border, body, border), and row 2's
-    // code paints below them.
+    // A drag across a comment card copies no card text.
     app.focus = Focus::Diff;
     app.diff_cursor = 1;
     press(&mut app, &Keymap::default(), KeyCode::Char('c'));
@@ -6762,9 +6752,7 @@ fn a_still_pointer_inside_the_pane_is_a_held_button_not_an_exit() {
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     sel_mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), c1, r1);
 
-    // A release anywhere inside the pane would have arrived — herdr routes by pointer
-    // position — so stillness there proves the button is still down: no exit signature,
-    // even on the read pane's own border row, and the gesture waits for a proof
+    // Stillness inside the pane proves the button is still down.
     for (col, row) in [(c1, r1), (c0, content.y + content.height)] {
         let event = MouseEvent {
             kind: MouseEventKind::Drag(MouseButton::Left),
@@ -7433,9 +7421,7 @@ fn edit_never_lands_a_commit_comment_on_a_worktree_line() {
         app.store.get(0).unwrap().rev,
         herdr_reviewr::model::Rev::Commit(herdr_reviewr::model::CommitPick::single(&shas[3]))
     );
-    // Under a worktree scope the comment is in the list but its diff is not showing: `e`
-    // is inert there and the footer does not offer it, so the box never opens over a
-    // same-numbered worktree line.
+    // Under a worktree scope a commit comment's `e` is inert.
     app.set_scope(Scope::Uncommitted).unwrap();
     app.select_file(0).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("root.rs"));

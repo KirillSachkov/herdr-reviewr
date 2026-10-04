@@ -36,9 +36,7 @@ pub struct Rendered {
     pub code_blocks: Vec<(usize, usize)>,
 }
 
-/// One `<details>` element's source lines, 1-based: `start` holds the opening tag, `body`
-/// is the first line past the summary, `end` holds the closing tag (or the file's last
-/// line when it never closes). `key` is its [`DetailsHit::key`].
+/// One `<details>` element's 1-based source lines and its key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disclosure {
     pub key: String,
@@ -47,9 +45,7 @@ pub struct Disclosure {
     pub end: usize,
 }
 
-/// One rendered line's metadata: the 1-based source lines it maps to — its block's
-/// `source_line..=source_end`, one line for a code line or a table row — and the link
-/// spans it carries. A block ends where the next one begins, so ranges never overlap.
+/// One rendered line's source range and link spans.
 #[derive(Clone, Debug)]
 pub struct LineMeta {
     pub source_line: usize,
@@ -273,9 +269,7 @@ struct Renderer<'a> {
     urls: Vec<std::sync::Arc<str>>,
     /// The heading text being collected for its slug.
     heading_text: Option<String>,
-    /// Open images: the chunk index where the alt text starts, the heading-text
-    /// length to roll back to — alt text stays out of a heading's slug, as on GitHub —
-    /// and the image destination, so a non-badge image is a link to its url.
+    /// Open images: alt text start, heading length to roll back to, destination.
     images: Vec<(usize, usize, String)>,
     code: Option<CodeBlock>,
     table: Option<Table>,
@@ -912,9 +906,7 @@ impl Renderer<'_> {
             }
             m.source_end = end;
         }
-        // A collapsed disclosure's summary stands for its whole element: its block spans it, so
-        // a change or a comment inside lands on the summary, and its body counts as shown —
-        // hidden by the reviewer's choice, not because it renders nothing.
+        // A collapsed disclosure's summary stands for its whole element.
         let mut folded: Vec<(usize, usize)> = Vec::new();
         for d in self.out.disclosures.iter().filter(|d| !self.expanded.contains(&d.key)) {
             let summary = |m: &LineMeta| m.details.as_ref().is_some_and(|h| *h.key == d.key);
@@ -1018,9 +1010,7 @@ impl Renderer<'_> {
         let marker = self.marker.take();
         let (first, cont) = self.prefix(marker.as_deref());
         let chunks = std::mem::take(&mut self.inline);
-        // Each source line's share of the run, by its count of placed characters: the wrapper
-        // drops or adds spaces and line breaks alone, so counting the rest maps every wrapped
-        // line back to the source lines its text came from.
+        // Map wrapped lines back to source lines by their placed characters.
         let placed = |c: char| c != ' ' && c != '\n';
         let mut shares: Vec<(usize, usize)> = Vec::new();
         let mut total = 0;
@@ -1139,9 +1129,7 @@ impl Renderer<'_> {
         self.emit_fragments(vec![(text, style)], "");
     }
 
-    /// Close a table: aligned columns with a bold header, an over-wide table shrinking
-    /// its widest column and wrapping that column's cells, and dim source text only when
-    /// the column floors still overflow the pane.
+    /// Close a table: aligned columns, the widest shrinking and wrapping to fit.
     fn end_table(&mut self) {
         let Some(table) = self.table.take() else {
             return;
@@ -1161,11 +1149,7 @@ impl Renderer<'_> {
                 widths[i] = widths[i].max(cell_text(cell).width());
             }
         }
-        // An over-wide table shrinks its widest columns, never below their floors: each
-        // pass levels every widest column down toward the next-highest width or its
-        // floor, whichever is larger, so cost is bounded by the column count, not by
-        // how over-wide a cell's content is. Tied widest columns shrink together, as
-        // the reference renderers do.
+        // Level the widest columns down to their floors, bounded by the column count.
         let floors: Vec<usize> = widths.iter().map(|w| (*w).min(COL_FLOOR)).collect();
         let sep_total = 3 * cols.saturating_sub(1);
         let mut deficit = (widths.iter().sum::<usize>() + sep_total).saturating_sub(budget);
@@ -1547,17 +1531,13 @@ impl Wrapper {
         if needs_sep && self.line_w + 1 + self.word_w > self.budget && self.word_w <= self.budget {
             self.flush_line();
         } else if needs_sep {
-            // A separator keeps a style only when both sides share it (a space inside one
-            // styled run merges into it); between differently styled runs it goes plain,
-            // so an underline never bleeds into the gap on either side of a link.
+            // A separator keeps a style only when both sides share it.
             let next = self.word[0].1;
             let style = match self.line.last() {
                 Some(prev) if prev.style == next => next,
                 _ => Style::default(),
             };
-            // The link id follows its own rule: both sides in one link keep the gap
-            // clickable — the plain-styled space between link text and its dim
-            // destination is still part of the click target.
+            // Both sides in one link keep the gap clickable.
             let next_link = self.word[0].2;
             let prev_link = self
                 .line_links

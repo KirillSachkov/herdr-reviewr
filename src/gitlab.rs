@@ -304,11 +304,7 @@ fn pin_outcome(read: Result<Option<Value>, GlabError>) -> Result<Option<Value>, 
     }
 }
 
-/// Ask GitLab for the branch's merge requests: the `source_branch` listings per head name
-/// against the target project — and the fork project on a fork clone — with the project
-/// lookups that name each head's project id, all in one concurrent wave. An MR joins only
-/// when its source (project, branch) is one of the branch's heads (`forge::admits`).
-/// Returns the picked MR and the project it lives in; the target's pick outranks the fork's.
+/// Ask GitLab for the branch's merge requests in one concurrent wave, joined by source.
 fn associate_by_branch<'a>(
     repo: &Path,
     input: &'a PrFetchInput,
@@ -404,9 +400,7 @@ fn mr_admitted(
     crate::forge::admits(heads, queried, head_ref, &head_repo)
 }
 
-/// The projects whose numeric id the association reads, target first: the target, the fork
-/// clone's origin, and every other head project on the target's host (a head elsewhere can
-/// never be an MR source here). One id lookup each, in the same wave as the listings.
+/// The projects whose ids the association reads, target first.
 fn id_projects<'a>(
     target: &'a crate::git::RepoTarget,
     fork: Option<&'a crate::git::RepoTarget>,
@@ -608,9 +602,7 @@ fn is_cross_project(mr: &Value) -> bool {
     }
 }
 
-/// Fold GitLab's merge state to the blockers worth surfacing: a conflict is `conflicting`,
-/// unresolved blocking discussions or missing required approvals are `blocked`, and
-/// everything else — including a still-checking status — is `clean`.
+/// Fold GitLab's merge state: conflict `conflicting`, open blockers `blocked`.
 fn derive_merge(mr: &Value) -> Merge {
     if mr["has_conflicts"].as_bool().unwrap_or(false)
         || mr["detailed_merge_status"].as_str() == Some("conflict")
@@ -662,9 +654,7 @@ fn replies_from_discussion(discussion: &Value) -> Vec<Reply> {
         .collect()
 }
 
-/// Merge the discussion threads and approvals into one newest-first comment list:
-/// MR-level notes are `comment` rows, diff-position discussions are `finding` rows, and an
-/// approval is a `review` row.
+/// Discussions and approvals as one newest-first comment list.
 fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
     for discussion in discussions {

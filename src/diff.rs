@@ -55,11 +55,7 @@ pub enum Row {
 /// What a rendered row is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderedKind {
-    /// A block's line: the source lines its own text comes from (first, last) and its wrap —
-    /// how many of the block's content lines start on that first line before it, `None` for
-    /// the blank gap set above the block — together its identity across a rebuild; the
-    /// styled line it paints; its change bar in the `Changes` tab; and, on a collapsed
-    /// `<details>` summary, how many changed lines its body hides.
+    /// A block's line: its source range and wrap (its identity), styled line, bar and hidden count.
     Block { source: (u32, u32), wrap: Option<u32>, line: u32, bar: Option<Bar>, hides: Option<u32> },
     /// A marker row standing for `lines` changed source lines no block shows.
     Marker { kind: MarkerKind, lines: u32, gone: bool },
@@ -472,13 +468,7 @@ fn pair_homologs(
     }
 }
 
-/// Two lines below this similarity are taken to be different lines, not one line edited, so
-/// they are never paired for inline emphasis (see [`pair_homologs`]). git-delta's equivalent
-/// `max_line_distance` defaults to 0.6 *distance* — the complementary metric — but we sit
-/// stricter because over-highlighting a rewrite is worse than missing a marginal edit: a pair
-/// that only shares a syntactic skeleton (a reformat, or two different `let`s) scatters
-/// unhelpful fragments. Empirically marginal pairs land near ~0.6–0.65 and genuine edits near
-/// ~0.71–0.78, so the bar sits in the gap.
+/// Below this similarity two lines are different lines, never paired for emphasis.
 const MIN_SIMILARITY: f32 = 0.7;
 
 /// The word-level similarity of `(old, new)` and the char ranges that changed.
@@ -870,9 +860,7 @@ mod tests {
 
     #[test]
     fn a_reformat_or_unrelated_pair_is_not_emphasized() {
-        // A one-liner reformatted to multi-line, and two different statements sharing a
-        // `let … ;` skeleton, both fall below the similarity bar — they scatter unhelpful
-        // fragments otherwise. Each keeps only its line-level red/green.
+        // A reformat and two different `let`s fall below the bar.
         let reformat = build(
             "    rows.push(Row::Deletion { old_no: oi + 1, spans: s });\n",
             "    rows.push(Row::Deletion {\n        old_no: oi + 1,\n        spans: s,\n    });\n",
@@ -891,9 +879,7 @@ mod tests {
 
     #[test]
     fn a_wholesale_line_rewrite_gets_no_word_emphasis() {
-        // Two unrelated lines that merely share `///` and punctuation must not light up:
-        // the line-level red/green already says they changed, and full-line emphasis on a
-        // dissimilar pair is noise. The similarity gate suppresses it.
+        // Lines sharing only `///` and punctuation stay unemphasized.
         let d = build(
             "/// Keep diff_scroll so the cursor stays within the viewport\n",
             "/// Scroll the diff horizontally by delta columns\n",

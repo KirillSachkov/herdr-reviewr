@@ -24,10 +24,7 @@ pub(crate) struct RenderedView {
     pub built: Option<Built>,
 }
 
-/// The open markdown file's content: its current text, in the `Changes` tab the old side its
-/// deleted lines belonged to, and whether the text renders nothing at all — a property of the
-/// content, known whatever the pane's choice, so `m` is never offered or taken where the
-/// rendered view has nothing to show.
+/// The open markdown file's content, its old side, and whether it renders nothing.
 #[derive(Debug)]
 pub(crate) struct Content {
     pub text: String,
@@ -92,9 +89,7 @@ pub(crate) struct RenderedInput {
     pub changes: Option<u64>,
 }
 
-/// A rendered row's identity across rebuilds, by source: its unit, the source line its own
-/// text starts on, and its wrap — how many of its block's content rows start on that line
-/// before it; `None` for a block's gap row. A marker row's line is its own.
+/// A rendered row's identity across rebuilds: unit, source line, wrap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
     pub unit: Unit,
@@ -136,9 +131,7 @@ pub(crate) fn unit_of(row: &Row) -> Option<Unit> {
     }
 }
 
-/// One unit's run of rendered rows: its rows `start..end`, its source range, and its lead row
-/// — its first row that is no gap, where it reads as starting, where a flip lands and the
-/// gutter numbers it.
+/// One unit's run of rendered rows, its source range and lead row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UnitRows {
     pub unit: Unit,
@@ -267,12 +260,7 @@ impl RenderedIndex {
         landing(&self.new_ranges, line).map(|k| self.new_side[k])
     }
 
-    /// The row `id` reconciles onto (Continuity), by source: a marker its own row while it
-    /// stands; a block's content line the content row starting on the same source line in the
-    /// block that holds it, at the same wrap clamped to that line's rows, else the first row
-    /// showing that line — however the rows around it rewrap, and whether or not the block
-    /// gained or lost its gap. A gap row the first row of the block its line lands on, and any
-    /// line no row shows that block's lead. `None` only over no rows.
+    /// The row `id` reconciles onto by source; `None` only over no rows.
     pub(crate) fn row_of(&self, id: RowId) -> Option<usize> {
         if let Unit::Marker(..) = id.unit
             && let Some(u) = self.get(id.unit)

@@ -121,9 +121,7 @@ pub fn resolve(
         return Err(NoEditor::Unset);
     };
     let mut words = split_command(&value).into_iter();
-    // The same guard the template gets: a value of two quote characters is not empty and
-    // splits to one empty word, and handing that to the pane would flip the screen for a
-    // spawn that cannot succeed.
+    // Two quote characters split to one empty word, which names no program.
     let Some(program) = words.next().filter(|p| !p.is_empty()) else {
         return Err(NoEditor::NamesNoProgram);
     };

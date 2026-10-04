@@ -242,15 +242,11 @@ pub struct TurnHost {
     resolved: HashMap<String, bool>,
 }
 
-/// One sample's outcome, sent back with the completion: whether it ended a turn (the `PR`
-/// tab's refetch signal), and what this sample saw of the worktree's membership (the
-/// `last-turn` empty state). The baseline itself rides the completion's input.
+/// One sample's outcome: whether it ended a turn, and what it saw of membership.
 #[derive(Clone, Debug)]
 pub struct TurnReport {
     pub ended: bool,
-    /// `None` when the sample could not observe the whole worktree, so the reader keeps whatever
-    /// it already knew: either the enumeration failed, or a member's directory would not resolve
-    /// this poll. Membership is held on the one consumer that paints it, never mirrored here
+    /// `None` when the sample could not see the whole worktree.
     pub agents_present: Option<bool>,
 }
 
@@ -317,9 +313,7 @@ impl TurnHost {
         let Some(samples) = samples else {
             return TurnReport { ended: false, agents_present: None };
         };
-        // A member whose membership git could not determine leaves the sample incomplete, so
-        // hold it exactly as a failed enumeration rather than reading an unresolved member as
-        // an empty worktree.
+        // An undetermined member holds the sample like a failed enumeration.
         let Some((present, state)) = classify(samples, |s| self.membership(s.cwd.as_deref()))
         else {
             return TurnReport { ended: false, agents_present: None };
@@ -402,9 +396,7 @@ pub struct WorldJob {
     pub reveal: bool,
 }
 
-/// A finished job: the tag it was built for, the sample's outcome (`None` when the job
-/// didn't sample — a tab entry or `r`, not a poll), and the snapshot — `None` when the
-/// input's tab builds no file tree (the `PR` tab).
+/// A finished job: its tag, sample outcome, and snapshot.
 #[derive(Debug)]
 pub struct WorldCompletion {
     pub generation: u64,

@@ -442,9 +442,7 @@ fn a_pick_git_could_never_have_written_is_no_pick() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // The pick ref is shared repository state any tool can write, and a skipped pick paints
-    // its name in the header: a blob carrying control bytes is no pick at all, so nothing
-    // can smuggle an escape sequence into the frame.
+    // A pick blob with control bytes is no pick.
     r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
@@ -715,9 +713,7 @@ fn without_origin_head_the_default_falls_back_to_the_configured_then_conventiona
     r.git(&["branch", "-m", "master", "other"]);
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
 
-    // The name must spell a ref exactly: on a case-insensitive filesystem `rev-parse`
-    // would resolve `refs/heads/main` to a branch named `Main`, and that name would
-    // then paint the header and match no picker row.
+    // The name must spell a ref exactly, case included.
     r.git(&["branch", "-m", "other", "Main"]);
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
     r.git(&["branch", "-m", "Main", "other"]);
@@ -725,10 +721,7 @@ fn without_origin_head_the_default_falls_back_to_the_configured_then_conventiona
     assert_eq!(default_branch_name(r.path()).unwrap(), None, "a pattern prefix is no match");
     r.git(&["branch", "-m", "main/foo", "other"]);
 
-    // A fallback name qualifies through the same origin-then-local lookup the chain
-    // resolves it with: `origin/main` with no `origin/HEAD` (a remote never `set-head`)
-    // and no local `main` is still the default, and a dangling `origin/HEAD` falls
-    // through to it.
+    // A fallback name qualifies through the origin-then-local lookup.
     let oid = r.git(&["rev-parse", "HEAD"]).trim().to_string();
     r.git(&["update-ref", "refs/remotes/origin/main", &oid]);
     assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("main"));

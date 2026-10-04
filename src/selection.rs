@@ -61,9 +61,7 @@ impl TextDrag {
     }
 }
 
-/// The clipboard text for a `Read`-surface selection over `rows`: each spanned content row
-/// contributes its source line once (a wrapped line is one row), the first and last rows cut
-/// at the endpoints, folds contribute nothing.
+/// A `Read` selection's clipboard text: each spanned source line once.
 #[must_use]
 pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
@@ -93,9 +91,7 @@ pub fn lines_text(lines: &[String], a: Point, b: Point) -> String {
     out.join("\n")
 }
 
-/// The clipboard text for a `Files`-surface selection: each spanned row contributes its
-/// full repo-relative path, directories included, as the tree nests it (a directory row its
-/// directory path), one per line, without the tree glyphs and annotations
+/// A `Files` selection's clipboard text: each spanned row's path.
 #[must_use]
 pub fn files_text(
     rows: &[file_list::Row],

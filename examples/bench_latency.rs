@@ -65,10 +65,7 @@ fn main() {
         }),
     );
 
-    // --- File opens -------------------------------------------------------------
-    // Pick representative text files by on-disk size: the median, and the largest
-    // comfortably under the 2 MB diff byte budget so the open exercises a full
-    // highlight instead of the too-large notice.
+    // --- File opens: the median text file and the largest under the diff budget.
     let mut sized: Vec<(u64, String)> = all
         .iter()
         .filter(|e| !e.is_dir && !e.ignored)

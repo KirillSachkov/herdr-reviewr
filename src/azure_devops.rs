@@ -275,11 +275,7 @@ fn fetch_evaluations(
     ))
 }
 
-/// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
-/// completed enumerate in one concurrent wave, and a node joins when its source (repository,
-/// branch) is one of the branch's heads (`branch_admitted`). Also returns the target's
-/// project GUID as the enumeration nodes report it, so the policy read need not wait for
-/// anything else.
+/// Ask Azure DevOps for the branch's pull requests in one concurrent wave, joined by source.
 fn associate_by_branch(
     repo: &Path,
     org_url: &str,
@@ -464,9 +460,7 @@ fn parse_state(status: &str) -> PrState {
     }
 }
 
-/// Fold Azure DevOps' merge state to the blockers worth surfacing: a conflict is
-/// `conflicting`, a rejected required policy is `blocked`, and everything else — including a
-/// still-queued merge check — is `clean`.
+/// Fold Azure DevOps' merge state: conflict `conflicting`, rejected required policy `blocked`.
 fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
     if pr["mergeStatus"].as_str() == Some("conflicts") {
         return Merge::Conflicting;
@@ -601,10 +595,7 @@ fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
     (left_s.or(left_e), left_e.or(left_s))
 }
 
-/// Merge the threads and reviewer votes into one newest-first comment list: PR-level threads
-/// are `comment` rows, file-position threads are `finding` rows with the thread's resolved
-/// status, and a reviewer vote is a `review` row. A thread
-/// carries no code context, so a finding has no snippet.
+/// Threads and votes as one newest-first comment list.
 fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
     for thread in threads {

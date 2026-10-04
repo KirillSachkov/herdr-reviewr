@@ -74,10 +74,7 @@ fn opener_argv(template: &str, url: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
-/// Gate a markdown link destination before it reaches the OS opener
-/// : trimmed, case-insensitive `http://`/`https://` with something
-/// after the scheme, and no control or bidirectional-override character anywhere — a
-/// destination the display would sanitize must never open as different bytes.
+/// Gate a link before the OS opener: http(s) only, no control or bidi characters.
 pub fn openable_url(url: &str) -> Result<&str, &'static str> {
     let trimmed = url.trim();
     let hostile = trimmed.chars().any(crate::markdown::hostile_char);

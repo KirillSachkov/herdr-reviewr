@@ -111,10 +111,7 @@ pub fn toplevel(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// A directory's git top level, keeping "git ran and it is outside any worktree" (`Outside`, a
-/// determination) apart from "git could not be run at all" (`Unknown`, the absence of one — a
-/// spawn error under load). A caller deciding membership must hold on `Unknown` rather than read
-/// it as `Outside`.
+/// A directory's top level, keeping `Outside` (git said so) apart from `Unknown` (git failed).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Worktree {
     Root(PathBuf),
@@ -406,9 +403,7 @@ fn ado_canonicalize(host: &str, segments: &[&str]) -> Option<(String, Vec<String
     if path.len() == 2 && saw_git_marker {
         path.push(path[1].clone());
     }
-    // Azure DevOps treats the organization case-insensitively, and the legacy host form
-    // derives it from the lowercased hostname — lowercase it everywhere, so every clone
-    // form and casing of one repository is one target.
+    // Azure DevOps organizations are case-insensitive: lowercase everywhere.
     if let Some(organization) = path.first_mut() {
         *organization = organization.to_ascii_lowercase();
     }
@@ -452,12 +447,7 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
     }
 }
 
-// --- PR-fetch local reads (published heads) ------------------------------------
-//
-// Repository selection and
-// branch-state derivation both use the same failure contract: a git command that *fails* is a
-// transient [`GitFail`], never read as absence. The caller distinguishes a target read failure
-// from a later branch-state failure so only an unproven target replaces the visible snapshot.
+// --- PR-fetch local reads: a failed git command is a transient [`GitFail`], never absence.
 
 /// A git command that failed (spawn error or unexpected non-zero exit) during the PR fetch's local reads.
 #[derive(Debug)]
@@ -556,9 +546,7 @@ impl PrLocalState {
     }
 }
 
-/// Derive the pinned `HEAD`, the pinned base, and the branch's published heads — every
-/// (repository, branch name) git has evidence the branch's work lives at: its upstream
-/// record, its push destination, and the remote-tracking refs at its pushed frontier.
+/// The pinned `HEAD` and base, and every (repository, branch) the branch is published at.
 pub(crate) fn pr_local(
     repo: &Path,
     base_flag: Option<&str>,
@@ -740,15 +728,7 @@ pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResoluti
     Ok(BaseResolution { status: BaseStatus { winner, skipped }, default, candidates, recorded })
 }
 
-/// The repo's default branch: what `origin/HEAD` names, else `init.defaultBranch`, else
-/// `main`, else `master` — the last three only when a branch of exactly that name exists,
-/// on origin or locally. `origin/HEAD` is the best evidence of the trunk, not its
-/// definition: a clone with no remote still has one, and without this fallback such a
-/// repo has no base at all.
-///
-/// Existence is read back from the ref list, never probed with `rev-parse`: a loose-ref
-/// lookup on a case-insensitive filesystem resolves `refs/heads/main` to a branch named
-/// `Main`, and a name no ref spells would then paint the header and match no row.
+/// The default branch: `origin/HEAD`'s name, else an existing `init.defaultBranch`, `main`, `master`.
 pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
     if let Some(name) = origin_default_branch(repo)? {
         return Ok(Some(name));
@@ -757,9 +737,7 @@ pub fn default_branch_name(repo: &Path) -> Result<Option<String>, GitFail> {
         .filter(|name| is_branch_label(name));
     let names: Vec<&str> =
         configured.iter().map(String::as_str).chain(["main", "master"]).collect();
-    // One listing for every candidate: `for-each-ref` takes several patterns, and it
-    // matches them case-sensitively and by whole path, so the output is checked for the
-    // exact ref (the pattern alone would also match a branch `main/foo`).
+    // One case-sensitive listing for every candidate, checked for the exact ref.
     let patterns: Vec<String> = names
         .iter()
         .flat_map(|name| BRANCH_REF_PREFIXES.iter().map(move |prefix| format!("{prefix}{name}")))
@@ -782,9 +760,7 @@ fn origin_default_branch(repo: &Path) -> Result<Option<String>, GitFail> {
     if let Some(name) =
         target.and_then(|t| t.strip_prefix("refs/remotes/origin/").map(str::to_string))
     {
-        // `fetch --prune` can delete the target and leave the symref dangling: a name
-        // that resolves to nothing is no default, or the picker could never mark the
-        // default row and the name shield would carry a phantom.
+        // A dangling `origin/HEAD` names no default.
         let probe = format!("refs/remotes/origin/{name}^{{commit}}");
         let resolves = git_tristate(repo, &["rev-parse", "--verify", "--quiet", &probe])?;
         return Ok(resolves.map(|_| name));
@@ -827,10 +803,7 @@ pub fn list_branches(repo: &Path) -> Result<Vec<BranchRow>, GitFail> {
             "--format=%(refname)%00%(committerdate:unix)",
         ],
     )?;
-    // The sort interleaves origin and local refs by date, so origin's rows are taken in a
-    // first pass and local ones fill in after: the merge keeps origin's tip by rule
-    // (`BRANCH_REF_PREFIXES`), not by whichever side happens to be newer. A tip whose
-    // date does not parse (a ref at a non-commit) keeps `0`, which paints as no age.
+    // Origin's refs first, then local ones fill in.
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut rows: Vec<BranchRow> = Vec::new();
     for prefix in BRANCH_REF_PREFIXES {
@@ -885,11 +858,7 @@ fn remote_tips(repo: &Path, remotes: &[&str]) -> Result<Vec<RemoteTip>, GitFail>
         .collect())
 }
 
-/// The remote-tracking branches at the pushed frontier, on every configured remote, as
-/// `(remote, name)`:
-/// the tips at the boundary of the unpushed range — or at `head` itself when nothing is
-/// unpushed. A tip on base history carries no work of this branch and contributes nothing.
-/// Bounded at 32 boundary commits, so a merge-heavy frontier stays cheap.
+/// The remote-tracking tips at the pushed frontier, bounded at 32 boundary commits.
 fn frontier_names(
     repo: &Path,
     remotes: &[&str],
@@ -944,10 +913,7 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool, GitFail> {
     Ok(git_tristate(repo, &["merge-base", "--is-ancestor", commit, of])?.is_some())
 }
 
-/// Whether the pinned `HEAD` contains `commit` — the merged/closed admission guard: a
-/// reused branch name never resurrects a PR whose commits this branch does not hold
-/// A commit absent from the object database is not
-/// contained; an unfetched head proves nothing.
+/// Whether the pinned `HEAD` contains `commit`; an absent commit is not contained.
 pub fn contains_commit(repo: &Path, head: &str, commit: &str) -> Result<bool, GitFail> {
     if git_tristate(repo, &["cat-file", "-e", commit])?.is_none() {
         return Ok(false);
@@ -1194,12 +1160,7 @@ impl<'a> Remotes<'a> {
         Self { repo, config, hosts, seen: Vec::new() }
     }
 
-    /// The forge repository `value` (a remote name or a URL) names, the way git resolves it:
-    /// `ls-remote --get-url` (`insteadOf`), and on the push side of a configured remote
-    /// `remote get-url --push` (`pushurl`, `pushInsteadOf`; git offers no command that applies
-    /// `pushInsteadOf` to a bare URL). When the push side names no forge repository — an ssh
-    /// Host alias, a mirror — the fetch side does. A remote that no longer exists or a host
-    /// this config does not support names nothing — never a fallback to another remote.
+    /// The forge repository a remote or URL names, as git resolves it, push side first.
     fn resolve(&mut self, value: &str, push: bool) -> Result<Option<RepoTarget>, GitFail> {
         let key = (value.to_string(), push);
         if let Some((_, repo)) = self.seen.iter().find(|(k, _)| *k == key) {
@@ -1484,11 +1445,7 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-// --- turn baseline (last-turn scope) -------------------------------------------
-//
-// The snapshot is non-disruptive: it writes a tree object from the worktree through
-// a temporary index, never touching the real index, the worktree, or any branch, and
-// persists the baseline at `refs/worktree/reviewr/turn-base`.
+// --- turn baseline: a snapshot tree, persisted at `refs/worktree/reviewr/turn-base`.
 
 /// The worktree as a tree object, via `add -A` on a private [`IndexCopy`].
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
@@ -1823,11 +1780,7 @@ pub struct WorktreeEntry {
     pub is_dir: bool,
 }
 
-/// Every entry in the worktree for the `All files` tab: tracked and
-/// untracked-not-ignored files from one `ls-files --cached --others` pass, and the ignored
-/// entries from [`ignored_entries`] — a wholly-ignored directory collapsed to one `is_dir`
-/// placeholder, an individually-ignored file as itself. `.git` is never reported. Deduped and
-/// sorted; `-z` keeps paths with spaces or special characters verbatim.
+/// Every worktree entry for `All files`, a wholly ignored directory collapsed to one.
 pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     // Tracked and untracked in one spawn, with the same excludes `changed_from` uses.
     let listed = git(repo, &["ls-files", "--cached", "--others", "--exclude-standard", "-z"])?;

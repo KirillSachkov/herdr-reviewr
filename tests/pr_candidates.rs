@@ -12,9 +12,7 @@ use herdr_reviewr::git::{
 use std::io::Write;
 use std::path::Path;
 
-/// A repo on branch `work` (one commit past `main`), with a GitHub `origin` remote,
-/// `origin/main` tracking-ref at `main`'s tip, and `origin/HEAD` naming `main` the
-/// default branch — the baseline every test builds on.
+/// A repo on `work`, one commit past `main`, with a GitHub `origin`.
 fn worktree() -> Repo {
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
@@ -235,9 +233,7 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
 
 #[test]
 fn a_merged_branch_keeps_its_local_name_and_its_recorded_upstream() {
-    // The worktree's branch merged into main and the worktree stays parked at its tip:
-    // the frontier ref is base history now, so recall rides on the local name and the
-    // recorded upstream (recall survives on the names local records still carry).
+    // Merged and parked at its tip: recall rides the local name and upstream.
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/fix", "HEAD"]);
     repo.git(&["switch", "-q", "main"]);

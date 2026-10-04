@@ -417,9 +417,7 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
     }
 }
 
-/// Run one provider CLI read and map its failure shapes into the provider's error type:
-/// a missing binary, a classified stderr, and the IO/cancellation tail every provider
-/// folds into its retryable variant.
+/// Run one provider CLI read, mapping its failure shapes into the provider's error.
 pub(crate) fn run_provider<E>(
     cmd: Command,
     cancelled: &AtomicBool,
@@ -624,9 +622,7 @@ fn fetch_inner(
     Ok(read_pr(repo, input, detail_repo, number, cancelled)?.unwrap_or(PrView::NoPr))
 }
 
-/// What a pinned pull request's read decides: its view, or `None` to fall back to the head
-/// lookup — a pin the forge no longer resolves (its pull request or repository is gone) is a
-/// stale record, never the tab's answer.
+/// A pinned PR's view, or `None` when the forge no longer resolves it.
 fn pin_outcome(read: Result<Option<PrView>, GhError>) -> Result<Option<PrView>, GhError> {
     match read {
         Err(GhError::NotFound(_)) => Ok(None),
@@ -1600,10 +1596,7 @@ mod tests {
 
     #[test]
     fn the_branch_query_lists_open_prs_apart_from_the_capped_finished_page() {
-        // One open block and one finished block per name: `resolve_pick` promises any
-        // open PR outranks history, and it can only honor that for rows it receives —
-        // a mixed-state page 20 deep could bury an older still-open PR. Each row names its
-        // head repository, the half of the head `admits` needs.
+        // One open and one finished block per name, so an open PR always outranks history.
         let q = build_branch_query(2);
         for i in 0..2 {
             assert!(q.contains(&format!("o{i}:pullRequests(headRefName:$b{i}, states:[OPEN]")));

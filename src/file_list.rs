@@ -182,9 +182,7 @@ fn flatten<S: BuildHasher>(
     }
 }
 
-/// Follow single-child directory links from `start`, joining names with `/`, returning the
-/// display name, full path, and the node where the chain stops (a real directory or a node
-/// holding a single file).
+/// Follow single-child directory links, joining names with `/`.
 fn compress<'a>(name: &str, path: String, start: &'a Dir) -> (String, String, &'a Dir) {
     let mut display = name.to_string();
     let mut path = path;

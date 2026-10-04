@@ -1,16 +1,4 @@
-//! Change marks for rendered markdown: which rendered unit each changed source line belongs
-//! to, the marker rows standing for changes no block shows, and which `<details>` a change or
-//! a comment opens. Pure functions of the diff's rows and both sides' renders, so the bars,
-//! the anchors, and the cards all read one ownership map.
-//!
-//! - An inserted line belongs to the new block holding it. A line that renders nothing, wholly
-//!   or in part, also shows a don't-render marker: after its block, or where it sits when no
-//!   block holds it.
-//! - A deleted line belongs to the block it was part of in the old document. Paired with an
-//!   insertion (one line edited), it marks that insertion's block. Else, while its old block
-//!   still has lines in the new document, it marks where they are now. A deleted line whose
-//!   whole old block is gone is a marker where it was: `Removed`, or `Unrendered` when that old
-//!   block rendered nothing either.
+//! Change marks for rendered markdown: which rendered unit owns each changed source line.
 
 use crate::diff::{Bar, MarkerKind, Row};
 use crate::markdown::Rendered;
@@ -252,9 +240,7 @@ impl NewSide {
     }
 }
 
-/// Old line → new line for each deletion paired with an insertion: the diff's homolog pairs,
-/// then each change block's leftovers in order, blank lines aside — so a rewrite pairs line
-/// for line even where its words share too little for the diff's emphasis.
+/// Old line → new line for each paired deletion, homologs first.
 fn pair_lines(lines: &[&Row], pairs: &[(u32, u32)]) -> HashMap<u32, u32> {
     let mut paired: HashMap<u32, u32> = pairs.iter().copied().collect();
     let paired_new: HashSet<u32> = pairs.iter().map(|&(_, b)| b).collect();
@@ -296,9 +282,7 @@ fn own_insertions(
             None => new_side.held(*line),
         };
     }
-    // A structural line no block holds — a blank, a fence — goes with a non-blank line
-    // inserted in its run, the nearest above first, else with the block below it: a gap
-    // belongs to the next block.
+    // A structural line no block holds goes with the nearest inserted line, else the block below.
     let inserted = |k: usize| matches!(lines[k], Row::Insertion { .. });
     for at in 0..lines.len() {
         let Row::Insertion { new_no: line, .. } = lines[at] else { continue };
@@ -546,10 +530,7 @@ pub(crate) fn old_range_spots(lines: &[&Row], start: u32, end: u32) -> Vec<(u32,
         .collect()
 }
 
-/// The `<details>` keys open in the rendered view, sorted: the reviewer's own choice where
-/// there is one, else open while its body holds one of `spots` — a change or a comment, as
-/// new-side line ranges. Pure, so a poll re-derives the same set and never flips a
-/// disclosure against the reviewer's choice (G4).
+/// The `<details>` keys open: the reviewer's choice, else open while holding a change or comment.
 pub(crate) fn open_details(
     disclosures: &[crate::markdown::Disclosure],
     overrides: &HashMap<String, bool>,

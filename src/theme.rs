@@ -16,9 +16,7 @@ pub enum Appearance {
     Light,
 }
 
-/// The syntax theme paired with a palette: a bundled `.tmTheme`'s vendored bytes (for themes
-/// `two-face` lacks, and for Catppuccin Mocha kept byte-identical to today's), or a theme
-/// from the `two-face` embedded set.
+/// The syntax theme paired with a palette: a bundled `.tmTheme` or a `two-face` one.
 #[derive(Clone, Copy, Debug)]
 pub enum SyntaxChoice {
     Bundled(&'static [u8]),
@@ -74,9 +72,7 @@ impl Palette {
         if color == self.dim2 { self.dim0 } else { color }
     }
 
-    /// A changed block's bar color: the insertion green when it only gained lines, the amber
-    /// otherwise — lifted toward `text` until it clears [`MIN_MARK_CONTRAST`] on `base`, so a
-    /// light theme's pale amber still reads.
+    /// A changed block's bar color, lifted until it reads on `base`.
     #[must_use]
     pub fn bar_color(&self, bar: crate::diff::Bar) -> Color {
         use crate::diff::Bar;
@@ -324,9 +320,7 @@ const fn hex(rgb: u32) -> Color {
     Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
-/// Build a full palette from anchors: surfaces step `base` toward the contrast pole
-/// (lighter for a dark theme, darker for a light one); diff fills tint `base` with the
-/// add/remove accent, kept legible against `text`.
+/// Build a palette from anchors: stepped surfaces and legible diff fills.
 fn derive(a: Anchors, appearance: Appearance) -> Palette {
     let pole = match appearance {
         Appearance::Dark => WHITE,

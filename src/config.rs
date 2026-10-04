@@ -320,9 +320,7 @@ impl fmt::Display for PluginConfigError {
 
 impl std::error::Error for PluginConfigError {}
 
-/// The config directory, resolved once at an entrypoint's startup:
-/// `$HERDR_PLUGIN_CONFIG_DIR` when set, else the directory `cli` reports
-/// ([`crate::herdr::plugin_config_dir`]), else none — and none reads no config file.
+/// The config directory: `$HERDR_PLUGIN_CONFIG_DIR`, else what `cli` reports, else none.
 pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBuf> {
     config_dir_from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
 }
@@ -829,9 +827,7 @@ mod tests {
 
         assert_eq!(config.to_json()["editor"], "code -g {file}:{line}");
 
-        // A value naming no placeholder is valid: the path is appended to it
-        // A tightening that demanded `{file}` would block the whole file
-        // for anyone who spelled their editor the short way.
+        // A value naming no placeholder gets the path appended.
         for value in ["vim", "myed --at {line}"] {
             std::fs::write(&path, format!("editor = \"{value}\"\n")).unwrap();
             let config = super::plugin_config_in(dir.path()).expect(value);

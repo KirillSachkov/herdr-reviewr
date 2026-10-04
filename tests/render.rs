@@ -756,9 +756,7 @@ fn the_footer_shows_the_sends_outcome_at_a_pane_width_by_yielding_the_cursor_act
     app.input_push('n');
     app.submit_comment(); // a written comment adds `s send 1` to row 1
 
-    // The status is the only answer `s` gives, and a reviewr pane is around 40 columns wide, so
-    // the cursor's actions yield to it: the `?` panel repeats every action and nothing repeats the
-    // status.
+    // The status outranks the cursor's actions at 40 columns.
     app.status = "no agent in this workspace, press y to copy".to_string();
     let narrow = footer_line(&render_at(&app, 40));
     assert!(narrow.contains("no agent in"), "the refusal shows at 40 columns:\n{narrow}");
@@ -2693,10 +2691,7 @@ mod search_screen_render {
 
     #[test]
     fn preview_highlight_lands_on_the_match_under_indentation() {
-        // The worker trims each grep line's leading indentation and reports offsets into the
-        // trimmed text; the preview keeps the true indentation, so the highlight must shift
-        // over it and still cover the match, not slide left into the whitespace or the
-        // preceding tokens.
+        // The highlight shifts over the true indentation.
         let repo = Repo::init();
         let mut lines: Vec<String> = (1..=60).map(|i| format!("let x{i} = {i};")).collect();
         lines[29] = "    fn resolve() {}".to_string(); // line 30, four-space indented
@@ -3745,9 +3740,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
     let mut app = app_on(&r);
     app.set_scope(Scope::Branch).unwrap();
 
-    // The base label truncates to its budget at a narrow width, and the hit test walks the
-    // same arithmetic the paint does: every column it claims carries painted label, and the
-    // claim is one unbroken run.
+    // The hit test claims exactly the painted label.
     for width in [40u16, 56, 72] {
         let area = Rect { x: 0, y: 0, width, height: 12 };
         let line0 = dump(&render_size(&app, width, 12)).lines().next().unwrap().to_string();
