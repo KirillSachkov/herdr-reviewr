@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::logln;
 use crate::turn::Status;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -161,11 +161,16 @@ fn error_code(stderr: &str) -> Option<String> {
 /// [`call`] for the review UI's own calls, where any failure is just a failure. A herdr that
 /// could not run becomes [`Refusal::Unanswered`], which the app words for the reviewer.
 fn herdr(args: &[&str]) -> Result<String> {
-    match call(args) {
-        Ok(out) => Ok(out),
-        // No herdr to ask is herdr not answering, whichever call it was.
-        Err(HerdrError::Unanswered) => Err(Refusal::Unanswered.into()),
-        Err(_) => bail!("herdr refused"),
+    call(args).map_err(for_reviewer)
+}
+
+/// A herdr failure as the app words it: no herdr to ask is herdr not answering, whichever call
+/// it was ([`Refusal::Unanswered`]). Every other failure keeps its code, so a caller can tell a
+/// pane that is gone from one herdr refused.
+fn for_reviewer(error: HerdrError) -> anyhow::Error {
+    match error {
+        HerdrError::Unanswered => Refusal::Unanswered.into(),
+        error => error.into(),
     }
 }
 
@@ -630,7 +635,11 @@ fn ensure_ready(pane: &str) -> Result<()> {
     match readiness_in(&agents, pane) {
         Readiness::Ready => Ok(()),
         Readiness::Busy(name) => Err(Refusal::AtPrompt(name).into()),
-        Readiness::Gone => bail!("agent pane {pane} is gone"),
+        // Gone from the agent list is the same verdict herdr's own send would return.
+        Readiness::Gone => {
+            logln!("agent pane {pane} is gone");
+            Err(HerdrError::Refused(Some("pane_not_found".into())).into())
+        }
     }
 }
 
@@ -686,11 +695,7 @@ pub fn send_text(pane: &str, text: &str) -> Result<()> {
         return Err(Refusal::TooLarge.into());
     }
     ensure_ready(pane)?;
-    match socket_call(socket, request) {
-        Ok(()) => Ok(()),
-        Err(HerdrError::Unanswered) => Err(Refusal::Unanswered.into()),
-        Err(error) => Err(error.into()),
-    }
+    socket_call(socket, request).map_err(for_reviewer)
 }
 
 /// One request line over herdr's socket, answered by one reply line, bounded by [`SEND_BOUND`].

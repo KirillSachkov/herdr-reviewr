@@ -191,12 +191,17 @@ impl ExportTarget for Agent {
         format!("sent {} to {}", counted_comments(count), self.name)
     }
 
-    /// herdr ran and refused the paste: the pane closed after it was resolved. herdr's own
-    /// wording is a JSON envelope around a pane id, so the reviewer gets a sentence and the
-    /// payload goes to the log. A [`herdr::Refusal`], a herdr that never answered included,
-    /// never reaches here: the app words it.
-    fn failure_message(&self, _error: &anyhow::Error) -> String {
-        format!("{} closed", self.name)
+    /// herdr ran and refused the paste. A pane that closed after it was resolved says so; any
+    /// other refusal says herdr refused, never that a pane still there closed. herdr's own
+    /// wording is a JSON envelope, so the reviewer gets a sentence and the payload goes to the
+    /// log. A [`herdr::Refusal`], a herdr that never answered included, never reaches here: the
+    /// app words it.
+    fn failure_message(&self, error: &anyhow::Error) -> String {
+        if error.downcast_ref::<herdr::HerdrError>().is_some_and(herdr::HerdrError::pane_gone) {
+            format!("{} closed", self.name)
+        } else {
+            "herdr refused the send".to_string()
+        }
     }
 
     /// An agent at a prompt refuses the send ([`herdr::send_text`] reads its state at the moment
@@ -275,7 +280,19 @@ mod tests {
     #[test]
     fn a_failed_send_or_copy_says_what_to_do() {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        assert_eq!(agent.failure_message(&anyhow::anyhow!("herdr refused")), "release-bot closed");
+        let gone =
+            anyhow::Error::from(crate::herdr::HerdrError::Refused(Some("pane_not_found".into())));
+        assert_eq!(agent.failure_message(&gone), "release-bot closed");
+        // Any other refusal leaves the agent in place: saying it closed would send the
+        // reviewer looking for a pane that is still there.
+        for other in [
+            crate::herdr::HerdrError::Refused(Some("internal".into())),
+            crate::herdr::HerdrError::Refused(None),
+            crate::herdr::HerdrError::Unreadable,
+        ] {
+            let other = anyhow::Error::from(other);
+            assert_eq!(agent.failure_message(&other), "herdr refused the send", "{other}");
+        }
         #[cfg(not(windows))]
         {
             let missing = anyhow::Error::from(super::clipboard::NoTool);

@@ -46,6 +46,8 @@ enum Reply {
     Result,
     /// herdr's error reply for a pane that closed after it was resolved.
     PaneGone,
+    /// herdr's error reply for a failure of its own, the pane still there.
+    Internal,
     /// Close the connection without answering.
     Drop,
     /// Hold the connection open and never answer.
@@ -120,6 +122,9 @@ fn answer_each<S: Read + Write>(
             Reply::Result => serde_json::json!({"id": id, "result": {"type": "ok"}}),
             Reply::PaneGone => serde_json::json!({"id": id, "error": {
                 "code": "pane_not_found", "message": "pane w8:p1 not found",
+            }}),
+            Reply::Internal => serde_json::json!({"id": id, "error": {
+                "code": "internal", "message": "boom",
             }}),
             Reply::Drop => continue,
             Reply::Hang => {
@@ -420,6 +425,8 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
 
     for (reply, status) in [
         (Reply::PaneGone, "claude closed"),
+        // A refusal of herdr's own never claims the agent closed: its pane is still there.
+        (Reply::Internal, "herdr refused the send"),
         (Reply::Drop, "herdr didn't answer, press y to copy"),
         // Waits out the whole send bound, past herdr's own read deadline.
         (Reply::Hang, "herdr didn't answer, press y to copy"),
