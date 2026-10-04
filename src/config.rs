@@ -1,7 +1,4 @@
-//! Command-line flags and the shared plugin configuration boundary.
-//!
-//! Flags override defaults; the positional
-//! argument (if any) is the repo path, else the current directory.
+//! Command-line flags and the plugin config file, validated whole.
 
 use std::fmt;
 use std::io::ErrorKind;
@@ -17,16 +14,12 @@ pub struct Config {
     pub theme: Option<String>,
     /// `Some(false)` when `--wrap off` is passed; `None` keeps the default (wrap on).
     pub wrap: Option<bool>,
-    /// The plugin config directory, resolved once at startup by [`resolve_config_dir`];
-    /// every later config read rereads only the file inside it.
+    /// The plugin config directory, resolved once at startup.
     pub plugin_config_dir: Option<PathBuf>,
 }
 
 impl Config {
-    /// Parse `args` (the process arguments *after* argv\[0\]).
-    ///
-    /// Recognises `--poll <ms>` (min 200, default 2000), `--base <ref>`,
-    /// `--theme <name>`, and `--wrap on|off`; the first non-flag token is the repo path.
+    /// Parse the flags after argv\[0\]; the first non-flag argument is the repo path.
     pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
         let mut repo: Option<PathBuf> = None;
         let mut poll_ms: u64 = 2000;
@@ -216,14 +209,12 @@ impl PluginConfig {
         &self.theme
     }
 
-    /// The scope a fresh reviewr pane is built with — startup and config recovery. A reread never
-    /// switches a running pane's scope.
+    /// A fresh pane's scope; a reread never switches a running one.
     pub fn default_scope(&self) -> crate::model::Scope {
         self.default_scope
     }
 
-    /// How a fresh pane shows markdown — startup and config recovery. A reread never flips a
-    /// running pane's view; `m` does.
+    /// How a fresh pane shows markdown; only `m` flips a running one.
     pub fn markdown_view(&self) -> MarkdownView {
         self.markdown_view
     }
@@ -308,8 +299,7 @@ impl PluginConfig {
     }
 }
 
-/// A whole-file configuration failure. It keeps the path in the value so every entry point can
-/// show the same actionable diagnostic.
+/// A whole-file config failure, carrying the path for one diagnostic everywhere.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginConfigError {
     path: PathBuf,
@@ -330,16 +320,12 @@ impl fmt::Display for PluginConfigError {
 
 impl std::error::Error for PluginConfigError {}
 
-/// The config directory, resolved once at an entrypoint's startup:
-/// `$HERDR_PLUGIN_CONFIG_DIR` when set, else the directory `cli` reports
-/// ([`crate::herdr::plugin_config_dir`]), else none — and none reads no config file.
+/// The config directory: `$HERDR_PLUGIN_CONFIG_DIR`, else what `cli` reports, else none.
 pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBuf> {
     config_dir_from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
 }
 
-/// The resolution rule behind [`resolve_config_dir`], split out so tests can inject both
-/// inputs. An empty value names no directory on either branch — otherwise an empty env var
-/// would read `./config.toml` from the repo under review and block the pane on it.
+/// [`resolve_config_dir`]'s rule; an empty value names no directory, never the cwd.
 fn config_dir_from(
     env: Option<std::ffi::OsString>,
     cli: impl FnOnce() -> Option<String>,
@@ -349,8 +335,7 @@ fn config_dir_from(
         .or_else(|| cli().filter(|dir| !dir.is_empty()).map(PathBuf::from))
 }
 
-/// Read one plugin config snapshot from the resolved config directory. No directory reads no
-/// config file, which is the missing-file outcome and uses every default.
+/// Read the plugin config from `dir`; no directory means every default.
 pub fn plugin_config(dir: Option<&Path>) -> Result<PluginConfig, PluginConfigError> {
     match dir {
         Some(dir) => plugin_config_in(dir),
@@ -396,8 +381,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             "uncommitted" => crate::model::Scope::Uncommitted,
             "branch" => crate::model::Scope::Branch,
             "last-turn" => crate::model::Scope::LastTurn,
-            // `commits` needs a pick the pane does not yet hold, so it is not a start scope
-            // and falls to the error.
+            // `commits` needs a pick, so it cannot be a start scope.
             _ => {
                 return Err(value_error(
                     path,
@@ -493,8 +477,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             .as_str()
             .filter(|c| !c.trim().is_empty())
             .ok_or_else(|| value_error(path, value, "editor", "a non-empty command"))?;
-        // `{file}` and `{line}` are the whole grammar, so a typo for one of them would
-        // otherwise reach the editor as a literal word and open a file named after the typo
+        // A typo'd placeholder would reach the editor as a literal file name.
         if let Some(unknown) = unknown_placeholder(command, &["file", "line"]) {
             return Err(placeholder_error(path, "editor", &unknown, "`{file}` and `{line}`"));
         }
@@ -520,9 +503,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
         }
         config.url_opener = Some(command.to_owned());
     }
-    // A hostname is recognized by at most one forge; a cross-key collision is an invalid
-    // value under CFG-WHOLE-FILE. Scanned as a set so a new key joins by
-    // being listed, in the parse order above: the later key's error names the earlier owner.
+    // One hostname per forge; the later key's error names the earlier owner.
     let host_keys = [
         ("github_host", &config.github_host),
         ("gitlab_host", &config.gitlab_host),
@@ -547,10 +528,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
     Ok(config)
 }
 
-/// One `[keybindings]` key string → a [`Key`](crate::keymap::Key): a bare character or a
-/// named key, alone or behind a `ctrl+`/`alt+` prefix. The character is
-/// one visible cell — a positive display width also rejects the zero-width class `is_control`
-/// misses (format chars, combining marks).
+/// One `[keybindings]` key: a one-cell character or a named key, optionally `ctrl+`/`alt+`.
 fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     use crate::keymap::KeyCode;
     let (ctrl, alt, rest) = if let Some(rest) = text.strip_prefix("ctrl+") {
@@ -575,9 +553,7 @@ fn parse_key(text: &str) -> Option<crate::keymap::Key> {
     }
 }
 
-/// Parse and resolve the `[keybindings]` table:
-/// action names from the keymap table in, each bound to a non-empty array of
-/// keys, a bare character or a `ctrl+`/`alt+` chord.
+/// Parse the `[keybindings]` table: each action name to a non-empty array of keys.
 fn parse_keybindings(
     path: &Path,
     value: &toml::Value,
@@ -646,8 +622,7 @@ fn string_value<'a>(
     value.as_str().ok_or_else(|| value_error(path, value, key, expected))
 }
 
-/// The one invalid-value grammar: the key, what it takes, and what it was given, so the line
-/// says what to fix without opening the file.
+/// An invalid value's error: the key, what it takes, and what it was given.
 fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> PluginConfigError {
     // TOML's own spelling, so a string given where an array belongs reads as the string it is.
     let given = value.to_string();
@@ -657,8 +632,7 @@ fn value_error(path: &Path, value: &toml::Value, key: &str, expected: &str) -> P
     )
 }
 
-/// A command template naming a placeholder the key does not know: the typo, then the ones it
-/// does.
+/// An unknown placeholder's error: the typo, then the known ones.
 fn placeholder_error(path: &Path, key: &str, unknown: &str, known: &str) -> PluginConfigError {
     PluginConfigError::new(
         path,
@@ -673,10 +647,7 @@ fn unknown_key_error(path: &Path, key: &str, options: &str) -> PluginConfigError
     PluginConfigError::new(path, format!("unknown key `{key}`: expected one of {options}"))
 }
 
-/// The first `{` in `command` that opens neither `{file}` nor `{line}`.
-///
-/// A brace that closes nothing opens nothing either: `code {fil` would otherwise reach the
-/// editor as the literal argument `{fil`, which is the typo this rule exists to catch
+/// The first `{` in `command` opening no known placeholder, an unclosed one included.
 fn unknown_placeholder(command: &str, known: &[&str]) -> Option<String> {
     let mut rest = command;
     while let Some(at) = rest.find('{') {
@@ -693,9 +664,7 @@ fn unknown_placeholder(command: &str, known: &[&str]) -> Option<String> {
     None
 }
 
-/// Parse one self-hosted forge key: a bare hostname naming no built-in forge host — a
-/// hostname is recognized by at most one forge. The built-in set has
-/// one authority, `git::forge_for_host`, asked here with no self-hosted keys.
+/// Parse a self-hosted forge key: a bare hostname that no built-in forge already claims.
 fn parse_forge_host(
     path: &Path,
     key: &str,
@@ -782,14 +751,12 @@ mod tests {
         let dir =
             super::config_dir_from(Some("/tmp/cfg".into()), || panic!("cli asked despite the env"));
         assert_eq!(dir, Some(PathBuf::from("/tmp/cfg")));
-        // Env unset: the CLI's directory is used. An empty env value names no directory
-        // and falls through the same way.
+        // An unset or empty env falls through to the CLI's directory.
         let dir = super::config_dir_from(None, || Some("/tmp/from-cli".to_string()));
         assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
         let dir = super::config_dir_from(Some("".into()), || Some("/tmp/from-cli".to_string()));
         assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
-        // An empty CLI answer names no directory either — `PathBuf::from("")` would read
-        // `./config.toml` from the repo under review.
+        // An empty CLI answer names no directory either.
         assert_eq!(super::config_dir_from(None, || Some(String::new())), None);
         // Neither resolves — herdr absent or refusing: no config directory.
         assert_eq!(super::config_dir_from(None, || None), None);
@@ -860,9 +827,7 @@ mod tests {
 
         assert_eq!(config.to_json()["editor"], "code -g {file}:{line}");
 
-        // A value naming no placeholder is valid: the path is appended to it
-        // A tightening that demanded `{file}` would block the whole file
-        // for anyone who spelled their editor the short way.
+        // A value naming no placeholder is valid: the path is appended.
         for value in ["vim", "myed --at {line}"] {
             std::fs::write(&path, format!("editor = \"{value}\"\n")).unwrap();
             let config = super::plugin_config_in(dir.path()).expect(value);
@@ -895,8 +860,7 @@ mod tests {
         assert!(error.contains(path.to_str().unwrap()));
         assert!(error.contains("unknown key `poll`"));
 
-        // The retired `base_branches` key fails like any unknown key: the base is a picked,
-        // per-repo choice now, never configuration.
+        // The retired `base_branches` key fails like any unknown key.
         std::fs::write(&path, "base_branches = [\"dev\"]\n").unwrap();
         let error = super::plugin_config_in(dir.path()).unwrap_err().to_string();
         assert!(error.contains("unknown key `base_branches`"));
@@ -965,8 +929,7 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.gitlab_host(), Some("git.corp.example"));
 
-        // The same hostname under two forge keys is an invalid file (CFG-WHOLE-FILE): a
-        // hostname is recognized by at most one forge.
+        // One hostname under two forge keys invalidates the file.
         std::fs::write(
             &path,
             "github_host = \"code.corp.example\"\ngitlab_host = \"code.corp.example\"\n",
@@ -988,8 +951,7 @@ mod tests {
         assert_eq!(config.azure_devops_host(), Some("tfs.corp.example"));
         assert_eq!(config.forge_hosts().azure_devops, Some("tfs.corp.example"));
 
-        // Each pair under one hostname is an invalid file (CFG-WHOLE-FILE): a hostname is
-        // recognized by at most one forge.
+        // Every pair of forge keys collides the same way.
         let pairs = [
             ("github_host", "azure_devops_host"),
             ("gitlab_host", "azure_devops_host"),
