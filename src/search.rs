@@ -12,9 +12,11 @@ use fff_search::{
 /// The most results one query fetches per group.
 const FILE_LIMIT: usize = 50;
 const CODE_LIMIT: usize = 200;
-/// Cap on one grep's runtime.
+/// Cap on one grep's runtime, so a pathological query returns partial results instead of pinning
+/// the worker while newer keystrokes queue.
 const GREP_BUDGET_MS: u64 = 80;
-/// How long a cold worker waits before re-checking the scan.
+/// How long a not-yet-warm worker waits for the next keystroke before re-checking whether the scan
+/// finished and the pending query can run for real.
 const WARMUP_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's cache home. The frecency store lives here, never the worktree
@@ -64,7 +66,8 @@ pub struct SearchResults {
 pub enum SearchOutcome {
     /// Results for the query; the previously landed set stays painted until this lands.
     Ready(SearchResults),
-    /// The engine's first scan is still running.
+    /// The engine's first scan is still running — the overlay shows `indexing…` and the worker
+    /// re-runs the query when the scan lands.
     Indexing,
     /// The engine failed; its message shows in the results pane.
     Failed(String),
@@ -143,7 +146,8 @@ impl Engine {
             .collect();
         let file_total = found.total_matched.max(files.len());
 
-        // The empty query paints the frecency-ranked Files group alone.
+        // The empty query paints the frecency-ranked Files group alone: an empty grep is
+        // engine-defined noise, not something the spec describes.
         if raw.trim().is_empty() {
             return Ok(SearchResults { files, code: Vec::new(), file_total, code_more: false });
         }
@@ -156,7 +160,8 @@ impl Engine {
                 ..Default::default()
             },
         );
-        // Drop each match line's leading indentation so the row text aligns at the left in the narrow pane.
+        // Drop each match line's leading indentation so the row text aligns at the left in the
+        // narrow pane; the engine adjusts its match offsets as it trims.
         for m in &mut grep.matches {
             m.trim_leading_whitespace();
         }
@@ -203,7 +208,8 @@ pub fn spawn(
             let engine = match Engine::start(repo, &cache_dir) {
                 Ok(engine) => engine,
                 Err(e) => {
-                    // Report on the first query, then exit.
+                    // Report on the first query, then exit: without an engine every later request
+                    // would fail the same way.
                     if let Ok(SearchJob::Query { generation, .. }) = rx.recv() {
                         let outcome = SearchOutcome::Failed(e);
                         let _ = tx.send(SearchCompletion { generation, outcome });
@@ -244,7 +250,8 @@ pub fn spawn(
                         SearchJob::Track { path } => engine.track(&path),
                     }
                 }
-                // A fresh job supersedes any query still parked for warm-up.
+                // A fresh job supersedes any query still parked for warm-up, so a stale generation
+                // never burns a grep after the scan lands.
                 if job.is_some() {
                     pending = None;
                 }

@@ -20,7 +20,8 @@ impl Scope {
         }
     }
 
-    /// The scope's name in the specs and in config values (`default_scope`).
+    /// The scope's name in the specs and in config values (`default_scope`): kebab-case, unlike the
+    /// header chip's spaced `label`.
     pub fn name(self) -> &'static str {
         match self {
             Scope::Uncommitted => "uncommitted",
@@ -42,7 +43,8 @@ impl Scope {
     }
 }
 
-/// The `commits` pick: a contiguous run from `oldest` to `newest`.
+/// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit ids,
+/// equal for a run of one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommitPick {
     pub oldest: String,
@@ -124,7 +126,8 @@ pub struct Comment {
     /// Verbatim diff lines the comment anchors to, each keeping its `+`/`-`/space marker.
     pub lines: String,
     pub text: String,
-    /// True when anchored to a diff (the `Changes` tab).
+    /// True when anchored to a diff (the `Changes` tab); false for a File-view content comment (the
+    /// `All files` tab).
     pub diff_anchored: bool,
     /// Where the new side was read.
     pub rev: Rev,

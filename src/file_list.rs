@@ -1,4 +1,5 @@
-//! The file-list tree: changed files grouped into directories, flattened to rows.
+//! The file-list directory tree: the scope's changed files grouped into a collapsible tree of
+//! directories and files, flattened to the rows the navigator paints.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
@@ -10,7 +11,8 @@ use crate::model::{ChangeKind, ChangedFile};
 pub struct Row {
     /// Nesting level, for indentation.
     pub depth: usize,
-    /// The shown name: a directory, a basename, or a collapsed single-child chain.
+    /// The segment(s) shown — a directory name, a file basename, or a collapsed chain joined with
+    /// `/` (single-child directories fold into their child).
     pub name: String,
     pub kind: RowKind,
     /// Whether git ignores this row's path — rendered dimmed in `All files`.
@@ -42,7 +44,8 @@ pub struct Annotation {
 }
 
 impl From<&ChangedFile> for Annotation {
-    /// The scope annotation a changed file carries.
+    /// The scope annotation a changed file carries — the one mapping, shared by the `Changes` entry
+    /// build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
     fn from(f: &ChangedFile) -> Self {
         Self {
             change: f.kind,
@@ -64,7 +67,8 @@ pub struct Entry {
     pub annotation: Option<Annotation>,
     /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
-    /// A wholly-ignored directory placeholder whose children load lazily on expand.
+    /// A wholly-ignored directory placeholder whose children load lazily on expand; never set on a
+    /// `Changes` entry.
     pub is_dir: bool,
 }
 
@@ -99,7 +103,8 @@ impl Row {
     }
 }
 
-/// One directory node, its children keyed by name.
+/// One directory node: its sub-directories and the files directly in it, both keyed by name so
+/// iteration is alphabetical.
 #[derive(Default)]
 struct Dir {
     dirs: BTreeMap<String, Dir>,
@@ -179,7 +184,9 @@ fn flatten<S: BuildHasher>(
     }
 }
 
-/// Follow single-child directory links, joining names with `/`.
+/// Follow single-child directory links from `start`, joining names with `/`, returning the
+/// display name, full path, and the node where the chain stops (a real directory or a node
+/// holding a single file).
 fn compress<'a>(name: &str, path: String, start: &'a Dir) -> (String, String, &'a Dir) {
     let mut display = name.to_string();
     let mut path = path;
@@ -384,7 +391,8 @@ mod tests {
 
     #[test]
     fn an_ignored_dir_placeholder_renders_as_a_collapsed_ignored_row() {
-        // A wholly ignored directory is one dimmed row, loaded on expand.
+        // A wholly-ignored directory shows as one dimmed dir row, with no children until the app
+        // loads them on expand.
         let rows = build(&[ignored_dir("target")], &HashSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ignored, "the placeholder row is marked ignored (dimmed)");

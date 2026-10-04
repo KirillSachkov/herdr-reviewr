@@ -17,13 +17,15 @@ pub enum PrView {
     Pending,
     /// Work crossed the loading-indicator delay without producing a snapshot.
     Loading,
-    /// A PR resolved from the branch's published heads, or the one its upstream pins.
+    /// An open (or merged/closed) PR resolved from the current branch's published heads, or the one
+    /// its upstream record pins.
     Pr(Box<PrSnapshot>),
     /// No PR resolves from the current branch's heads.
     NoPr,
     /// `HEAD` is detached, so there is no branch identity to query.
     Detached,
-    /// No PR resolved, but the pinned `HEAD` still contains the painted PR's head commit.
+    /// No PR resolved, but the pinned `HEAD` still contains the painted PR's head commit — the
+    /// story stays on screen.
     Held,
     /// The resolved forge's CLI is not on `PATH`.
     NoCli(crate::git::Forge),
@@ -53,7 +55,8 @@ impl PrView {
                 forge.display_name(),
                 forge.cli()
             )),
-            // Total over every forge, so the render always has a message.
+            // Total over every forge: one without an extension concept still renders a retryable
+            // message, never a missing remedy the render would trip over.
             Self::NoExtension(forge) => Some(match extension_hint(*forge) {
                 Some(hint) => format!(
                     "{} CLI extension missing. Run {hint}, then press {refresh}.",
@@ -111,9 +114,11 @@ pub struct PrSnapshot {
     pub body: String,
     pub state: PrState,
     pub is_draft: bool,
-    /// The PR's head branch name — the candidate that resolved.
+    /// The PR's head branch name — the candidate that resolved, which may differ from the
+    /// worktree's local branch name.
     pub head_ref: String,
-    /// The head branch lives in another repository.
+    /// The head branch lives in another repository — a fork PR; shown as a marker so a same-named
+    /// fork PR is visible.
     pub head_is_fork: bool,
     /// The PR's head commit — the hold gate's anchor, never rendered
     pub head_oid: String,
@@ -403,7 +408,8 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
     if s.contains("not logged")
         || s.contains("authentication")
         || s.contains("gh auth login")
-        // The status marker, never a bare `401`.
+        // The status marker, never a bare `401`: a commit OID or repository path carrying those
+        // digits must not read as an expired token.
         || reports_status(&s, 401)
         || s.contains("bad credentials")
     {
@@ -415,7 +421,9 @@ fn classify_failure(stderr: &str, host: &str) -> GhError {
     }
 }
 
-/// Run one provider CLI read, mapping its failure shapes into the provider's error.
+/// Run one provider CLI read and map its failure shapes into the provider's error type:
+/// a missing binary, a classified stderr, and the IO/cancellation tail every provider
+/// folds into its retryable variant.
 pub(crate) fn run_provider<E>(
     cmd: Command,
     cancelled: &AtomicBool,
@@ -440,7 +448,8 @@ pub(crate) fn join_read<T, E>(
     handle.join().unwrap_or_else(|_| Err(on_panic()))
 }
 
-/// The newest `SURFACE_CAP` of `rows`.
+/// The newest `SURFACE_CAP` of `rows`, which arrive oldest-first — the shared tail cut behind every
+/// surface's cap.
 pub(crate) fn newest_capped<T>(mut rows: Vec<T>) -> Vec<T> {
     let keep = rows.len().min(SURFACE_CAP);
     rows.split_off(rows.len() - keep)
@@ -449,7 +458,8 @@ pub(crate) fn newest_capped<T>(mut rows: Vec<T>) -> Vec<T> {
 /// Each surface reads at most this many rows, never paged to exhaustion
 pub(crate) const SURFACE_CAP: usize = 100;
 
-/// Whether the CLI reported HTTP `code` somewhere that means a status.
+/// Whether the CLI reported HTTP `code` somewhere that means a status: the `(http <code>)` marker
+/// both `glab` and `gh` append to a failed request, or the leading token of an error line.
 pub(crate) fn reports_status(lowercased_stderr: &str, code: u16) -> bool {
     let code = code.to_string();
     let marker = lowercased_stderr
@@ -620,7 +630,9 @@ fn fetch_inner(
     Ok(read_pr(repo, input, detail_repo, number, cancelled)?.unwrap_or(PrView::NoPr))
 }
 
-/// A pinned PR's view, or `None` when the forge no longer resolves it.
+/// What a pinned pull request's read decides: its view, or `None` to fall back to the head
+/// lookup — a pin the forge no longer resolves (its pull request or repository is gone) is a
+/// stale record, never the tab's answer.
 fn pin_outcome(read: Result<Option<PrView>, GhError>) -> Result<Option<PrView>, GhError> {
     match read {
         Err(GhError::NotFound(_)) => Ok(None),
@@ -649,7 +661,8 @@ fn read_pr(
     if node.is_null() {
         return Ok(None);
     }
-    // Sync compares the fetch's pinned HEAD to the PR head.
+    // Sync compares the fetch's pinned HEAD to the PR head, so a checkout or commit landing
+    // mid-fetch never pairs one branch's PR with another branch's count.
     let pr_head = node["headRefOid"].as_str().unwrap_or_default();
     let sync = local_sync(repo, input.local.head_oid.as_deref(), pr_head)
         .map_err(|error| GhError::LocalGit(error.0))?;
@@ -693,13 +706,16 @@ fn lookup_pick<'a>(
 
 /// Where a pull request's head lives, as the forge reports it.
 pub(crate) enum HeadRepo<'a> {
-    /// In the queried repository itself, by the forge's own same-repo flag.
+    /// In the queried repository itself, by the forge's own same-repo flag — which survives renames
+    /// and transfers.
     Queried,
-    /// In another repository: every local spelling the forge's head identity resolves to.
+    /// In another repository: every local spelling the forge's head identity resolves to — none for
+    /// a deleted or unreadable fork, several when renamed paths share one project.
     Other(Vec<&'a crate::git::RepoTarget>),
 }
 
-/// Whether a pull request whose head is `head_ref` in `head_repo` belongs to the checked-out branch.
+/// Whether a pull request whose head is `head_ref` in `head_repo` belongs to the checked-out
+/// branch: its head (repository, name) must be one of the branch's published heads.
 pub(crate) fn admits(
     heads: &[crate::git::Head],
     queried: &crate::git::RepoTarget,
@@ -716,7 +732,8 @@ pub(crate) fn admits(
     })
 }
 
-/// The local sync against the PR's reported head.
+/// The local sync against the PR's reported head: `Unknown` when either side is unpinned, otherwise
+/// the ahead/behind derivation.
 pub(crate) fn local_sync(
     repo: &Path,
     pin: Option<&str>,
@@ -753,23 +770,27 @@ struct FetchTarget<'a> {
 pub struct AssocPr {
     pub(crate) number: u64,
     pub(crate) head_oid: String,
-    /// Consulted only by providers whose lookup is not branch-filtered server-side (Azure DevOps).
+    /// Consulted only by providers whose lookup is not branch-filtered server-side (Azure DevOps);
+    /// GitHub and GitLab filter in the query itself.
     pub(crate) head_ref: String,
     pub(crate) created_at: String,
     /// The history sort key: the merge or close time. Empty for an open PR.
     pub(crate) closed_at: String,
-    /// The lookup's full payload node, when it already is the complete pull request.
+    /// The lookup's full payload node, when it already is the complete pull request — Azure DevOps
+    /// lists full nodes, so its picks need no detail read.
     pub(crate) raw: Option<Value>,
 }
 
-/// The branch's pull requests, split by lifecycle.
+/// The branch's pull requests, split by lifecycle: open, and finished (merged or closed) history
+/// candidates behind the ancestry guard.
 #[derive(Debug, Default)]
 pub struct Association {
     pub open: Vec<AssocPr>,
     pub history: Vec<AssocPr>,
 }
 
-/// The GitHub branch lookup: one aliased block per name, admitted against the heads.
+/// The GitHub branch lookup: one aliased `pullRequests(headRefName:)` block per name, every
+/// lifecycle state, newest first, admitted against the branch's heads.
 fn branch_lookup(
     target: &FetchTarget<'_>,
     queried: &crate::git::RepoTarget,
@@ -788,7 +809,8 @@ fn branch_lookup(
     Ok(parse_branch_lookup(&v, names.len(), queried, heads))
 }
 
-/// The branch-lookup query: per name an open and a finished block, newest first, capped at 20.
+/// The branch-lookup query text: per name, an open block (`o{i}`) apart from the finished block
+/// (`h{i}`), each newest-created-first and capped at 20.
 fn build_branch_query(names: usize) -> String {
     use std::fmt::Write;
     let mut q = String::from("query($o:String!,$n:String!");
@@ -870,7 +892,8 @@ pub fn assoc_history(number: u64, head_oid: &str, closed_at: &str) -> AssocPr {
     }
 }
 
-/// The fork this clone works from, when `origin` is a same-host repository other than the target.
+/// The fork this clone works from, when `origin` is a same-host repository other than the target —
+/// the dual-query trigger.
 pub(crate) fn fork_repository<'a>(
     origin: Option<&'a crate::git::RepoTarget>,
     target: &crate::git::RepoTarget,
@@ -885,7 +908,8 @@ pub(crate) fn push_unique(bucket: &mut Vec<AssocPr>, pr: AssocPr) {
     }
 }
 
-/// Resolve the branch's PR: the newest open one wins.
+/// Resolve the branch's PR: the newest open one wins; with none, the newest finished one whose head
+/// commit the pinned `HEAD` contains — the reused-name guard; with neither, nothing.
 pub fn resolve_pick(
     repo: &Path,
     assoc: &Association,
@@ -897,7 +921,8 @@ pub fn resolve_pick(
     let Some(head) = head else { return Ok(None) };
     let mut history: Vec<&AssocPr> = assoc.history.iter().collect();
     history.sort_by(|a, b| b.closed_at.cmp(&a.closed_at));
-    // Each candidate costs git subprocesses.
+    // Each candidate costs git subprocesses; a churny shared name must not turn one fetch into a
+    // hundred spawns.
     history.truncate(10);
     for pr in history {
         if !pr.head_oid.is_empty() && crate::git::contains_commit(repo, head, &pr.head_oid)? {
@@ -918,7 +943,8 @@ fn newest_by(prs: &[AssocPr], key: impl Fn(&AssocPr) -> &str) -> Option<u64> {
     best.map(|pr| pr.number)
 }
 
-/// All of one PR's state in a single direct GraphQL call.
+/// All of one PR's state in a single direct GraphQL call — identity, mergeability, checks, reviews,
+/// plain comments, and review threads.
 fn pr_detail(target: &FetchTarget<'_>, number: u64) -> Result<Value, GhError> {
     let q = build_detail_query(number);
     let vars = vec![
@@ -1101,7 +1127,8 @@ pub(crate) fn upsert_latest(checks: &mut Vec<Check>, check: Check) {
     }
 }
 
-/// The shared comment finish: collapse each bot's PR-level posts to its latest, then order newest first.
+/// The shared comment finish: collapse each bot's PR-level posts to its latest, then order newest
+/// first — ISO-8601 `…Z` strings sort lexically in chronological order
 pub(crate) fn finish_comments(out: &mut Vec<Comment>) {
     dedup_bot_prose(out);
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -1122,7 +1149,8 @@ fn normalize_checks(rollup: &Value) -> Vec<Check> {
     out
 }
 
-/// Normalise one check node — a check run (`status`/`conclusion`) or a commit status (`state`).
+/// Normalise one check node — a check run (`status`/`conclusion`) or a commit status (`state`) — to
+/// a [`CheckStatus`].
 fn check_status(node: &Value) -> CheckStatus {
     // Check runs carry `status`/`conclusion`; commit statuses carry `state`.
     if let Some(state) = node["state"].as_str() {
@@ -1136,7 +1164,8 @@ fn check_status(node: &Value) -> CheckStatus {
         Some("COMPLETED") => match node["conclusion"].as_str() {
             Some("SUCCESS") => CheckStatus::Success,
             Some("SKIPPED" | "NEUTRAL") => CheckStatus::Skipped,
-            // Any other conclusion reads as a failed check.
+            // FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED / a missing conclusion all read as
+            // a failed check — something needs attention.
             _ => CheckStatus::Failure,
         },
         Some("IN_PROGRESS") => CheckStatus::Running,
@@ -1144,7 +1173,8 @@ fn check_status(node: &Value) -> CheckStatus {
     }
 }
 
-/// Merge the three comment surfaces newest first, keeping each author's latest PR-level post.
+/// Merge the three comment surfaces (GraphQL `reviews`, `comments`, and `reviewThreads` node
+/// arrays) into one newest-first list, keeping only a bot's latest PR-level post and each human's.
 fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
 
@@ -1325,7 +1355,8 @@ fn dedup_bot_prose(out: &mut Vec<Comment>) {
     }
     out.retain(|c| {
         !(c.author_is_bot && c.kind != CommentKind::Finding)
-            // An undated review is a standing verdict, not repeated prose.
+            // An undated review is a standing verdict, not repeated prose — GitLab's approvals
+            // surface carries no timestamp — so it never loses newest-wins to a dated post.
             || (c.kind == CommentKind::Review && c.created_at.is_empty())
             || keep_newest.get(&c.author) == Some(&c.created_at)
     });
@@ -1353,7 +1384,8 @@ fn is_bot(login: &str) -> bool {
     login.ends_with("[bot]")
 }
 
-/// The shared name-only bot heuristics for forges that carry no bot flag.
+/// The shared name-only bot heuristics for forges that carry no bot flag: the `[bot]` suffix, or a
+/// `-bot` suffix.
 pub(crate) fn is_named_bot(name: &str) -> bool {
     is_bot(name) || name.to_ascii_lowercase().ends_with("-bot")
 }
@@ -1426,7 +1458,8 @@ mod tests {
         assert!(build_snapshot(&checks_more, Sync::InSync).checks_truncated);
         assert!(!build_snapshot(&checks_more, Sync::InSync).comments_truncated);
 
-        // `reviews` pages backward (last:100).
+        // `reviews` pages backward (last:100), so its "more exist" flag is `hasPreviousPage` —
+        // checking `hasNextPage` here (the old bug) would leave this surface never marked.
         let mut reviews_more = base.clone();
         reviews_more["reviews"]["pageInfo"]["hasPreviousPage"] = serde_json::json!(true);
         assert!(build_snapshot(&reviews_more, Sync::InSync).comments_truncated);
@@ -1575,7 +1608,8 @@ mod tests {
                 "headRepository": {"nameWithOwner": "acme/widgets"}})
         };
         let v = serde_json::json!({"data": {"repository": {
-            // The open PR arrives only through its own state-filtered block.
+            // The open PR arrives only through its own state-filtered block — on a churny branch
+            // name the finished page's cap must never hide it.
             "o0": {"nodes": [node(7, "OPEN")]},
             "h0": {"nodes": [node(8, "MERGED"), node(9, "CLOSED")]},
             // A duplicate across name aliases lands once.
@@ -1590,7 +1624,10 @@ mod tests {
 
     #[test]
     fn the_branch_query_lists_open_prs_apart_from_the_capped_finished_page() {
-        // One open and one finished block per name, so an open PR always outranks history.
+        // One open block and one finished block per name: `resolve_pick` promises any
+        // open PR outranks history, and it can only honor that for rows it receives —
+        // a mixed-state page 20 deep could bury an older still-open PR. Each row names its
+        // head repository, the half of the head `admits` needs.
         let q = build_branch_query(2);
         for i in 0..2 {
             assert!(q.contains(&format!("o{i}:pullRequests(headRefName:$b{i}, states:[OPEN]")));
@@ -1747,7 +1784,8 @@ mod tests {
         };
         let hist =
             |n: u64, closed: &str| AssocPr { closed_at: closed.to_string(), ..assoc(n, "h", "b") };
-        // The open path never touches git.
+        // The open path never touches git, so a dummy repo path is safe here; the history path's
+        // ancestry guard is exercised in `tests/pr_candidates.rs`.
         let all = Association {
             open: vec![open(1, "2026-06-01T00:00:00Z"), open(2, "2026-06-03T00:00:00Z")],
             history: vec![hist(9, "2026-07-01T00:00:00Z")],
@@ -1802,7 +1840,8 @@ mod tests {
         ]);
         let cs = merge_comments(&reviews, &issues, &threads);
         assert_eq!(cs.len(), 3);
-        // Newest first across all three surfaces.
+        // Newest first across all three surfaces — pin the full order so a reversed or unstable
+        // comparator fails rather than passing on the endpoints alone.
         assert_eq!(
             cs.iter().map(|c| c.created_at.as_str()).collect::<Vec<_>>(),
             ["2026-06-27T12:00:00Z", "2026-06-27T11:00:00Z", "2026-06-27T10:00:00Z"]
@@ -1881,7 +1920,8 @@ mod tests {
 
     #[test]
     fn a_bots_findings_are_each_kept_even_as_its_prose_collapses() {
-        // Inline findings anchor to distinct lines.
+        // Inline findings anchor to distinct lines, so — unlike a bot's PR-level prose — they are
+        // never collapsed: two findings from the same bot both survive, the prose folds to one.
         let reviews = serde_json::json!([
             {"author": {"login": "claude[bot]"}, "body": "old prose", "submittedAt": "2026-06-27T09:00:00Z"},
             {"author": {"login": "claude[bot]"}, "body": "new prose", "submittedAt": "2026-06-27T09:30:00Z"}
@@ -1940,7 +1980,8 @@ mod tests {
 
     #[test]
     fn an_undated_bot_review_survives_beside_the_bots_dated_prose() {
-        // GitLab approvals and Azure DevOps votes arrive as reviews with no timestamp.
+        // GitLab approvals and Azure DevOps votes arrive as reviews with no timestamp: a standing
+        // verdict, not repeated prose, so newest-wins dedup never drops one.
         let row = |kind, anchor: &str, body: &str, created_at: &str| Comment {
             kind,
             author: "claude[bot]".to_string(),

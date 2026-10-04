@@ -56,7 +56,8 @@ fn died(surface: &str) -> AzError {
     AzError::Other(format!("{surface} read panicked"))
 }
 
-/// Fold an unreadable optional surface into an empty one.
+/// Fold an unreadable optional surface into an empty one: it contributes nothing to the snapshot,
+/// never fails the whole fetch.
 fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
     match result {
         Err(AzError::Unavailable(_)) => Ok(Value::Null),
@@ -64,7 +65,8 @@ fn optional_surface(result: Result<Value, AzError>) -> Result<Value, AzError> {
     }
 }
 
-/// The organization URL every `az` call pins with `--organization`.
+/// The organization URL every `az` call pins with `--organization`, so an inherited
+/// `AZURE_DEVOPS_*` default can never redirect the fetch.
 fn organization_url(target: &crate::git::RepoTarget) -> String {
     let host = target.host();
     if host.ends_with(".visualstudio.com") {
@@ -93,7 +95,8 @@ fn az_json(
     serde_json::from_str(stdout.trim()).map_err(|error| AzError::Other(error.to_string()))
 }
 
-/// Map a failed `az`'s stderr to a degraded state by its wording.
+/// Map a failed `az`'s stderr to a degraded state by its wording — like `gh` and `glab`, `az` has
+/// no stable exit codes for these.
 fn classify_failure(stderr: &str) -> AzError {
     let s = stderr.to_lowercase();
     if s.contains("requires the extension azure-devops")
@@ -106,7 +109,8 @@ fn classify_failure(stderr: &str) -> AzError {
         || s.contains("requires user authentication")
         || s.contains("az login")
         || s.contains("az devops login")
-        // TF400813: Azure DevOps' unauthorized-identity error.
+        // TF400813 is Azure DevOps' unauthorized-identity error, raised for the anonymous and the
+        // wrong-account reader alike.
         || s.contains("tf400813")
     {
         AzError::NotAuthed
@@ -140,7 +144,8 @@ fn fetch_inner(
     else {
         return Ok(PrView::NoPr);
     };
-    // Every pick is enumeration-admitted and arrived as the complete pull request (`branch_admitted`).
+    // Every pick is enumeration-admitted and arrived as the complete pull request
+    // (`branch_admitted`), so the fetch needs no detail read at all.
     let picked = [&mut assoc.open, &mut assoc.history]
         .into_iter()
         .flat_map(|bucket| bucket.iter_mut())
@@ -148,7 +153,8 @@ fn fetch_inner(
     let picked_tip = picked.as_ref().map(|pr| pr.head_oid.clone()).unwrap_or_default();
     let pr = picked.and_then(|pr| pr.raw.take()).unwrap_or(Value::Null);
 
-    // The three surfaces are independent reads.
+    // The three surfaces are independent reads; they run in one concurrent wave so the fetch's wall
+    // clock is one `az` call, not three.
     let (threads, evaluations, statuses) = std::thread::scope(|scope| {
         let threads = scope.spawn(|| {
             az_json(
@@ -172,7 +178,8 @@ fn fetch_inner(
             )
         });
         let evaluations = scope.spawn(|| {
-            // Every association node that can yield a pick carries the project id.
+            // Every association node that can yield a pick carries the project id, so a pick
+            // without one is a malformed payload.
             match &project_guid {
                 Some(guid) => fetch_evaluations(repo, &org_url, project, guid, id, cancelled),
                 None => Ok(Value::Null),
@@ -196,7 +203,8 @@ fn fetch_inner(
                     &format!("project={project}"),
                     &format!("repositoryId={repo_name}"),
                     &format!("commitId={picked_tip}"),
-                    // One page; `latestOnly` collapses re-runs server-side.
+                    // The surface's one page; `latestOnly` collapses re-runs server-side and
+                    // `one_page_capped` reports the overflow.
                     "--query-parameters",
                     "latestOnly=true",
                     "top=100",
@@ -218,12 +226,14 @@ fn fetch_inner(
     if pr["pullRequestId"].as_u64().is_none() {
         return Ok(PrView::NoPr);
     }
-    // Sync compares the fetch's pinned HEAD to the PR's source tip.
+    // Sync compares the fetch's pinned HEAD to the PR's source tip, so a checkout or commit landing
+    // mid-fetch never pairs one branch's PR with another branch's count.
     let sync = crate::forge::local_sync(repo, input.local.head_oid.as_deref(), &picked_tip)
         .map_err(|error| AzError::LocalGit(error.0))?;
 
     let (rows, threads_capped) = newest_comment_threads(&threads);
-    // A full checks page can hide older rows past it, exactly as a further thread page does.
+    // A full checks page can hide older rows past it, exactly as a further thread page does; either
+    // caps the surface.
     let checks_capped = one_page_capped(&evaluations) || one_page_capped(&statuses);
     let checks = build_checks(&evaluations, &statuses);
     Ok(PrView::Pr(Box::new(build_snapshot(
@@ -265,7 +275,8 @@ fn fetch_evaluations(
             "--query-parameters",
             &artifact,
             "$top=100",
-            // `az devops invoke` rejects the dotted preview form (`7.1-preview.1`).
+            // `az devops invoke` rejects the dotted preview form (`7.1-preview.1`), so the undotted
+            // preview alias addresses the endpoint.
             "--api-version",
             "7.1-preview",
         ],
@@ -273,7 +284,11 @@ fn fetch_evaluations(
     ))
 }
 
-/// Ask Azure DevOps for the branch's pull requests in one concurrent wave, joined by source.
+/// Ask Azure DevOps for the branch's pull requests: the newest 100 active and newest 100
+/// completed enumerate in one concurrent wave, and a node joins when its source (repository,
+/// branch) is one of the branch's heads (`branch_admitted`). Also returns the target's
+/// project GUID as the enumeration nodes report it, so the policy read need not wait for
+/// anything else.
 fn associate_by_branch(
     repo: &Path,
     org_url: &str,
@@ -365,7 +380,8 @@ fn branch_admitted(
     if !crate::forge::admits(heads, target, &pr.head_ref, &head_repo) {
         return None;
     }
-    // An enumeration node is the complete pull request.
+    // An enumeration node is the complete pull request, so the pick it becomes needs no detail
+    // read; the payload travels with the admission that proved it.
     pr.raw = Some(node.clone());
     Some(pr)
 }
@@ -433,7 +449,8 @@ fn build_snapshot(
             crate::forge::urlencode(target.name())
         ),
         body: pr["description"].as_str().unwrap_or_default().to_string(),
-        // A missing status must not read as reviewable.
+        // A missing status must not read as reviewable: the empty string falls through
+        // `parse_state` to the closed arm — stale, never wrong.
         state: parse_state(pr["status"].as_str().unwrap_or_default()),
         is_draft: pr["isDraft"].as_bool().unwrap_or(false),
         head_ref: head_ref_of(pr),
@@ -449,7 +466,8 @@ fn build_snapshot(
     }
 }
 
-/// Only `active` and `completed` are ever picked.
+/// Only `active` and `completed` are ever picked; every other status, a missing one included, is
+/// non-reviewable and reads as closed.
 fn parse_state(status: &str) -> PrState {
     match status {
         "active" => PrState::Open,
@@ -458,7 +476,9 @@ fn parse_state(status: &str) -> PrState {
     }
 }
 
-/// Fold Azure DevOps' merge state: conflict `conflicting`, rejected required policy `blocked`.
+/// Fold Azure DevOps' merge state to the blockers worth surfacing: a conflict is
+/// `conflicting`, a rejected required policy is `blocked`, and everything else — including a
+/// still-queued merge check — is `clean`.
 fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
     if pr["mergeStatus"].as_str() == Some("conflicts") {
         return Merge::Conflicting;
@@ -475,7 +495,8 @@ fn derive_merge(pr: &Value, evaluations: &Value) -> Merge {
     Merge::Clean
 }
 
-/// The checks list: policy evaluations and commit statuses normalized into one A policy allowed to fail.
+/// The checks list: policy evaluations and commit statuses normalized into one A policy allowed to
+/// fail — one that is not blocking — contributes a skipped check, never a failing one.
 fn build_checks(evaluations: &Value, statuses: &Value) -> Vec<Check> {
     let mut checks: Vec<Check> = Vec::new();
     for row in evaluations["value"].as_array().into_iter().flatten() {
@@ -547,7 +568,8 @@ fn newest_comment_threads(threads: &Value) -> (Vec<&Value>, bool) {
     (crate::forge::newest_capped(rows), truncated)
 }
 
-/// The first human-authored comment carrying content.
+/// The first human-authored comment carrying content — the thread's root — or `None` when the
+/// thread is system-only, deleted, or empty and renders no comment.
 fn comment_root(thread: &Value) -> Option<&Value> {
     thread["comments"].as_array()?.iter().find(|comment| is_comment(comment))
 }
@@ -593,7 +615,10 @@ fn thread_line_range(context: &Value) -> (Option<u64>, Option<u64>) {
     (left_s.or(left_e), left_e.or(left_s))
 }
 
-/// Threads and votes as one newest-first comment list.
+/// Merge the threads and reviewer votes into one newest-first comment list: PR-level threads
+/// are `comment` rows, file-position threads are `finding` rows with the thread's resolved
+/// status, and a reviewer vote is a `review` row. A thread
+/// carries no code context, so a finding has no snippet.
 fn merge_comments(threads: &[&Value], pr: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
     for thread in threads {
@@ -666,7 +691,8 @@ fn vote_body(vote: i64) -> Option<&'static str> {
     }
 }
 
-/// Whether an Azure DevOps identity is a service account.
+/// Whether an Azure DevOps identity is a service account: the shared name heuristics, the
+/// platform's own service identity, or a build-service account.
 fn is_azure_bot(identity: &Value) -> bool {
     let display = identity["displayName"].as_str().unwrap_or("");
     let unique = identity["uniqueName"].as_str().unwrap_or("").to_ascii_lowercase();
@@ -697,7 +723,8 @@ mod tests {
     fn state_maps_active_and_completed_with_a_closed_fallback() {
         assert_eq!(parse_state("active"), PrState::Open);
         assert_eq!(parse_state("completed"), PrState::Merged);
-        // Only active and completed are ever picked.
+        // Only active and completed are ever picked, so a missing status is the one reachable
+        // fallback, and it must not read as reviewable.
         assert_eq!(parse_state(""), PrState::Closed);
     }
 

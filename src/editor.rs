@@ -48,7 +48,8 @@ const DIALECTS: &[Dialect] = &[
         window: true,
     },
     Dialect { names: &["subl", "sublime_text"], line: LineArg::Suffix, window: true },
-    // Plain `zed` collides with the OpenZFS event daemon.
+    // Plain `zed` collides with the OpenZFS event daemon, so Linux packages ship the CLI under a
+    // name of their own.
     Dialect { names: &["zed", "zeditor", "zedit"], line: LineArg::Suffix, window: true },
     Dialect { names: &["bbedit", "gedit"], line: LineArg::Plus, window: true },
     Dialect { names: &["mate"], line: LineArg::Flag, window: true },
@@ -121,7 +122,9 @@ pub fn resolve(
         return Err(NoEditor::Unset);
     };
     let mut words = split_command(&value).into_iter();
-    // Two quote characters split to one empty word, which names no program.
+    // The same guard the template gets: a value of two quote characters is not empty and
+    // splits to one empty word, and handing that to the pane would flip the screen for a
+    // spawn that cannot succeed.
     let Some(program) = words.next().filter(|p| !p.is_empty()) else {
         return Err(NoEditor::NamesNoProgram);
     };
@@ -250,7 +253,8 @@ mod tests {
 
     #[test]
     fn window_editors_get_their_line_and_nothing_else() {
-        // reviewr adds no flag of its own.
+        // reviewr adds no flag of its own: the launcher hands the file over and returns, and
+        // nothing waits on it.
         for name in ["code", "code-insiders", "codium", "cursor", "windsurf", "positron"] {
             assert_eq!(argv(&env(name).unwrap()), format!("{name} -g /repo/src/lib.rs:41"));
         }
@@ -287,7 +291,8 @@ mod tests {
 
     #[test]
     fn only_a_terminal_editor_is_handed_the_pane() {
-        // The one question the argv does not answer.
+        // The one question the argv does not answer, so nothing else in this module asserts it:
+        // which of the two paths `run_editor` takes.
         for name in ["vim", "nvim", "nano", "micro", "kak", "emacs", "hx", "helix"] {
             assert!(env(name).unwrap().wants_terminal, "{name} paints in the pane");
         }

@@ -1,4 +1,5 @@
-//! The rebindable keymap: names, defaults, `[keybindings]` overrides, and the lookup.
+//! The rebindable action keymap: action names, default keys, resolution of `[keybindings]`
+//! overrides, and the key → action lookup the dispatcher and the hint renderers share
 
 use std::sync::LazyLock;
 
@@ -138,18 +139,21 @@ impl Key {
         }
     }
 
-    /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip.
+    /// The spelling `[keybindings]` and `--resolve-plugin-config` round-trip: `ctrl+f`, `alt+x`,
+    /// the bare character, or a named key's lowercase name.
     pub fn config_str(self) -> String {
         self.prefixed(self.code.name())
     }
 
-    /// The hint the footer and header paint.
+    /// The hint the footer and header paint: the config spelling, except a named key shows its
+    /// screen label — `→`, `PageUp`.
     pub fn label(self) -> String {
         self.prefixed(self.code.label())
     }
 }
 
-/// Every action with its config name and default keys.
+/// Every action with its config name and default keys — the single source the default keymap, the
+/// name lookup, and the config error message are built from.
 const ACTIONS: [(Action, &str, &[Key]); 43] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
@@ -237,7 +241,8 @@ impl Default for Keymap {
     }
 }
 
-/// The default keymap, shared by the callers that need one without a validated snapshot.
+/// The default keymap, shared by the callers that need one without a validated snapshot: the
+/// blocked `App`'s total `keymap()` accessor and the event loop's error-gate `quit` check.
 pub fn default_keymap() -> &'static Keymap {
     static DEFAULT: LazyLock<Keymap> = LazyLock::new(Keymap::default);
     &DEFAULT

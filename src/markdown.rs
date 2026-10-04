@@ -11,31 +11,38 @@ use unicode_width::UnicodeWidthStr;
 use crate::highlight::Highlighter;
 use crate::theme::Palette;
 
-/// Block indents (quote bars, list levels) deeper than this render at the cap.
+/// Block indents (quote bars, list levels) deeper than this render at the cap, so pathological
+/// nesting can never squeeze the content column to nothing.
 const MAX_NEST: usize = 8;
 
 /// The indent code-block lines carry inside their block.
 const CODE_INDENT: &str = "  ";
 
-/// A shrunk table column never drops below this width (or its natural width, when smaller).
+/// A shrunk table column never drops below this width (or its natural width, when smaller), so
+/// wrapped cells stay readable.
 const COL_FLOOR: usize = 8;
 
-/// Rendered markdown: styled lines, per-line metadata, and heading anchors.
+/// Rendered markdown: the styled lines, one metadata entry per line in lockstep, and the document's
+/// heading anchors — the position mapping and link hit-testing the surfaces consume.
 #[derive(Clone, Debug, Default)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub meta: Vec<LineMeta>,
     /// Each heading's GitHub slug and the rendered line it starts on.
     pub anchors: Vec<(String, usize)>,
-    /// The 1-based source lines whose content does not render, wholly or in part.
+    /// The 1-based source lines whose content does not render, wholly or in part: HTML comments
+    /// (block or inline, single or multi-line), link reference definitions, lone tags.
     pub silent: Vec<usize>,
     /// Every `<details>` that has a summary, open or not, in close order: its key and source lines.
     pub disclosures: Vec<Disclosure>,
-    /// Every code block's whole source range, fences included.
+    /// Every code block's whole source range, fences included: its lines map one rendered line
+    /// each, yet review treats the block as one.
     pub code_blocks: Vec<(usize, usize)>,
 }
 
-/// One `<details>` element's 1-based source lines and its key.
+/// One `<details>` element's source lines, 1-based: `start` holds the opening tag, `body`
+/// is the first line past the summary, `end` holds the closing tag (or the file's last
+/// line when it never closes). `key` is its [`DetailsHit::key`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Disclosure {
     pub key: String,
@@ -44,7 +51,9 @@ pub struct Disclosure {
     pub end: usize,
 }
 
-/// One rendered line's source range and link spans.
+/// One rendered line's metadata: the 1-based source lines it maps to — its block's
+/// `source_line..=source_end`, one line for a code line or a table row — and the link
+/// spans it carries. A block ends where the next one begins, so ranges never overlap.
 #[derive(Clone, Debug)]
 pub struct LineMeta {
     pub source_line: usize,
@@ -54,11 +63,13 @@ pub struct LineMeta {
     pub details: Option<DetailsHit>,
     /// Whether the line is the blank gap set above its block, not its content.
     pub gap: bool,
-    /// The source lines this line's own text comes from, first and last.
+    /// The source lines this line's own text comes from, first and last — within its block's range,
+    /// so a wrapped paragraph's lines tell apart which source line each shows.
     pub lines: (usize, usize),
 }
 
-/// Click target for a `<details>` summary.
+/// Click target for a `<details>` summary: display columns, and the key the expand state keys on —
+/// the summary plus how many earlier disclosures share it (`Details#1`).
 #[derive(Clone, Debug)]
 pub struct DetailsHit {
     pub start: usize,
@@ -207,14 +218,16 @@ struct Chunk {
     line: usize,
 }
 
-/// An in-progress code block: language, content, fence position.
+/// An in-progress code block: the fence's language tag, its content, and whether a fence line
+/// precedes the content in the source.
 struct CodeBlock {
     lang: Option<String>,
     content: String,
     fenced: bool,
 }
 
-/// An in-progress table: source range, rows of cells, header count.
+/// An in-progress table: its source range (the wide-table fallback), rows of cells of chunks with
+/// each row's source lines, and how many leading rows are the header.
 struct Table {
     range: Range<usize>,
     rows: Vec<Vec<Vec<Chunk>>>,
@@ -232,9 +245,11 @@ struct Renderer<'a> {
     /// The 1-based source lines the block being emitted spans.
     block_src: usize,
     block_end: usize,
-    /// The source ranges of blocks that rendered at least one line.
+    /// The source ranges of blocks that rendered at least one line: their structural lines —
+    /// fences, delimiter rows, wrapper tags, item markers — show as part of them.
     covered: Vec<(usize, usize)>,
-    /// The source lines the pushed lines take their own text from.
+    /// The source lines the lines being pushed take their own text from, while narrower than their
+    /// block's ([`LineMeta::lines`]).
     row_lines: Option<(usize, usize)>,
     /// The blocks open now: each one's closing tag, source lines, and the rendered line count at its start.
     open_blocks: Vec<(TagEnd, usize, usize, usize)>,
@@ -263,9 +278,12 @@ struct Renderer<'a> {
     links: Vec<(usize, usize)>,
     /// Every link destination seen, indexed by the chunks that belong to it.
     urls: Vec<std::sync::Arc<str>>,
-    /// The heading text being collected for its slug.
+    /// The heading text being collected for its slug — prose only, never a link's appended
+    /// destination, so `## See [docs](url)` slugs as GitHub does.
     heading_text: Option<String>,
-    /// Open images: alt text start, heading length to roll back to, destination.
+    /// Open images: the chunk index where the alt text starts, the heading-text
+    /// length to roll back to — alt text stays out of a heading's slug, as on GitHub —
+    /// and the image destination, so a non-badge image is a link to its url.
     images: Vec<(usize, usize, String)>,
     code: Option<CodeBlock>,
     table: Option<Table>,
@@ -355,7 +373,8 @@ impl Renderer<'_> {
             }
             Event::Html(t) => {
                 if self.emitting() && !self.collecting_summary() {
-                    // A tight list item's text can still be pending.
+                    // A tight list item's text can still be pending: it emits first, with its
+                    // marker, so the HTML block never jumps ahead of it.
                     self.flush_block(true);
                 }
                 self.block_src = self.src_line(range.start);
@@ -557,13 +576,15 @@ impl Renderer<'_> {
                 None => (start, end),
             });
         }
-        // A run reads forward through its source.
+        // A run reads forward through its source: text emitted at an inline's end — a link's url,
+        // an image's — never goes back to an earlier line than the text before it.
         let after = self.chunks_mut().last().map_or(0, |c| c.line);
         let source = self.event_lines.0.max(after);
         self.chunks_mut().push(Chunk { text, style, link, line: source });
     }
 
-    /// Push an inline code span's text, each piece on the source line it came from.
+    /// Push an inline code span's text, each piece on the source line it came from: a span crossing
+    /// a line break reads as one run with a space where the break was.
     fn push_code_span(&mut self, text: &str, range: &Range<usize>, style: Style) {
         let raw = self.source.get(range.clone()).unwrap_or_default();
         let inner = raw.trim_matches('`');
@@ -842,7 +863,8 @@ impl Renderer<'_> {
 
     // ---- block emission ------------------------------------------------------------------
 
-    /// The current block prefixes: quote bars and list indent.
+    /// The current block prefixes: quote bars plus list indent, with the pending item marker on the
+    /// first line.
     fn prefix(&self, marker: Option<&str>) -> (Span<'static>, Span<'static>) {
         let bars = "▎".repeat(self.quote.min(MAX_NEST));
         let gap = if bars.is_empty() { "" } else { " " };
@@ -879,7 +901,8 @@ impl Renderer<'_> {
                 self.out.disclosures.push(Disclosure { key, start: d.start, body, end });
             }
         }
-        // Blank once container markers go.
+        // Blank once container markers go: a `>`-only line inside a quote shows nothing of its own
+        // and hides nothing either.
         let blank: Vec<bool> = text
             .lines()
             .map(|l| l.trim_start_matches(|c: char| c == '>' || c.is_whitespace()).is_empty())
@@ -901,7 +924,9 @@ impl Renderer<'_> {
             }
             m.source_end = end;
         }
-        // A collapsed disclosure's summary stands for its whole element.
+        // A collapsed disclosure's summary stands for its whole element: its block spans it, so
+        // a change or a comment inside lands on the summary, and its body counts as shown —
+        // hidden by the reviewer's choice, not because it renders nothing.
         let mut folded: Vec<(usize, usize)> = Vec::new();
         for d in self.out.disclosures.iter().filter(|d| !self.expanded.contains(&d.key)) {
             let summary = |m: &LineMeta| m.details.as_ref().is_some_and(|h| *h.key == d.key);
@@ -989,7 +1014,8 @@ impl Renderer<'_> {
             }
             return;
         }
-        // The run maps to the lines that fed it.
+        // The run maps to the lines that fed it — its item marker's line included — never to a
+        // block stamped around it; that block keeps its own stamp for what follows.
         let stamp = (self.block_src, self.block_end);
         if let Some((mut start, mut end)) = span {
             if self.marker.is_some()
@@ -1005,7 +1031,9 @@ impl Renderer<'_> {
         let marker = self.marker.take();
         let (first, cont) = self.prefix(marker.as_deref());
         let chunks = std::mem::take(&mut self.inline);
-        // Map wrapped lines back to source lines by their placed characters.
+        // Each source line's share of the run, by its count of placed characters: the wrapper
+        // drops or adds spaces and line breaks alone, so counting the rest maps every wrapped
+        // line back to the source lines its text came from.
         let placed = |c: char| c != ' ' && c != '\n';
         let mut shares: Vec<(usize, usize)> = Vec::new();
         let mut total = 0;
@@ -1060,7 +1088,8 @@ impl Renderer<'_> {
         marker
     }
 
-    /// Emit a styled run as block lines under the current prefix.
+    /// Emit one already-styled fragment run as block lines, char-wrapped, under the current block
+    /// prefix plus `extra_indent`.
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
@@ -1081,7 +1110,8 @@ impl Renderer<'_> {
         }
     }
 
-    /// Close a code block: highlight it whole, then emit its lines.
+    /// Close a code block: highlight it whole through the shared highlighter, then emit each line
+    /// indented, char-wrapped to the pane.
     fn end_code(&mut self) {
         let Some(CodeBlock { lang, content, fenced }) = self.code.take() else {
             return;
@@ -1122,13 +1152,16 @@ impl Renderer<'_> {
         self.emit_fragments(vec![(text, style)], "");
     }
 
-    /// Close a table: aligned columns, the widest shrinking and wrapping to fit.
+    /// Close a table: aligned columns with a bold header, an over-wide table shrinking
+    /// its widest column and wrapping that column's cells, and dim source text only when
+    /// the column floors still overflow the pane.
     fn end_table(&mut self) {
         let Some(table) = self.table.take() else {
             return;
         };
         self.blank_before_block();
-        // The pending item marker lands on the first row, like every block emitter.
+        // The pending item marker lands on the first row, like every block emitter — `first` and
+        // `cont` share a width, so the column accounting is unchanged.
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
         let budget = self.budget(cont.width());
@@ -1142,7 +1175,11 @@ impl Renderer<'_> {
                 widths[i] = widths[i].max(cell_text(cell).width());
             }
         }
-        // Level the widest columns down to their floors, bounded by the column count.
+        // An over-wide table shrinks its widest columns, never below their floors: each
+        // pass levels every widest column down toward the next-highest width or its
+        // floor, whichever is larger, so cost is bounded by the column count, not by
+        // how over-wide a cell's content is. Tied widest columns shrink together, as
+        // the reference renderers do.
         let floors: Vec<usize> = widths.iter().map(|w| (*w).min(COL_FLOOR)).collect();
         let sep_total = 3 * cols.saturating_sub(1);
         let mut deficit = (widths.iter().sum::<usize>() + sep_total).saturating_sub(budget);
@@ -1196,7 +1233,8 @@ impl Renderer<'_> {
             let head = r < table.head_rows;
             let style_of =
                 |c: &Chunk| if head { c.style.add_modifier(Modifier::BOLD) } else { c.style };
-            // A cell that fits its column emits verbatim, spaces and all.
+            // A cell that fits its column emits verbatim, spaces and all; only a cell wider than
+            // its shrunk column wraps inside it.
             let cells: Vec<Vec<WrappedLine>> = (0..cols)
                 .map(|i| {
                     let cell = row.get(i).map_or(&[][..], Vec::as_slice);
@@ -1285,7 +1323,8 @@ impl Renderer<'_> {
     }
 }
 
-/// GitHub's slug: lowercase, spaces to hyphens, only letters, digits, `-` and `_`.
+/// GitHub's slug normalization: lowercase, spaces to hyphens, everything but letters, digits,
+/// hyphens, and underscores dropped.
 pub(crate) fn slug_text(text: &str) -> String {
     let mut slug = String::new();
     for c in text.trim().to_lowercase().chars() {
@@ -1298,7 +1337,8 @@ pub(crate) fn slug_text(text: &str) -> String {
     slug
 }
 
-/// A character the terminal must never receive raw.
+/// A character the terminal must never receive raw: a control character or an explicit
+/// bidirectional override.
 pub(crate) fn hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')
@@ -1403,7 +1443,8 @@ fn html_attr(tag: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Neutralize text the terminal must never interpret.
+/// Neutralize text the terminal must never interpret: hostile characters render as a visible
+/// placeholder; tabs widen to spaces.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1454,7 +1495,8 @@ fn wrap_fragments(fragments: &[Fragment], budget: usize, by_words: bool) -> Vec<
     w.lines
 }
 
-/// The wrap state: finished lines, the current line, the word being built.
+/// The wrap state: finished lines, the line being filled (spans plus link column runs), and the
+/// word being assembled (a word can span styled fragments).
 struct Wrapper {
     budget: usize,
     lines: Vec<WrappedLine>,
@@ -1471,7 +1513,8 @@ impl Wrapper {
         self.line_w = 0;
     }
 
-    /// Append `text`, merging into a matching span and link run.
+    /// Append `text` to the line, merging into the last span when the style matches and extending
+    /// the line's last link run when `link` continues it.
     fn place(&mut self, text: &str, style: Style, link: Option<usize>, w: usize) {
         if let Some(id) = link {
             match self.line_links.last_mut() {
@@ -1511,7 +1554,8 @@ impl Wrapper {
         self.word_w += char_width(c);
     }
 
-    /// Place the word: break the line first, or hard-break an over-wide word.
+    /// Place the assembled word: break the line first when the word no longer fits, and hard-break
+    /// the word itself when it is wider than a whole line.
     fn place_word(&mut self) {
         if self.word.is_empty() {
             return;
@@ -1520,13 +1564,17 @@ impl Wrapper {
         if needs_sep && self.line_w + 1 + self.word_w > self.budget && self.word_w <= self.budget {
             self.flush_line();
         } else if needs_sep {
-            // A separator keeps a style only when both sides share it.
+            // A separator keeps a style only when both sides share it (a space inside one
+            // styled run merges into it); between differently styled runs it goes plain,
+            // so an underline never bleeds into the gap on either side of a link.
             let next = self.word[0].1;
             let style = match self.line.last() {
                 Some(prev) if prev.style == next => next,
                 _ => Style::default(),
             };
-            // Both sides in one link keep the gap clickable.
+            // The link id follows its own rule: both sides in one link keep the gap
+            // clickable — the plain-styled space between link text and its dim
+            // destination is still part of the click target.
             let next_link = self.word[0].2;
             let prev_link = self
                 .line_links
@@ -1696,7 +1744,8 @@ mod tests {
     #[test]
     fn the_underline_never_bleeds_into_the_gaps_around_a_link() {
         let (hl, p) = setup();
-        // A link's interior space stays in its underlined run.
+        // One-word link followed by its dim destination, and a two-word link whose interior space
+        // stays part of the underlined run.
         for md in ["built for [herdr](https://herdr.dev).", "see [the run](https://ci.example/1)"] {
             let lines = render_lines(md, 80, &hl, &p);
             for span in &lines[0].spans {
@@ -1781,7 +1830,8 @@ mod tests {
     #[test]
     fn an_over_wide_table_shrinks_its_widest_column_and_wraps() {
         let (hl, p) = setup();
-        // At pane 24 the note column shrinks to 19 and wraps.
+        // Natural widths: id 2, note 26; at pane 24 the note column shrinks to 19 and wraps, the id
+        // column keeps its natural width, one dim rule under the header.
         let md = "| id | note |\n|---|---|\n| a | wraps beyond the pane edge |\n| b | short |";
         let t = texts(&render_lines(md, 24, &hl, &p));
         assert_eq!(t[0].trim_end(), "id │ note");
@@ -1845,7 +1895,8 @@ mod tests {
     #[test]
     fn a_column_shrinks_to_its_floor_and_still_renders() {
         let (hl, p) = setup();
-        // Natural widths: elem 4, prose 24.
+        // Natural widths: elem 4, prose 24; a 15-cell pane leaves the prose column exactly its
+        // 8-cell floor, and the table still renders as a grid.
         let md = "| elem | wraps at the floor width |\n|---|---|\n| a | b |";
         let t = texts(&render_lines(md, 15, &hl, &p));
         assert!(!t[0].starts_with('|'), "a grid, not source fallback: {t:?}");
@@ -1993,7 +2044,8 @@ mod tests {
     #[test]
     fn a_lines_own_source_lines_run_forward_through_links_and_code_spans() {
         let (hl, p) = setup();
-        // A link and a code span each crossing a line break.
+        // A link and a code span each crossing a line break: the url shows after the text of line
+        // 2, and each piece of the code span keeps its own line.
         let md = "aaa [link text\nmore words](http://example.com/a/b/c) end of\n\n\
                   x `code one\ncode two` y\n";
         for width in [16, 17, 80] {
@@ -2009,7 +2061,8 @@ mod tests {
         assert_eq!(at("://example.com/a"), (2, 2), "the url follows line 2's text: {t:?}");
         assert_eq!(at("x code one code"), (4, 5), "`code` and `one` from line 4: {t:?}");
         assert_eq!(at("two y"), (5, 5), "{t:?}");
-        // A span over three lines inside a list item, and inside a quoted one.
+        // A span over three lines inside a list item, and inside a quoted one: the container
+        // prefixes never shift a piece onto the wrong line.
         for (md, width, needle, want) in [
             ("- x `aa\n  bb\n  cc` y\n", 4, "bb", (2, 2)),
             ("- x `aa\n  bb\n  cc` y\n", 6, "bb", (2, 2)),

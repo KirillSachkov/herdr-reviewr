@@ -58,7 +58,8 @@ use crate::export::Clipboard;
 use crate::keymap::Keymap;
 use crate::model::Scope;
 
-/// The note a slow config-dir lookup paints, retracted when it finds nothing.
+/// The status-line note a slow config-dir lookup paints before its answer swaps the frame, and
+/// retracts if the lookup resolves nothing (`policies/ux-responsiveness.md`).
 const RESOLVING_NOTE: &str = "resolving plugin config…";
 
 /// Entry point: parse config, set up the terminal, run the loop, restore.
@@ -71,19 +72,26 @@ pub fn run() -> Result<()> {
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
-    // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops.
+    // The kitty keyboard protocol reports modifiers on keys the legacy encoding drops — most
+    // notably Ctrl/Alt+arrows — so word-jump by arrow works where the terminal supports it.
     let kbd = supports_keyboard_enhancement().unwrap_or(false);
     logln!("keyboard enhancement supported={kbd}");
-    // `ratatui::init` already claimed the alternate screen and raw mode.
+    // `ratatui::init` already claimed the alternate screen and raw mode, so only the input modes
+    // are left to claim here.
     claim_input_modes(kbd);
-    // Paint before the first load, so a hung `git` never leaves herdr's blank pane (issue #4).
+    // Render before the first load, so a slow, failing, or hung `git` scan shows the reviewr UI
+    // instead of the blank pane herdr leaves when the process blocks or exits before it renders
+    // (issue #4). Paint the empty frame first; then the initial load, non-fatal — an error
+    // opens the pane with the reason in the status line, the same contract as a failed poll
+    // refresh.
     if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
         restore_terminal(kbd);
         return Err(error.into());
     }
     // The cosmetic pane label, stamped after the first paint and cleared on a normal exit.
     herdr::label_pane();
-    // The CLI half of config-dir resolution, on a painted pane.
+    // The CLI half of config-dir resolution, on a painted pane: with no environment directory, ask
+    // herdr and rebuild from the directory it names.
     let cli_dir = cfg
         .plugin_config_dir
         .is_none()
@@ -174,7 +182,8 @@ fn run_editor(
     open: &mut Vec<std::process::Child>,
 ) -> Result<()> {
     let Some(target) = app.editor_request.take() else { return Ok(()) };
-    // Absolute, so no editor reads the file name as a flag.
+    // Absolute, so no editor can read the file name as one of its own flags and no dialect needs a
+    // `--` guard (`src/editor.rs`).
     let joined = app.repo.join(&target.path);
     let path = std::path::absolute(&joined).unwrap_or(joined);
     let command = match editor::resolve(
@@ -197,13 +206,15 @@ fn run_editor(
             return Ok(());
         }
     };
-    // `all_files` lists what the index tracks.
+    // `all_files` lists what the index tracks, so a file removed from the worktree can still be a
+    // row, and the changeset only catches it inside a scope that diffs the worktree.
     if !path.is_file() {
         app.status = format!("{} is gone", target.path);
         return Ok(());
     }
     logln!("editor run {} {:?}", command.program, command.args);
-    // The reviewer's own PATH first, the host bins as fallback.
+    // The reviewer's own PATH first, so a version-managed editor wins over a stale copy in a common
+    // bin, with the host locations as the fallback a stripped pane PATH needs (`src/proc.rs`).
     let Some(mut cmd) = proc::user_command(&command.program) else {
         app.status = format!("editor not found: {}", command.program);
         return Ok(());
@@ -232,7 +243,8 @@ fn run_editor(
     drain_input(app)?;
 
     match launched {
-        // The editor ran, so the worktree may have moved whatever it exited with.
+        // The editor ran, so the worktree may have moved whatever it exited with: `:cq` after a
+        // write is a non-zero exit over a real edit.
         Ok(status) => {
             app.status = if status.success() {
                 format!("edited {}", target.path)
@@ -296,15 +308,21 @@ fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
 /// A transient status message (e.g. "sent 3 comments") fades after this long idle.
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
-/// Stillness on the pane's edge this long completes a gesture whose release was lost.
+/// The exit deadline: stillness this long after the pointer's last event sat on the pane's
+/// edge completes the live gesture — herdr routes mouse by pointer position, so a release
+/// past the pane never arrives. Long enough that a pause while border-scrolling survives,
+/// short enough that an overshoot release's copy beats the paste.
+/// Its own constant, never the `--poll` cadence: the two measure unrelated things.
 const EXIT_DEADLINE: Duration = Duration::from_secs(1);
 
-/// While the `PR` tab is active, refetch the forge at least this often.
+/// While the `PR` tab is active, refetch the forge at least this often — a fallback for forge-side
+/// changes with no local signal (a reviewer's comment).
 const PR_POLL: Duration = Duration::from_mins(1);
 
 /// How long an in-flight PR fetch may run before a refresh trigger stops waiting on it.
 const FETCH_HANG: Duration = Duration::from_mins(1);
-/// How long an ambient refresh must stay in flight before the tab-strip glyph shows.
+/// How long an ambient refresh must stay in flight before the tab-strip glyph shows — routine
+/// refreshes stay invisible; a commanded one (`r`) shows immediately.
 const INDICATOR_DELAY: Duration = Duration::from_millis(200);
 /// Once lit, the glyph holds at least this long, so a fast landing still reads.
 const INDICATOR_MIN_SHOW: Duration = Duration::from_millis(300);
@@ -320,7 +338,8 @@ struct TaggedPr {
 
 #[derive(Debug)]
 enum PrEffect {
-    /// The view's identity changed (repository or candidate set).
+    /// The view's identity changed (repository or candidate set): the snapshot may describe the
+    /// wrong pull request, so it blanks while the replacement fetches.
     Clear,
     /// Only `HEAD` moved: the same pull request gained newer commits.
     Refetch,
@@ -336,7 +355,8 @@ struct PrRefresh {
     current_input: Option<crate::forge::PrFetchInput>,
     pending: Option<TaggedPr>,
     fetch_needed: bool,
-    /// An ambient trigger rode the in-flight fetch.
+    /// An ambient trigger rode the in-flight fetch; one fresh fetch follows the ridden result so a
+    /// remote change that read predates still paints promptly.
     trailing: bool,
 }
 
@@ -530,7 +550,11 @@ impl ConfigGate {
     }
 }
 
-/// The hold gate: a PR resolution that found nothing keeps the shown PR while `HEAD` holds its head.
+/// The hold gate: a resolution that found nothing keeps the painted story while the
+/// pinned `HEAD` still is or contains the shown PR's head commit
+/// `contains(pin, oid)` answers that ancestry question;
+/// its failure is a retryable branch-state Git error, never proof of absence
+/// (a same-target failure preserves the snapshot).
 fn hold_gate(
     view: crate::forge::PrView,
     held: Option<&str>,
@@ -621,7 +645,8 @@ impl PrRefresh {
         self.take_pending(&input, epoch)
     }
 
-    /// Apply the completion that matches the verified input, else fetch afresh.
+    /// Apply the pending completion when it exactly matches the just-verified input, or ask for a
+    /// fresh fetch when it doesn't.
     fn take_pending(&mut self, input: &crate::forge::PrFetchInput, epoch: u64) -> Option<PrEffect> {
         if let Some(completion) = self.pending.take() {
             if completion.generation == self.generation
@@ -639,7 +664,8 @@ impl PrRefresh {
 
     fn probe_failed(&mut self, retry_pending: bool) {
         self.pending = None;
-        // An armed trailing fetch survives the failed probe as a plain fetch request.
+        // An armed trailing fetch survives the failed probe as a plain fetch request, so a ridden
+        // trigger is never silently lost to the fallback timer.
         self.fetch_needed = retry_pending || std::mem::take(&mut self.trailing);
     }
 
@@ -665,12 +691,14 @@ pub fn land_world_completion(
     if let Some(turn) = completion.turn.as_ref() {
         app.sync_agents_present(turn.agents_present);
         if turn.ended {
-            // One fetch per turn, on any tab.
+            // One fetch per turn, on any tab: the turn may have pushed or merged, and entering the
+            // tab then finds fresh work already underway.
             app.request_pr_refresh(crate::app::RefreshKind::Ambient);
         }
     }
     if completion.generation != generation {
-        // A superseding job carries reveal=false.
+        // A superseding job carries reveal=false, so a superseded switch's reveal would die here;
+        // re-arm it to ride the next dispatch instead.
         if completion.reveal {
             app.request_world_refresh(false, true);
         }
@@ -682,12 +710,14 @@ pub fn land_world_completion(
         {
             app.reconcile_world(snapshot);
             if completion.reveal {
-                // The switch frame revealed the stashed cursor.
+                // The switch frame revealed the stashed cursor; the landing may have re-anchored
+                // it, so settle and reveal again.
                 app.settle_tab_entry();
                 app.reveal_files = true;
             }
         }
-        // The view moved on while the build ran.
+        // The view moved on while the build ran: discard whole, refresh again, keeping an
+        // undelivered reveal alive.
         Some(Ok(_)) => app.request_world_refresh(false, completion.reveal),
         // A failed refresh reports and keeps the stale frame — the same contract as a failed poll.
         Some(Err(e)) => app.status = format!("refresh failed: {e}"),
@@ -709,20 +739,24 @@ pub fn land_search_completion(
     true
 }
 
-/// Whether a file tab's in-flight refresh shows the tab-strip glyph.
+/// Whether a file tab's in-flight refresh shows the tab-strip glyph: past the delay, and only for a
+/// job that builds a snapshot — a sample-only job never lights it.
 fn world_indicator(inflight: Option<(Duration, bool)>) -> bool {
     inflight.is_some_and(|(elapsed, builds)| builds && elapsed >= INDICATOR_DELAY)
 }
 
-/// Whether a lit glyph may go dark.
+/// Whether a lit glyph may go dark: only once the minimum display has passed, so the acknowledgment
+/// is perceptible rather than a two-frame blink.
 fn glyph_clears(lit_for: Duration) -> bool {
     lit_for >= INDICATOR_MIN_SHOW
 }
 
-/// The tight wake while a worker owes a completion.
+/// The tight wake while a worker owes a completion, so its landing paints near the build's own
+/// speed — shared by the world and search workers.
 const WORKER_TIGHT_WAKE: Duration = Duration::from_millis(15);
 
-/// The wake while a world job is in flight.
+/// The wake while a world job is in flight: tight for a building job so its landing paints near the
+/// build's own speed, the fetch cadence for a sample-only one.
 fn world_wake(builds: bool) -> Duration {
     if builds { WORKER_TIGHT_WAKE } else { Duration::from_millis(100) }
 }
@@ -736,7 +770,9 @@ fn event_loop(
 ) -> Result<()> {
     let poll = cfg.poll;
     let mut last_poll = Instant::now();
-    // The exit signature: the last mouse event's time, and whether it sat on the edge.
+    // The exit signature's two halves: the last mouse event's arrival, and whether that
+    // event sat on the pane's edge — only both together let the exit deadline complete a
+    // gesture whose release was lost past the pane.
     let mut last_mouse = Instant::now();
     let mut mouse_exited = false;
     let mut last_pr_poll = Instant::now();
@@ -747,7 +783,8 @@ fn event_loop(
     let mut recovery_inflight = false;
     let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
-    // The world worker owns every refresh build and the turn tracker.
+    // The world worker owns every refresh build and the turn tracker; the loop sends input-tagged
+    // jobs and reconciles the completions.
     let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
     let (world_res_tx, world_rx) = mpsc::channel::<crate::world::WorldCompletion>();
     let _world_worker = crate::world::spawn(
@@ -759,7 +796,8 @@ fn event_loop(
     let mut open_editors: Vec<std::process::Child> = Vec::new();
     let mut world_generation = 0_u64;
     let mut world_inflight: Option<(Instant, bool)> = None;
-    // The search worker spawns on the first overlay open.
+    // The search worker spawns on the first overlay open, so a session that never searches never
+    // pays for the engine's index.
     let mut search_worker: Option<(
         mpsc::Sender<crate::search::SearchJob>,
         mpsc::Receiver<crate::search::SearchCompletion>,
@@ -771,7 +809,8 @@ fn event_loop(
     let mut config_epoch = 0_u64;
     let mut status_at = Instant::now();
     let mut last_status = String::new();
-    // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab.
+    // Fetch the PR snapshot as soon as the panel opens, not on first switching to the tab, so the
+    // tab is already populated when the user gets there.
     app.pr_pending = None;
     let result: Result<()> = (|| {
         while !app.should_quit {
@@ -813,7 +852,8 @@ fn event_loop(
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
-            // The refresh glyph: a commanded refresh at once, an ambient one past the delay.
+            // The tab-strip refresh glyph: a commanded refresh lights it immediately, an ambient
+            // one past the appear delay, each tab only for its own refresh.
             if std::mem::take(&mut app.refresh_commanded) {
                 glyph_since.get_or_insert_with(Instant::now);
             }
@@ -834,7 +874,8 @@ fn event_loop(
                 }
             }
             app.refresh_indicator = glyph_since.is_some();
-            // Expire a status line once it has lingered past the TTL.
+            // Expire a stale status line: restart the timer when the message changes, and clear it
+            // once it has lingered past the TTL, so a notification doesn't stay up forever.
             if app.status != last_status {
                 last_status.clone_from(&app.status);
                 status_at = Instant::now();
@@ -843,7 +884,8 @@ fn event_loop(
                 app.status.clear();
                 last_status.clear();
             }
-            // Settle both panes' scroll for this frame's viewport before painting.
+            // Settle both panes' scroll for this frame's viewport before painting, so the diff
+            // window matches what mouse hit-testing will map against.
             if app.mode == crate::app::Mode::Search && !input::poll(Duration::ZERO)? {
                 app.build_search_preview();
             }
@@ -854,7 +896,8 @@ fn event_loop(
             } else {
                 viewport
             };
-            // Rendered markdown wraps to this frame's code column.
+            // Rendered markdown wraps to this frame's code column; a resize rebuilds it before the
+            // heights below measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
             let heights = ui::diff_row_heights(app, area);
             if std::mem::take(&mut app.reveal_diff) || app.composing() {
@@ -862,7 +905,8 @@ fn event_loop(
             }
             app.bound_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
-            // A hidden navigator's reveal waits for the show frame.
+            // While the navigator is hidden its viewport is zero, and a reveal computed there would
+            // zero the kept scroll — it stays pending for the show frame.
             if !app.navigator_hidden_here() && std::mem::take(&mut app.reveal_files) {
                 app.reveal_file_cursor(file_vp);
             }
@@ -870,7 +914,8 @@ fn event_loop(
             let painted_frame = PaintedFrameSnapshot::capture(app);
             terminal.draw(|f| ui::render(f, app))?;
 
-            // A world completion reconciles into the view only while the view it described is still current.
+            // A world completion reconciles into the view only while the view it described is still
+            // current; the worker's baseline is authoritative either way.
             if !app.gates_world_drain() {
                 let mut landed = false;
                 while let Ok(completion) = world_rx.try_recv() {
@@ -884,26 +929,32 @@ fn event_loop(
                 }
             }
 
-            // A search completion paints only while it matches the query as typed.
+            // A search completion paints only while it matches the query as typed: a stale
+            // generation is discarded whole.
             if let Some((_, rx)) = &search_worker
                 && let Ok(completion) = rx.try_recv()
             {
                 if land_search_completion(app, completion, search_generation) {
-                    // A warming engine answers `indexing…` and re-runs by itself.
+                    // A warming engine answers `indexing…` and re-runs by itself, so the tight wake
+                    // stays on until real results land.
                     search_inflight = app
                         .search
                         .as_ref()
                         .is_some_and(|s| s.phase == crate::app::SearchPhase::Indexing);
                 }
-                // Repaint at once, like a world landing.
+                // Repaint at once, like a world landing — without this the results sit computed but
+                // unpainted until the next wake (policies/ux-responsiveness.md).
                 continue;
             }
-            // A closed overlay owes no landing.
+            // A closed overlay owes no landing: without this, a still-warming engine's
+            // periodic `indexing…` completions would re-arm the tight wake after `esc`
+            // and spin the loop until the cold scan finishes.
             if app.search.is_none() {
                 search_inflight = false;
             }
 
-            // Dispatch the queued query after the frame above painted.
+            // Dispatch the queued query after the frame above painted, so typing paints at input
+            // speed and the results land behind it.
             if std::mem::take(&mut app.search_dirty)
                 && app.mode == crate::app::Mode::Search
                 && app.config_error().is_none()
@@ -928,9 +979,11 @@ fn event_loop(
                     && let Some(s) = app.search.as_mut()
                     && !matches!(s.phase, crate::app::SearchPhase::Error(_))
                 {
-                    // A dead worker's first, specific error stays up.
+                    // A dead worker's first, specific error stays up; only a phase that never saw
+                    // one gets the generic message.
                     s.phase = crate::app::SearchPhase::Error("search worker unavailable".into());
-                    // Drop the last preview, like a failed completion.
+                    // Drop the last preview, like a failed completion, so no stale file shows under
+                    // the error.
                     s.preview = None;
                 }
             }
@@ -940,7 +993,8 @@ fn event_loop(
                 let _ = tx.send(crate::search::SearchJob::Track { path });
             }
 
-            // Dispatch the queued refresh after the frame above painted.
+            // Dispatch the queued refresh after the frame above painted, so a switch stays instant
+            // and the fresh state lands behind it.
             if app.world_request.is_some() && app.config_error().is_none() {
                 let request = app.world_request.take().expect("checked above");
                 world_generation = world_generation.wrapping_add(1);
@@ -950,12 +1004,14 @@ fn event_loop(
                     sample_turn: request.sample_turn,
                     reveal: request.reveal,
                 };
-                // A sample-only job (the `PR` tab's poll) builds no snapshot.
+                // A sample-only job (the `PR` tab's poll) builds no snapshot: it neither lights the
+                // file tabs' glyph nor deserves the tight landing wake.
                 let builds = job.input.tab.is_file_tab();
                 world_inflight = if world_tx.send(job).is_ok() {
                     Some((Instant::now(), builds))
                 } else {
-                    // A dead worker must not pin the in-flight marker.
+                    // A dead worker must not pin the in-flight marker (and its glyph and tight
+                    // wake) for the rest of the session.
                     app.status = "refresh worker unavailable".to_string();
                     None
                 };
@@ -1142,7 +1198,8 @@ fn event_loop(
                     }
                     Event::Mouse(m) => {
                         last_mouse = Instant::now();
-                        // Reuse this frame's measurements, so a drag never re-measures the diff.
+                        // Reuse this frame's `area` and `heights` (computed above for the scroll
+                        // settle) so a drag-select doesn't re-measure the whole diff per motion.
                         if let Err(e) =
                             handle_mouse(app, m, area, &heights, painted_frame.keymap(), &Clipboard)
                         {
@@ -1175,14 +1232,16 @@ fn event_loop(
             if app.config_error().is_none() {
                 app.tick_base_picker_probe();
             }
-            // Run the editor an `edit` press named.
+            // An `edit` press named a file: run the editor, and hand it the pane when it is one
+            // that paints there.
             if app.editor_request.is_some() {
                 run_editor(terminal, app, painted_frame.editor(), kbd, &mut open_editors)?;
             }
             if app.should_quit {
                 break;
             }
-            // Interior stillness is a held button (a release inside would have arrived).
+            // Interior stillness is a held button (a release inside would have arrived), so only
+            // the exit signature reaches this completion.
             if app.gesture_active() && mouse_exited && last_mouse.elapsed() >= EXIT_DEADLINE {
                 complete_gesture(app, area, &Clipboard);
             }
@@ -1229,7 +1288,8 @@ fn answers_question(kind: MouseEventKind) -> bool {
 fn handle_blocked_event(app: &mut App, event: &Event) {
     match event {
         Event::Key(k) if k.kind == KeyEventKind::Press => {
-            // The blocked screen's escape hatch stays modifier-agnostic.
+            // The blocked screen's escape hatch stays modifier-agnostic: a stuck user's `q` quits
+            // whatever the modifiers, exactly as before the keymap gained chords.
             let action = match k.code {
                 KeyCode::Char(c) => keymap::default_keymap().action_for(keymap::Key::plain(c)),
                 _ => None,
@@ -1298,7 +1358,8 @@ fn apply_pr_probe_result(
                     true
                 }
                 Some(PrEffect::Refetch) => {
-                    // The snapshot stays painted; only the refresh indicator may appear.
+                    // The snapshot stays painted; only the refreshing indicator may appear once the
+                    // wait crosses the loading delay.
                     pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
                     false
                 }
@@ -1324,7 +1385,9 @@ fn reconcile_plugin_config(
 ) -> ConfigGate {
     let previous = app.plugin_config().cloned();
     let observed = config::plugin_config(cfg.plugin_config_dir.as_deref());
-    // A reflow or block screen under a live gesture completes its copy first.
+    // A config layout or theme change reflows the frame under a live gesture, and the block
+    // screen replaces its body: both complete the gesture's copy before the new frame
+    // applies, so a world event never silently ends a visible selection.
     if app.gesture_active()
         && let Some(p) = &previous
         && config_ends_gesture(p, observed.as_ref().ok())
@@ -1360,7 +1423,8 @@ fn reconcile_plugin_config(
     ConfigGate::Changed { pr_changed }
 }
 
-/// Whether a fresh config observation ends a live gesture.
+/// Whether a fresh config observation ends a live gesture — the end table's config row: a layout or
+/// theme change reflows the frame, and a failed observation (`None`) blocks the body.
 #[must_use]
 fn config_ends_gesture(previous: &PluginConfig, observed: Option<&PluginConfig>) -> bool {
     match observed {
@@ -1423,7 +1487,8 @@ fn apply_plugin_config_observation(
 const PAGE: isize = 15;
 const HALF_PAGE: isize = 8;
 
-/// Apply one readline-style editing key to the active field.
+/// Apply one readline-style editing key to the active field — the comment draft or the search query
+/// — so the two input surfaces stay in lockstep, edited by one control set.
 fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bool) {
     use KeyCode::{Backspace, Char, Delete, End, Home, Left, Right};
     match code {
@@ -1432,7 +1497,8 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
         Char('e') if ctrl => app.caret_end(),
         Char('u') if ctrl => app.input_kill_to_start(),
         Char('k') if ctrl => app.input_kill_to_end(),
-        // Word jumps: `Alt+b`/`Alt+f`, and modified arrows where delivered.
+        // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified arrows,
+        // which many terminals/multiplexers strip) and modified arrows where they are delivered.
         Char('b') if alt => app.caret_word_left(),
         Char('f') if alt => app.caret_word_right(),
         Left if word => app.caret_word_left(),
@@ -1448,7 +1514,8 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
     }
 }
 
-/// Map one key press onto `App` through `keymap`.
+/// Map one key press onto `App` through `keymap` — the keymap of the frame on screen, so a stale
+/// hint never dispatches a different action than it advertised.
 pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Result<()> {
     let done = dispatch_key(app, key, area, keymap);
     app.settle_pick();
@@ -1463,7 +1530,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     // A keypress cancels the gesture but keeps consuming its drag events until mouse-up.
     app.cancel_divider_drag();
-    // A reflow input cancels a live text or gutter gesture.
+    // A reflow input cancels a live text or gutter gesture: nothing copies, and the key still
+    // performs its own action.
     app.cancel_gesture();
     // Any keypress is the user doing something else: the settled highlight clears
     app.clear_settled_selection();
@@ -1488,7 +1556,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The search screen: the query edits with the comment editor's caret controls, newlines excluded.
+    // The search screen: the query edits with the comment editor's caret controls, newlines
+    // excluded — every edit re-queries off the frame loop.
     if app.mode == Mode::Search {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
@@ -1508,7 +1577,9 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The find band: keys edit the query, steps move between matches, `esc` closes.
+    // The in-file find band: printable keys edit the query, the steps move the cursor between
+    // matches (`↑`/`↓` are the steps, so the single-line query has no vertical caret), `esc`
+    // closes. Every other key is inert.
     if app.mode == Mode::Find {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
@@ -1521,7 +1592,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // Bound shortcuts dispatch through the keymap; unbound keys fall to the fixed ones.
+    // The bound shortcuts dispatch through the frame's keymap: a character, a chord, or a
+    // named key — the arrows and page keys are default bindings like any other
+    // A key resolving to no action falls through to the fixed keys below
+    // (`tab`, `esc`), which stay hardcoded per context.
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let code = match key.code {
         Char(c) => Some(keymap::KeyCode::Char(c)),
@@ -1535,7 +1609,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     };
     let action = code.and_then(|code| keymap.action_for(crate::keymap::Key { ctrl, alt, code }));
 
-    // The quit question owns the keyboard until it is answered.
+    // The quit question owns the keyboard until it is answered: `quit-discard` quits, `send` and
+    // `copy` deliver as they always do, and every other key, `esc` included, only answers.
     if app.confirming_quit {
         match action {
             Some(K::QuitDiscard) => app.should_quit = true,
@@ -1558,14 +1633,21 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         app.disarm_cross();
     }
 
-    // The agent picker is strictly modal.
+    // The agent picker is strictly modal: `enter` sends, `esc` cancels, the movement bindings and
+    // the literal digits move the highlight, and every other key is inert.
     if app.mode == Mode::Picker {
-        // Only the bare key sends: the send is irreversible.
+        // The send is irreversible and consumes every comment, so only the bare key fires it:
+        // `alt+enter` and `shift+enter` mean "newline, not submit" in the comment editor the
+        // reviewer was in moments ago, and that muscle memory must not send a review. The digits
+        // are literal here, whatever `tab-changes` and its siblings are bound to, so a chord
+        // carrying one must not move the highlight either. `esc` stays deliberately permissive:
+        // cancelling is always safe, and no stray modifier should trap anyone in the modal.
         let bare = key.modifiers.is_empty();
         match (action, key.code) {
             (_, Esc) => app.close_picker(),
             (_, Enter) if bare => app.picker_pick(),
-            // The digits outrank the movement bindings.
+            // The digits outrank the movement bindings, so a reviewer who bound `down` to a digit
+            // still gets the row that digit names.
             (_, Char(c @ '1'..='9')) if bare => {
                 app.picker_goto(c as usize - '1' as usize);
             }
@@ -1576,7 +1658,11 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The base picker: printables filter, the arrows move, `enter` picks, `esc` cancels.
+    // The base picker: every printable narrows the filter — the bound shortcuts included, so
+    // a branch named `qa` is typable — and the filter edits with the comment editor's
+    // controls, like every other text field. `↑`/`↓` (and `ctrl+n`/`p`) and the page keys
+    // move the highlight, so the single-line filter keeps `←`/`→`/`home`/`end` for its
+    // caret, `enter` picks, `esc` cancels
     if app.mode == Mode::BasePick {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let word = alt || ctrl;
@@ -1594,7 +1680,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The commit picker: move, `v` anchors, `enter` picks, `esc` clears or closes.
+    // The commit picker: the movement bindings and the page actions move the highlight, `v`
+    // (the `select` binding) sets the anchor, `enter` picks the run, `esc` clears the anchor
+    // else closes. Every other key is inert, so `q` cannot quit and `/` cannot search from
+    // inside it.
     if app.mode == Mode::CommitPick {
         match (action, key.code) {
             (_, Esc) => app.commit_picker_escape(),
@@ -1642,7 +1731,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The comments list acts through the same bindings.
+    // The comments-list overlay acts through the same bindings and closes on `esc` and the
+    // `comments` binding.
     if app.mode == Mode::List {
         match (action, key.code) {
             (Some(K::Comments), _) | (_, Esc) => app.close_list(),
@@ -1671,7 +1761,10 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
-            // `expand`/`collapse` act on a folder or fold, else scroll sideways.
+            // `expand`/`collapse` act on the collapsible under the cursor — a directory in the
+            // file list, a fold in the diff (expand-only) — and otherwise scroll the diff
+            // sideways (`scroll_h` is a no-op while wrapping, so it only acts when h-scroll is
+            // meaningful).
             K::Expand if app.on_folder() => app.expand_dir(),
             K::Collapse if app.on_folder() => app.collapse_dir(),
             K::Expand if app.on_fold() => {
@@ -1702,7 +1795,11 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::CommitPick => app.open_commit_picker(),
             K::Select => app.toggle_select(),
             K::Comment => app.start_comment(),
-            // `edit`/`delete` act on the comment under the diff cursor.
+            // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
+            // the diff focused — otherwise `delete` would silently drop a comment under an
+            // off-screen cursor. (The comments-list overlay targets the highlighted row instead.)
+            // `edit` runs from either pane: the read pane's comment or line, the navigator's
+            // selected file.
             K::Edit => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
             K::Send => app.send_to_agent(),
@@ -1723,7 +1820,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     match key.code {
         Tab => app.toggle_focus(),
-        // `esc` peels one layer.
+        // `esc` peels one layer: a live selection, then an armed crossing, then the footer
+        // expansion (the `esc` ladder).
         Esc => app.escape(),
         _ => {}
     }
@@ -1733,7 +1831,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 /// Cancel pointer state whose coordinates belonged to the old terminal geometry.
 fn handle_resize(app: &mut App) {
     app.cancel_divider_drag();
-    // A resize reflows wrapping under an active gesture.
+    // A resize reflows wrapping under an active gesture, so it cancels like a keypress — and
+    // re-wraps the display rows a settled span is anchored to, so that clears too
     app.cancel_gesture();
     app.clear_settled_selection();
     app.hover = None;
@@ -1774,13 +1873,15 @@ fn handle_text_down(app: &mut App, m: MouseEvent, area: Rect) -> bool {
     false
 }
 
-/// Extend the active text drag to the pointer.
+/// Extend the active text drag to the pointer: scroll while the pointer sits past the pane's
+/// content, then move the extent.
 fn text_drag_extend(app: &mut App, m: MouseEvent, area: Rect) {
     text_drag_edge_scroll(app, m, area);
     text_drag_set_extent(app, m, area);
 }
 
-/// The vertical scroll for a drag pointer against `inner`'s rows.
+/// The vertical scroll for a drag pointer against `inner`'s rows: past them — on the border or
+/// beyond — scrolls, so the outermost content rows stay selectable without scrolling
 fn edge_delta(row: u16, inner: Rect) -> isize {
     if row < inner.y {
         return -1;
@@ -1788,7 +1889,10 @@ fn edge_delta(row: u16, inner: Rect) -> isize {
     isize::from(row >= inner.y + inner.height)
 }
 
-/// Whether the pointer sits on the pane's edge, where a lost release can follow.
+/// Whether the pointer's cell sits on reviewr's own pane edge — the position half of the
+/// exit signature. herdr delivers mouse events from anywhere
+/// inside the pane, so a release anywhere further in would have arrived; only the outermost
+/// cells can precede a lost release. Public for the gesture tests, like [`handle_mouse`].
 #[must_use]
 pub fn pointer_at_pane_edge(m: MouseEvent, area: Rect) -> bool {
     m.row <= area.y
@@ -1803,7 +1907,8 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
     let Some(drag) = app.text_drag() else { return };
     match drag.surface {
         Surface::Read => read_edge_scroll(app, m, area, true),
-        // Card text ignores h-scroll, so a card drag scrolls vertically only.
+        // Card text ignores h-scroll, so a card drag scrolls vertically only — the gesture never
+        // moves a surface it is not on (TS-ONE-SURFACE).
         Surface::Card { .. } => read_edge_scroll(app, m, area, false),
         Surface::Files => {
             let inner = ui::files_inner_rect(area, app);
@@ -1813,7 +1918,8 @@ fn text_drag_edge_scroll(app: &mut App, m: MouseEvent, area: Rect) {
             }
         }
         Surface::Painted => {
-            // The painted rect, not the pane's inner rect.
+            // The painted rect, not the pane's inner rect: a `PR` notice sits above the content,
+            // and its rows must scroll a drag, not dead-zone it.
             let Some(rect) = ui::painted_sel(app, area).map(|s| s.rect) else { return };
             let delta = edge_delta(m.row, rect);
             if rect.height > 0 && delta != 0 {
@@ -1858,7 +1964,9 @@ fn text_drag_set_extent(app: &mut App, m: MouseEvent, area: Rect) {
     }
 }
 
-/// Scroll the read pane while a drag holds the pointer past its content.
+/// Scroll the read pane while a drag holds the pointer past its content rows (the find band
+/// counts as chrome, not content): rows on the border or beyond, and with `horizontal` set
+/// and wrap off the same for columns.
 fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) {
     let content = ui::read_content_rect(area, app);
     if content.height == 0 {
@@ -1875,7 +1983,9 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
         if m.column < content.x {
             app.h_scroll = app.h_scroll.saturating_sub(2);
         } else if m.column >= content.x + content.width {
-            // Capped at the widest visible row, never pulled back.
+            // Capped at the widest visible row's last column, so a held border drag cannot
+            // strand the view past all content — and never pulled back, so a keyboard
+            // scroll already past the cap keeps its place.
             let cap = ui::widest_visible_row(app, area).saturating_sub(1);
             if app.h_scroll < cap {
                 app.h_scroll = (app.h_scroll + 2).min(cap);
@@ -1884,7 +1994,11 @@ fn read_edge_scroll(app: &mut App, m: MouseEvent, area: Rect, horizontal: bool) 
     }
 }
 
-/// Finish a text drag: a release on the anchor clicks, anything else copies.
+/// Finish a text drag at its release: a release whose point never left the anchor's
+/// performs the click, or the multi-click's copy — a navigator row, the word under the
+/// cell, or the triple's whole line; anything else copies the selection. `clicks_act` is
+/// false while composing, whose pane clicks are inert — the multi-click copies still fire
+/// there, being selection copies, not pane clicks.
 fn finish_text_drag(
     app: &mut App,
     m: MouseEvent,
@@ -1895,25 +2009,31 @@ fn finish_text_drag(
 ) -> Result<()> {
     use crate::selection::{Gesture, Surface};
     let Gesture::Text { count, .. } = app.gesture else { return Ok(()) };
-    // A release on the anchor's point is the click; anything else copies the selection.
+    // One predicate decides the whole release: the extent moves to the release point, and a
+    // release whose point never left the anchor's is the click — which grants the slop the
+    // spec names for free (a navigator row, a wide character's cells, a tab's expansion all
+    // map many cells onto one point). Anything else is a drag with a selection, and copies
     text_drag_set_extent(app, m, area);
     let drag = app.text_drag().expect("matched above");
     if drag.anchor == drag.extent {
         app.gesture = Gesture::None;
         match drag.surface {
-            // A navigator double copies the row's path or text, and a triple repeats it.
+            // A navigator double copies the row's path or text, and a triple repeats it; an empty
+            // row falls back to the click, so the gesture is never a silent no-op.
             Surface::Files | Surface::PrNav if count >= 2 => {
                 if !multi_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
             }
-            // A double on a character surface copies the word under the cell.
+            // A double on a character surface copies the word under the cell; whitespace and
+            // wordless cells act as the click.
             Surface::Read | Surface::Painted | Surface::Card { .. } if count == 2 => {
                 if !word_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
                 }
             }
-            // A triple on a character surface copies the row's whole source line.
+            // A triple on a character surface copies the row's whole source line; an empty line
+            // acts as the click.
             Surface::Read | Surface::Painted | Surface::Card { .. } if count >= 3 => {
                 if !line_click_copy(app, area, drag, target) && clicks_act {
                     perform_click(app, m, area, heights, drag)?;
@@ -1930,7 +2050,8 @@ fn finish_text_drag(
     Ok(())
 }
 
-/// The navigator double-click copy, fired at the release.
+/// The navigator double-click copy, fired at the release: a file row's repo-relative path, a `PR`
+/// row's full text.
 fn multi_click_copy(
     app: &mut App,
     area: Rect,
@@ -1951,7 +2072,8 @@ fn multi_click_copy(
     }
 }
 
-/// The word double-click copy on the character surfaces, fired at the release.
+/// The word double-click copy on the character surfaces, fired at the release: the word under the
+/// cell copies and its highlight settles.
 fn word_click_copy(
     app: &mut App,
     area: Rect,
@@ -1980,7 +2102,8 @@ fn word_click_copy(
     true
 }
 
-/// The line triple-click copy on the character surfaces, fired at the release.
+/// The line triple-click copy on the character surfaces, fired at the release: the row's whole
+/// source line copies and its highlight settles.
 fn line_click_copy(
     app: &mut App,
     area: Rect,
@@ -2015,7 +2138,10 @@ pub fn drag_text(app: &App, area: Rect) -> Option<String> {
     surface_text(app, area, drag.surface, a, b)
 }
 
-/// Complete the live gesture: a visible selection copies, anything else dissolves.
+/// Complete the live gesture — the drag's own off-cell release, the release proofs, the
+/// exit deadline, and a config layout or theme change: a drag with a visible selection copies it to `target`
+/// (`TS-NO-SILENT-LOSS`), a press that never moved and a gutter gesture dissolve with
+/// nothing. Public for the gesture tests.
 pub fn complete_gesture(app: &mut App, area: Rect, target: &dyn crate::export::ExportTarget) {
     if let Some(drag) = app.text_drag()
         && drag.anchor != drag.extent
@@ -2028,7 +2154,8 @@ pub fn complete_gesture(app: &mut App, area: Rect, target: &dyn crate::export::E
     app.cancel_gesture();
 }
 
-/// The copied text for a span on `surface`.
+/// The copied text for a span on `surface` — the one extractor behind the drag release and the
+/// multi-click copies, so a new surface cannot be extractable in one and forgotten in the other.
 fn surface_text(
     app: &App,
     area: Rect,
@@ -2068,7 +2195,8 @@ fn perform_click(
 ) -> Result<()> {
     use crate::selection::Surface;
     match drag.surface {
-        // The navigators act on the drag's already-clamped row, not the raw release cell.
+        // The navigators act on the drag's already-clamped row, not the raw release cell: the row
+        // slop that classified the release as a click also delivers it
         Surface::Files => app.select_file(drag.extent.row)?,
         Surface::PrNav => {
             app.focus = Focus::Files;
@@ -2129,25 +2257,35 @@ fn dispatch_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     app.hover = Some((m.column, m.row));
-    // A click or wheel answers the quit question and nothing else.
+    // A click or a wheel answers the quit question and does nothing else, like a key that is not
+    // one of its answers.
     if app.confirming_quit && answers_question(m.kind) {
         app.confirming_quit = false;
         return Ok(());
     }
-    // Motion or a fresh press proves a lost release: complete the old gesture first.
+    // Pointer motion with no button held, or a fresh mouse-down, proves an active gesture's
+    // release was lost — herdr routes mouse by pointer position, so a release over another
+    // pane never arrives here. The proof completes the old gesture (a visible selection
+    // copies, `TS-NO-SILENT-LOSS`), then the event acts as any event. A motionless held drag
+    // feeds no events at all and stays alive. One guard for every dispatch path below
     if app.gesture_active() && matches!(m.kind, MouseEventKind::Moved | MouseEventKind::Down(_)) {
         complete_gesture(app, area, target);
     }
-    // The next mouse-down is the user doing something else.
+    // The next mouse-down is the user doing something else: the settled highlight clears, after the
+    // proof above so a down-completed gesture never leaves one behind either
     if matches!(m.kind, MouseEventKind::Down(_)) {
         app.clear_settled_selection();
     }
-    // The search screen's mouse: chips, picks, wheel, and its own divider.
+    // On the search screen: chips flip, a click picks (a second click on the picked row
+    // opens), the wheel moves the pick over results and scrolls the preview, and the
+    // divider drags search's own share. A cancelled divider
+    // gesture still owns its remaining drag and mouse-up events like in every modal.
     if app.mode == Mode::Search {
         use ui::SearchTarget as T;
         match m.kind {
             MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
-                // Map the pointer's row to the share, as `search_layout` divides it.
+                // The share maps the pointer's row into the band-to-footer span the two panes
+                // divide, matching `search_layout`'s geometry.
                 let l = ui::search_layout(ui::body_rect(area, app), app);
                 let axis_len = l.results.height + l.preview.height;
                 let offset = m.row.saturating_sub(l.results.y);
@@ -2185,9 +2323,11 @@ fn dispatch_mouse(
         return Ok(());
     }
 
-    // A cancelled divider gesture still owns its remaining events.
+    // A modal captures new mouse gestures, but a divider gesture cancelled by the key that opened
+    // it still owns its remaining drag and mouse-up events.
     if app.mode.is_modal() {
-        // Text selection works under the comment editor; its clicks stay inert.
+        // Text selection stays available while the comment editor is open, selecting from the
+        // frozen view under it; its clicks stay inert like the rest of the modal's pane
         if app.composing() {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) if !app.divider_drag_captured() => {
@@ -2245,7 +2385,8 @@ fn dispatch_mouse(
         }
         return Ok(());
     }
-    // A mouse gesture is one of the "any other input" that drops an armed crossing.
+    // A mouse gesture is one of the "any other input" that drops an armed crossing: the reviewer
+    // who reaches for the mouse has left the file's edge behind.
     if !matches!(m.kind, MouseEventKind::Moved) {
         app.disarm_cross();
     }
@@ -2274,7 +2415,8 @@ fn dispatch_mouse(
         _ => {}
     }
 
-    // The PR tab's mouse: tabs, the open button, rows, selection, wheel.
+    // The read-only PR tab: click a tab or the open button, click a row to read it, drag over text
+    // to select and copy it, and wheel either pane without moving the selection.
     if app.tab == crate::app::Tab::Pr {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -2287,7 +2429,8 @@ fn dispatch_mouse(
                 } else if handle_text_down(app, m, area) {
                     // A pending click or text drag armed.
                 } else if ui::in_files_pane(area, app, m.column, m.row) {
-                    // Only blank space below the navigator rows reaches here.
+                    // Only blank space below the navigator rows reaches here: the click focuses the
+                    // pane, selecting nothing.
                     app.focus = Focus::Files;
                 } else if ui::in_diff_pane(area, app, m.column, m.row) {
                     app.focus = Focus::Diff;
@@ -2327,12 +2470,14 @@ fn dispatch_mouse(
                 match hit {
                     ui::HeaderHit::Tab(tab) => app.set_tab(tab)?,
                     ui::HeaderHit::Scope => app.set_scope(app.next_chip_scope())?,
-                    // Inert when the picker cannot open here.
+                    // Inert when the picker cannot open here — with a `--base` flag the label names
+                    // the base without offering a choice.
                     ui::HeaderHit::Base => app.open_base_picker(),
                     ui::HeaderHit::Pick => app.open_commit_picker(),
                 }
             } else if let Some(row) = ui::gutter_row_at(area, app, m.column, m.row) {
-                // The gutter owns mouse commenting.
+                // The gutter owns mouse commenting: click a line or drag a range, and the composer
+                // opens on release.
                 app.start_gutter_drag(row);
             } else if handle_text_down(app, m, area) {
                 // A pending click or text drag armed.
@@ -2388,7 +2533,8 @@ fn dispatch_mouse(
                 text_drag_set_extent(app, m, area);
             }
         }
-        // The wheel scrolls the viewport of whichever pane it is over.
+        // The wheel scrolls the viewport of whichever pane it is over — never the cursor, so a
+        // comment is never anchored to a wheeled-past line.
         MouseEventKind::ScrollDown if ui::in_files_pane(area, app, m.column, m.row) => {
             app.wheel_files(3);
         }
@@ -2502,7 +2648,8 @@ mod refresh_tests {
 
         handle_resize(&mut app);
 
-        // The reflow row of the gesture end table.
+        // The reflow row of the gesture end table: nothing copies, the input acts — and the settled
+        // span clears, since the resize re-wraps the rows it anchors to
         assert!(!app.gesture_active(), "a resize ends the gesture");
         assert_eq!(app.status, "", "a resize-cancelled drag copies nothing");
         assert!(app.settled_selection().is_none(), "a resize clears the settled highlight");
@@ -2520,12 +2667,14 @@ mod refresh_tests {
         };
         pr.active_fetch = Some(in_flight(generation));
 
-        // Tab entry while the startup fetch runs.
+        // Tab entry while the startup fetch runs: the generation holds, so that fetch's completion
+        // still paints instead of being discarded and repeated.
         pr.request_refresh(crate::app::RefreshKind::Ambient);
         assert_eq!(pr.refresh.generation, generation, "the ambient trigger joins");
         assert!(pr.refresh.take_fetch().is_none(), "no fetch starts while the ride is on");
 
-        // The ridden completion paints, then exactly one trailing fetch follows it.
+        // The ridden completion paints, then exactly one trailing fetch follows it, so a remote
+        // change the ridden read predates is not lost to the fallback timer.
         pr.active_fetch = None;
         pr.refresh.completed(
             TaggedPr { generation, config_epoch: 0, input: input("head"), view: no_pr() },
@@ -2538,7 +2687,8 @@ mod refresh_tests {
         assert!(pr.refresh.take_fetch().is_none(), "the trailing fetch is one, not a loop");
         pr.active_fetch = Some(in_flight(trailing_generation));
 
-        // The user's refresh key supersedes.
+        // The user's refresh key supersedes: the in-flight fetch cancels, a fresh generation and
+        // fetch replace it.
         let generation = trailing_generation;
         pr.request_refresh(crate::app::RefreshKind::Forced);
         assert_ne!(pr.refresh.generation, generation);
@@ -2546,7 +2696,8 @@ mod refresh_tests {
         assert!(cancelled.load(std::sync::atomic::Ordering::Acquire), "the old fetch cancels");
         assert!(pr.refresh.take_fetch().is_some(), "the commanded refresh starts fresh work");
 
-        // A fetch past the hang bound no longer blocks even an ambient trigger.
+        // A fetch past the hang bound no longer blocks even an ambient trigger: it is abandoned, so
+        // a reader that died without a completion cannot wedge the tab.
         let generation = pr.refresh.generation;
         let mut hung = in_flight(generation);
         hung.started = Instant::now().checked_sub(FETCH_HANG).unwrap();
@@ -2765,7 +2916,8 @@ mod refresh_tests {
             true,
         );
 
-        // A head-only change supersedes the completed old snapshot without blanking.
+        // A head-only change supersedes the completed old snapshot without blanking: the effect is
+        // Refetch, the stale completion is discarded, and the new fetch is queued.
         assert!(matches!(refresh.observed(b.clone(), 0), Some(PrEffect::Refetch)));
         assert_eq!(refresh.take_fetch().map(|(_, input)| input), Some(b.clone()));
         assert!(refresh.observed(b, 0).is_none(), "the old completion never applies");
@@ -2846,7 +2998,9 @@ mod refresh_tests {
 
     #[test]
     fn a_failed_hold_ancestry_read_is_a_git_error_never_proof_of_absence() {
-        // A transient Git failure surfaces as retryable, never as "not contained".
+        // A transient Git failure during the hold's containment read must surface as the
+        // retryable Git error, which preserves the same-target snapshot — never read as
+        // "not contained", which would blank it.
         use super::hold_gate;
         use crate::forge::PrView;
         let fail = |_: &str, _: &str| Err(crate::git::GitFail("rev-list failed".to_string()));
@@ -2854,7 +3008,8 @@ mod refresh_tests {
             hold_gate(PrView::NoPr, Some("oid"), Some("pin"), fail),
             PrView::GitError(message) if message.contains("rev-list failed")
         ));
-        // The read runs only when a NoPr could promote.
+        // The read runs only when a NoPr could promote: a resolved view, or nothing held, never
+        // pays it and never fails on it.
         assert!(matches!(hold_gate(PrView::NoPr, None, Some("pin"), fail), PrView::NoPr));
         assert!(matches!(
             hold_gate(PrView::Detached, Some("oid"), Some("pin"), fail),
@@ -2864,7 +3019,8 @@ mod refresh_tests {
 
     #[test]
     fn a_branch_switch_clears_but_a_transient_detach_never_does() {
-        // The checked-out branch is identity.
+        // The checked-out branch is identity: a new branch is a new PR story A detach in between is
+        // freshness.
         let mut on_a = input("head");
         on_a.local.branch = Some("branch-a".to_string());
         let mut on_b = input("head2");
@@ -2887,7 +3043,8 @@ mod refresh_tests {
 
     #[test]
     fn local_state_churn_keeps_the_snapshot_and_refetches_behind_it() {
-        // The locally derived state — pins, published heads.
+        // The locally derived state — pins, published heads — moves on a mere commit or push, so it
+        // is freshness, not identity: the snapshot stays painted while the replacement fetch runs.
         let original = input("head");
         let mut renamed = input("head");
         renamed.local.heads.push(crate::git::Head {
@@ -3001,7 +3158,9 @@ mod refresh_tests {
         refresh.observed(a, 0);
         let _ = refresh.take_fetch().unwrap();
 
-        // A trailing fetch survives a failed probe as a plain request.
+        // An ambient trigger rode the in-flight fetch, then its verifying probe failed with
+        // nothing else pending: the trailing fetch survives as a plain request instead of
+        // waiting on the fallback timer.
         refresh.trailing = true;
         refresh.probe_failed(false);
         assert!(refresh.take_fetch().is_some(), "the trailing fetch survives the failed probe");
@@ -3242,7 +3401,8 @@ mod refresh_tests {
         let scoped = plugin_config_in(dir.path()).unwrap();
         assert!(!super::config_ends_gesture(&previous, Some(&scoped)));
 
-        // A theme or layout change reflows the frame, and a failed observation blocks the body.
+        // A theme or layout change reflows the frame, and a failed observation blocks the body:
+        // each ends the gesture with its copy.
         std::fs::write(&path, "theme = \"nord\"\n").unwrap();
         let themed = plugin_config_in(dir.path()).unwrap();
         assert!(super::config_ends_gesture(&previous, Some(&themed)));
@@ -3291,7 +3451,8 @@ mod refresh_tests {
         );
         assert!(app.gesture_active(), "an unchanged config leaves the gesture alive");
 
-        // A theme change ends the gesture before the new frame applies.
+        // The end table's config row: a theme change ends the gesture at the boundary, before the
+        // new frame applies.
         std::fs::write(&path, "theme = \"nord\"\n").unwrap();
         super::reconcile_plugin_config(
             &mut app,

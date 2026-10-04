@@ -16,19 +16,22 @@ use crate::theme::SyntaxChoice;
 /// The default text color when a theme carries none, or its syntax theme fails to load.
 const DEFAULT_FG: Rgb = (0xcd, 0xd6, 0xf4);
 
-/// The broad syntax set, deserialized once per process.
+/// The broad bat/two-face syntax set, built once per process (it is expensive to deserialize) and
+/// shared across every `Highlighter`.
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)
 }
 
-/// The two-face embedded theme set, deserialized once and shared.
+/// The two-face embedded theme set, deserialized once and shared — like [`syntaxes`], so a theme
+/// switch clones one theme out of the cached set instead of rebuilding the whole dump.
 fn embedded_themes() -> &'static two_face::theme::EmbeddedLazyThemeSet {
     static THEMES: OnceLock<two_face::theme::EmbeddedLazyThemeSet> = OnceLock::new();
     THEMES.get_or_init(two_face::theme::extra)
 }
 
-/// Holds the active syntax theme (absent when it failed to load).
+/// Holds the active syntax theme (absent when it failed to load); highlights file content into
+/// spans against the shared syntax set.
 pub struct Highlighter {
     theme: Option<Theme>,
     default_fg: Rgb,
@@ -41,7 +44,8 @@ impl fmt::Debug for Highlighter {
 }
 
 impl Highlighter {
-    /// Build from a theme's paired syntax source.
+    /// Build from a theme's paired syntax source: a bundled `.tmTheme` (parsed from vendored
+    /// bytes), or a theme from the `two-face` embedded set.
     pub fn new(syntax: SyntaxChoice) -> Self {
         let theme = match syntax {
             SyntaxChoice::Bundled(bytes) => {

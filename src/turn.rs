@@ -12,7 +12,8 @@ pub enum Status {
 }
 
 impl Status {
-    /// A resting status the agent waits at between turns.
+    /// A resting status the agent waits at between turns — a new `working` after one of these is a
+    /// fresh instruction.
     fn is_resting(self) -> bool {
         matches!(self, Status::Idle | Status::Done)
     }
@@ -62,7 +63,8 @@ pub struct TurnTransition {
     pub ended: bool,
 }
 
-/// The turn baseline lifecycle: last status, pending candidate, live baseline.
+/// The turn baseline lifecycle: the previous status, a candidate snapshot awaiting promotion, and
+/// the live baseline tree the `last-turn` diff reads.
 #[derive(Default, Debug)]
 pub struct TurnTracker {
     /// Whether the previous sample rested.
@@ -108,7 +110,8 @@ impl TurnTracker {
         transition
     }
 
-    /// Store a turn start's snapshot as the pending candidate.
+    /// Store the worktree snapshot captured at a turn start as the pending candidate, replacing any
+    /// earlier unpromoted candidate (a question-only turn's).
     pub fn set_candidate(&mut self, sha: String) {
         self.candidate = Some(sha);
     }
@@ -128,20 +131,23 @@ mod tests {
 
     #[test]
     fn from_wire_reads_herdrs_four_spellings_and_folds_the_rest_to_unknown() {
-        // herdr's spellings, pinned literally.
+        // The spellings are herdr's, so they are pinned literally rather than derived from anything
+        // reviewr owns.
         assert_eq!(Status::from_wire("idle"), Status::Idle);
         assert_eq!(Status::from_wire("working"), Status::Working);
         assert_eq!(Status::from_wire("blocked"), Status::Blocked);
         assert_eq!(Status::from_wire("done"), Status::Done);
         assert_eq!(Status::from_wire("unknown"), Status::Unknown);
-        // A state herdr adds is unknown to tracking, and unknown is never resting.
+        // A state herdr adds is unknown to tracking, and unknown is never resting, so the next
+        // `working` sample resumes the turn in flight instead of starting a new one.
         assert_eq!(Status::from_wire("compacting"), Status::Unknown);
         assert!(!Status::from_wire("compacting").is_resting());
     }
 
     #[test]
     fn an_empty_worktree_rests_so_its_first_working_agent_starts_a_turn() {
-        // A fresh pane tracks the next turn it sees.
+        // The fold that makes a freshly opened reviewr pane track the next turn it sees, rather
+        // than waiting for an agent that was already there.
         assert_eq!(WorktreeState::fold([]), WorktreeState::Resting);
         let mut t = TurnTracker::default();
         t.observe(WorktreeState::fold([]));
@@ -150,7 +156,8 @@ mod tests {
 
     #[test]
     fn one_working_agent_makes_the_whole_worktree_work() {
-        // Any agent still editing means the worktree is still being worked on.
+        // Any agent still editing means the worktree is still being worked on, so `working` wins
+        // over every resting or held peer (HH-TURN-PER-WORKTREE).
         assert_eq!(WorktreeState::fold([Status::Idle, Status::Working]), WorktreeState::Working);
         assert_eq!(WorktreeState::fold([Status::Blocked, Status::Working]), WorktreeState::Working);
         assert_eq!(WorktreeState::fold([Status::Idle, Status::Done]), WorktreeState::Resting);

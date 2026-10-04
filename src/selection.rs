@@ -10,7 +10,8 @@ pub enum Surface {
     Read,
     /// The `PR` read pane's painted lines: character-precise painted text.
     Painted,
-    /// A spliced comment card in the read pane.
+    /// A spliced comment card in the read pane: character-precise card text, confined to the card
+    /// it started on (`TS-ONE-SURFACE`).
     Card { comment: usize },
     /// The file navigator: row-granular, a row copies its repo-relative path.
     Files,
@@ -42,7 +43,8 @@ pub enum Gesture {
     /// A text gesture over a selectable surface.
     Text {
         drag: TextDrag,
-        /// The mouse-down's multi-click count.
+        /// The mouse-down's multi-click count: 1 = single, 2 = double, 3 = triple, and further
+        /// clicks within the window stay 3.
         count: u8,
     },
     /// A gutter comment gesture: line selection by drag, the composer on release
@@ -61,7 +63,9 @@ impl TextDrag {
     }
 }
 
-/// A `Read` selection's clipboard text: each spanned source line once.
+/// The clipboard text for a `Read`-surface selection over `rows`: each spanned content row
+/// contributes its source line once (a wrapped line is one row), the first and last rows cut
+/// at the endpoints, folds contribute nothing.
 #[must_use]
 pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
@@ -78,7 +82,8 @@ pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
     out.join("\n")
 }
 
-/// The clipboard text for a selection over prebuilt line texts (painted surfaces and cards).
+/// The clipboard text for a selection over prebuilt line texts (painted surfaces and cards): whole
+/// lines between the endpoints, the first and last cut at them.
 #[must_use]
 pub fn lines_text(lines: &[String], a: Point, b: Point) -> String {
     let hi_row = b.row.min(lines.len().saturating_sub(1));
@@ -91,7 +96,9 @@ pub fn lines_text(lines: &[String], a: Point, b: Point) -> String {
     out.join("\n")
 }
 
-/// A `Files` selection's clipboard text: each spanned row's path.
+/// The clipboard text for a `Files`-surface selection: each spanned row contributes its
+/// full repo-relative path, directories included, as the tree nests it (a directory row its
+/// directory path), one per line, without the tree glyphs and annotations
 #[must_use]
 pub fn files_text(
     rows: &[file_list::Row],
@@ -110,7 +117,8 @@ pub fn files_text(
         .join("\n")
 }
 
-/// The chars of `text` from `from` through `to`, clamped.
+/// The chars of `text` from `from` up to and including `to` (to the end when `to` is `None`),
+/// clamped to the text.
 fn slice_chars(text: &str, from: usize, to: Option<usize>) -> String {
     let iter = text.chars().skip(from);
     match to {
@@ -119,7 +127,8 @@ fn slice_chars(text: &str, from: usize, to: Option<usize>) -> String {
     }
 }
 
-/// The word at char `chr` of `text`.
+/// The word at char `chr` of `text`: the inclusive char range of the unbroken run of letters,
+/// digits, and underscores covering it.
 #[must_use]
 pub fn token_at(text: &str, chr: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
@@ -254,7 +263,8 @@ mod tests {
                 ignored: false,
             },
         ];
-        // A directory row contributes its own path.
+        // A directory row contributes its own path; a file row its entry's full repo-relative path,
+        // never the displayed basename.
         assert_eq!(files_text(&rows, &entries, 0, 1), "sub\nsub/two.rs");
         assert_eq!(files_text(&rows, &entries, 1, 1), "sub/two.rs");
     }
