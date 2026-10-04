@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Swap a locally built herdr-reviewr, and this checkout's manifest, into the GitHub-installed
-# plugin for QA. The full procedure and every known failure mode: docs/qa-install.md.
+# plugin for QA. `--restore` puts back the release pair the first install backed up. The full
+# procedure and every known failure mode: docs/qa-install.md.
+#
+#   qa-install.sh [--restore]
 set -euo pipefail
 
 NEW="target/release/herdr-reviewr"
 MANIFEST="herdr-plugin.toml"
-[ -f "$NEW" ] || { echo "qa-install: build first (cargo build --release)" >&2; exit 1; }
 
 # Locate the managed plugin install. Exactly one is expected.
 shopt -s nullglob
@@ -18,6 +20,24 @@ shopt -u nullglob
 }
 ROOT="${roots[0]}"
 BIN="$ROOT/bin/herdr-reviewr"
+
+# herdr rereads the installed manifest on every plugin call, so it is renamed into place and
+# herdr never reads a half-written file.
+place_manifest() {
+  cp "$1" "$ROOT/$MANIFEST.staging"
+  mv "$ROOT/$MANIFEST.staging" "$ROOT/$MANIFEST"
+  echo "installed: $ROOT/$MANIFEST"
+}
+
+if [ "${1:-}" = "--restore" ]; then
+  "$(dirname "$0")/swap-binary.sh" "$BIN.release-backup" "$BIN"
+  echo "installed: $BIN"
+  [ ! -f "$ROOT/$MANIFEST.release-backup" ] || place_manifest "$ROOT/$MANIFEST.release-backup"
+  echo "next: close and reopen each reviewr pane with the toggle keybinding inside herdr."
+  exit 0
+fi
+
+[ -f "$NEW" ] || { echo "qa-install: build first (cargo build --release)" >&2; exit 1; }
 
 # herdr rereads the installed manifest on every plugin call, and a manifest asking for a newer
 # herdr than the one running marks the whole plugin unavailable: no pane, no action. Refuse
@@ -46,11 +66,8 @@ fi
 echo "installed: $BIN"
 
 # The manifest names the commands herdr runs for the pane and every action, so a build that
-# changes them is only exercised with its own manifest. Renamed into place, so herdr never
-# reads a half-written file.
-cp "$MANIFEST" "$ROOT/$MANIFEST.staging"
-mv "$ROOT/$MANIFEST.staging" "$ROOT/$MANIFEST"
-echo "installed: $ROOT/$MANIFEST"
+# changes them is only exercised with its own manifest.
+place_manifest "$MANIFEST"
 
 # Running panes keep executing the old binary image. Only a pane restart picks this up.
 live=$(pgrep -f "$BIN" || true)
