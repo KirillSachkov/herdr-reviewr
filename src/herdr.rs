@@ -63,12 +63,22 @@ pub enum SendTarget {
 /// The plugin's id, as herdr knows it: its config dir, its state dir, its pane entrypoint.
 pub(crate) const PLUGIN_ID: &str = "persiyanov.reviewr";
 
+/// A herdr context variable; herdr leaves one unset or empty alike.
+pub(crate) fn var(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+/// The plugin id herdr runs this as, else the published one.
+pub(crate) fn plugin_id() -> String {
+    var("HERDR_PLUGIN_ID").unwrap_or_else(|| PLUGIN_ID.to_owned())
+}
+
 /// The label reviewr stamps on its pane and tab; display only, never identity.
 pub(crate) const LABEL: &str = "reviewr";
 
 /// The herdr binary herdr names, else `herdr` on `PATH`. An empty value names nothing.
 fn herdr_bin() -> String {
-    env::var("HERDR_BIN_PATH").ok().filter(|bin| !bin.is_empty()).unwrap_or_else(|| "herdr".into())
+    var("HERDR_BIN_PATH").unwrap_or_else(|| "herdr".into())
 }
 
 /// How a herdr call failed, classified so a caller can tell a benign race from a real failure.
@@ -357,7 +367,7 @@ fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String>> {
 
 /// Stamp our pane's `reviewr` label unless the user named it; best effort, never waited on.
 pub fn label_pane() {
-    let (Ok(ws), Ok(pane)) = (env::var("HERDR_WORKSPACE_ID"), env::var("HERDR_PANE_ID")) else {
+    let (Some(ws), Some(pane)) = (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID")) else {
         return;
     };
     thread::spawn(move || {
@@ -370,7 +380,7 @@ pub fn label_pane() {
 
 /// Clear our `reviewr` label on exit, waiting at most a bound.
 pub fn clear_pane_label() {
-    let (Ok(ws), Ok(pane)) = (env::var("HERDR_WORKSPACE_ID"), env::var("HERDR_PANE_ID")) else {
+    let (Some(ws), Some(pane)) = (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID")) else {
         return;
     };
     let (tx, rx) = mpsc::channel();
@@ -397,7 +407,7 @@ pub fn plugin_config_dir() -> Option<String> {
 
 /// [`plugin_config_dir`], calling `on_slow` once past [`SIGNAL_DELAY`].
 pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
-    let rx = herdr_on_thread(vec!["plugin".into(), "config-dir".into(), PLUGIN_ID.into()]);
+    let rx = herdr_on_thread(vec!["plugin".into(), "config-dir".into(), plugin_id()]);
     let answer = if let Ok(answer) = rx.recv_timeout(SIGNAL_DELAY) {
         answer
     } else {
@@ -415,7 +425,7 @@ pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
 
 /// The (workspace, pane) id pair identifying this reviewr pane in the herdr environment.
 fn agent_env() -> (Option<String>, Option<String>) {
-    (env::var("HERDR_WORKSPACE_ID").ok(), env::var("HERDR_PANE_ID").ok())
+    (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID"))
 }
 
 /// The agents herdr lists: the one `agent list` call.

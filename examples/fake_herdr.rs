@@ -1,5 +1,9 @@
 //! A fake herdr CLI: serves the fixtures in `FAKE_HERDR_DIR` and logs each call to `herdr.log`.
 
+#[path = "../tests/common/fixture.rs"]
+mod fixture;
+
+use fixture::fixture;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -100,11 +104,6 @@ fn process_info(dir: &Path, pane: &str, line: &str) -> String {
     format!(
         r#"{{"result":{{"process_info":{{"foreground_process_group_id":7,"foreground_processes":[{process}],"pane_id":"{pane}","shell_pid":1}}}}}}"#
     )
-}
-
-/// The fixture file `<kind>-<pane><suffix>`, with the pane id's `:` spelled `_`.
-fn fixture(dir: &Path, kind: &str, pane: &str, suffix: &str) -> PathBuf {
-    dir.join(format!("{kind}-{}{suffix}", pane.replace(':', "_")))
 }
 
 fn read(path: &Path) -> Option<String> {

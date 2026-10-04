@@ -1,6 +1,10 @@
 //! A real git repo for integration tests, and the fake herdr; each binary uses a subset.
 #![allow(dead_code, unreachable_pub)]
 
+mod fixture;
+
+#[allow(unused_imports)]
+pub use fixture::fixture;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;

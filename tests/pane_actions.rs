@@ -7,16 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{fake_herdr, herdr_calls, herdr_error};
+use common::{fake_herdr, fixture, herdr_calls, herdr_error};
 use serde_json::{Value, json};
 
 fn reviewr_bin() -> &'static str {
     env!("CARGO_BIN_EXE_herdr-reviewr")
-}
-
-/// The fixture file for `pane`, `:` spelled `_` as Windows requires.
-fn fixture(dir: &Path, kind: &str, pane: &str, suffix: &str) -> PathBuf {
-    dir.join(format!("{kind}-{}{suffix}", pane.replace(':', "_")))
 }
 
 /// One `pane process-info` answer for `pane` holding `processes`.
@@ -54,10 +49,6 @@ fn pane_with_cwd(dir: &Path, pane: &str, foreground_cwd: &Path) {
 fn reset(dir: &Path) {
     let _ = fs::remove_file(dir.join("herdr.log"));
     let _ = fs::remove_file(dir.join("opened"));
-}
-
-fn herdr_called(dir: &Path) -> bool {
-    dir.join("herdr.log").exists()
 }
 
 /// A fresh git repo at `dir/name`.
@@ -181,7 +172,7 @@ fn invalid_config_refuses_manual_action_before_herdr_side_effects() {
         assert!(stderr(&output).contains("config.toml"), "{mode}: {}", stderr(&output));
         assert!(stderr(&output).contains("`theme`"), "{mode}: {}", stderr(&output));
     }
-    assert!(!herdr_called(dir.path()), "herdr was invoked before validation");
+    assert!(herdr_calls(dir.path()).is_empty(), "herdr was invoked before validation");
 }
 
 #[test]
@@ -193,7 +184,7 @@ fn invalid_config_refuses_event_loudly_before_herdr_side_effects() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("`auto_open`"), "{}", stderr(&output));
-    assert!(!herdr_called(dir.path()), "herdr was invoked before validation");
+    assert!(herdr_calls(dir.path()).is_empty(), "herdr was invoked before validation");
 }
 
 #[test]
@@ -202,7 +193,7 @@ fn corrected_config_recovers_on_the_next_invocation() {
     let config = dir.path().join("config.toml");
     fs::write(&config, "unknown = true\n").unwrap();
     assert_eq!(run("close", dir.path()).status.code(), Some(1));
-    assert!(!herdr_called(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty());
 
     fs::write(&config, "theme = \"gruvbox\"\n").unwrap();
     let output = run("close", dir.path());
@@ -224,7 +215,7 @@ fn an_unknown_action_refuses_before_any_herdr_call() {
         "reviewr: unknown action 'frobnicate' (toggle | open | close | auto-open)\n"
     );
     assert!(output.stdout.is_empty());
-    assert!(!herdr_called(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty());
 
     // A bare `--action` names no action at all, and refuses the same way.
     let output = Command::new(reviewr_bin())
@@ -250,7 +241,7 @@ fn disabled_auto_open_stops_after_successful_validation() {
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
-    assert!(!herdr_called(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty());
 }
 
 #[test]
@@ -266,7 +257,7 @@ fn auto_open_skips_placements_that_are_not_split_or_tab() {
         assert!(output.stdout.is_empty(), "{placement}");
         assert!(output.stderr.is_empty(), "{placement}");
     }
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -278,7 +269,7 @@ fn valid_auto_open_runtime_refusal_remains_silent() {
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
-    assert!(!herdr_called(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty());
 }
 
 #[test]
@@ -292,7 +283,7 @@ fn auto_open_opened_live_exits_before_herdr_calls() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
-    assert!(!herdr_called(dir.path()), "opened-live inspected herdr before exiting");
+    assert!(herdr_calls(dir.path()).is_empty(), "opened-live inspected herdr before exiting");
 }
 
 #[test]
@@ -350,7 +341,7 @@ fn auto_open_without_its_payload_refuses_silently_before_any_herdr_call() {
         assert!(output.stdout.is_empty(), "{payload:?}: {}", stdout(&output));
         assert!(output.stderr.is_empty(), "{payload:?}: {}", stderr(&output));
     }
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1153,7 +1144,7 @@ fn an_explicit_action_waits_for_a_held_lock_and_proceeds_once_released() {
     let mut child = start("toggle", dir.path());
     std::thread::sleep(Duration::from_millis(500));
     assert!(child.try_wait().unwrap().is_none(), "the toggle did not wait for the lock");
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
     drop(lock);
     let output = child.wait_with_output().unwrap();
 
@@ -1181,7 +1172,7 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
     let elapsed = started.elapsed();
 
     assert!(elapsed >= Duration::from_millis(14500), "refused before the bound: {elapsed:?}");
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1301,7 +1292,7 @@ fn an_action_without_a_plugin_state_dir_refuses_before_any_herdr_call() {
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "reviewr: no plugin state dir (invoke as a herdr plugin action)\n");
-    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
 // --- Open cwd: the focused pane's live foreground cwd, then the context's launch cwd.

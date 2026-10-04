@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::config::{PluginConfig, PluginConfigError, TogglePlacement};
-use crate::herdr::{self, HerdrError, PaneList, Process, ProcessInfo};
+use crate::herdr::{self, HerdrError, PaneList, Process, ProcessInfo, var};
 use crate::logln;
 use crate::proc::program_name;
 
@@ -200,11 +200,6 @@ fn action_lock(ws: &str) -> Result<File, Stop> {
     }
 }
 
-/// A non-empty environment variable. herdr leaves context variables unset or empty alike.
-fn var(name: &str) -> Option<String> {
-    env::var(name).ok().filter(|value| !value.is_empty())
-}
-
 /// The non-empty string at `pointer`; a missing or mistyped field reads as absent.
 fn text(value: &Value, pointer: &str) -> Option<String> {
     value.pointer(pointer).and_then(Value::as_str).filter(|text| !text.is_empty()).map(Into::into)
@@ -342,7 +337,7 @@ fn open(
         }
     };
 
-    let plugin = var("HERDR_PLUGIN_ID").unwrap_or_else(|| herdr::PLUGIN_ID.to_owned());
+    let plugin = herdr::plugin_id();
     let placement = config.toggle_placement();
     // A split or zoomed open attaches to the focused pane, else the workspace's first pane.
     let attach = || {
@@ -413,7 +408,7 @@ fn repoint_launch_links() {
     if !executable {
         return;
     }
-    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::PLUGIN_ID).join("bin");
+    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::plugin_id()).join("bin");
     let local_bin = home.join(".local/bin");
     // `~/.local/bin` only when it already exists: reviewr never creates a PATH directory.
     let dirs = [Some(state_bin), local_bin.is_dir().then_some(local_bin)];
