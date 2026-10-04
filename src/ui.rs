@@ -2266,7 +2266,8 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], marker_fg: Col
         }
     }
     if row.cr_marker() {
-        let src = idx as usize;
+        // The marker stands at the text's last char, so past the end still selects that char.
+        let src = (idx as usize).saturating_sub(1);
         cells.extend(crate::diff::CR_MARKER.chars().map(|ch| Cell {
             ch,
             w: 1,
@@ -2415,6 +2416,15 @@ pub fn age_label(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cr_marker_points_at_its_lines_last_char() {
+        let span = crate::diff::Span { text: "ab".into(), color: Default::default() };
+        let row = Row::Insertion { new_no: 1, spans: vec![span], emphasis: vec![], cr: true };
+        let srcs: Vec<usize> = plain_cells(&row).iter().map(|c| c.src).collect();
+        assert_eq!(srcs, [0, 1, 1, 1]);
+    }
+
     #[test]
     fn relative_age_buckets_by_magnitude() {
         // now = 2026-06-27T12:00:00Z
