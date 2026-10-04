@@ -1,6 +1,6 @@
 //! A fake herdr CLI for the plugin-action and send tests (`tests/pane_actions.rs`,
-//! `tests/send_flow.rs`), answering in the live envelope shapes (docs/herdr-api-notes.md). It is Rust rather than a shell script so the
-//! tests run on every OS, Windows included.
+//! `tests/send_flow.rs`), answering in the live envelope shapes (docs/herdr-api-notes.md). It
+//! is Rust rather than a shell script so the tests run on every OS, Windows included.
 //!
 //! It serves the fixture directory named by `FAKE_HERDR_DIR`, appending each invocation's
 //! arguments as one line to `herdr.log`:

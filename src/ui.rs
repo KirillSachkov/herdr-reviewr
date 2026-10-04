@@ -486,7 +486,7 @@ fn seg_cell_range(
 /// The source char at display column `col_in_code` of a code display line, clamped to the
 /// line: past its end selects its last char (a stream selection runs to the row's end).
 fn seg_char_at(app: &App, row: &Row, seg: usize, code_width: usize, col_in_code: usize) -> usize {
-    let cells = code_cells(row, false, &[], Color::Reset);
+    let cells = plain_cells(row);
     let (s, e) = seg_cell_range(app, row, &cells, seg, code_width);
     if s >= e {
         // The line is scrolled entirely off (h-scroll past its end): past the end selects
@@ -514,7 +514,7 @@ pub fn widest_visible_row(app: &App, area: Rect) -> usize {
         .iter()
         .skip(app.diff_scroll)
         .take(content.height as usize)
-        .map(|r| code_cells(r, false, &[], Color::Reset).iter().map(|c| c.w).sum())
+        .map(|r| plain_cells(r).iter().map(|c| c.w).sum())
         .max()
         .unwrap_or(0)
 }
@@ -674,7 +674,7 @@ fn render_text_selection(frame: &mut Frame, app: &App, area: Rect) {
                 if !row_ref.is_content() {
                     continue;
                 }
-                let cells = code_cells(row_ref, false, &[], Color::Reset);
+                let cells = plain_cells(row_ref);
                 let (seg_s, seg_e) = seg_cell_range(app, row_ref, &cells, seg, code_width);
                 let y = pane.inner.y + off as u16;
                 let max_x = (pane.inner.x + pane.inner.width) as usize;
@@ -2042,8 +2042,7 @@ fn row_height(row: &Row, gutter_w: usize, width: usize, wrap: bool) -> usize {
     }
     let code_width = width.saturating_sub(gutter_prefix_width(gutter_w)).max(1);
     // The find highlight never changes wrapping, so height ignores it.
-    wrap_segments(&code_cells(row, false, &[], Color::Reset), code_width, ContinuationSpaces::Trim)
-        .len()
+    wrap_segments(&plain_cells(row), code_width, ContinuationSpaces::Trim).len()
 }
 
 /// The diff-pane layout: constant for a frame.
@@ -2493,6 +2492,11 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], marker_fg: Col
         }));
     }
     cells
+}
+
+/// A row's cells for layout: widths and source indices, no paint.
+fn plain_cells(row: &Row) -> Vec<Cell> {
+    code_cells(row, false, &[], Color::Reset)
 }
 
 /// Build spans from display cells, merging runs of equal color, emphasis, and find-highlight; a

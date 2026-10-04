@@ -348,12 +348,11 @@ fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String>> {
     rx
 }
 
-/// Stamp our own pane's cosmetic `reviewr` label — but only when the pane carries no label,
-/// so a name the user gave their pane survives running reviewr in it (reviewr supplies the default name, never overrides one). Display only:
-/// the actions and the event identify a reviewr pane by its foreground process, never this
-/// label, so a failed read or write just logs — and nothing waits on it, so a hung herdr
-/// cannot sit between the first paint and the event loop. Without a pane id — outside
-/// herdr — a no-op.
+/// Stamp our own pane's cosmetic `reviewr` label, but only when the pane carries no label: a
+/// name the user gave their pane survives running reviewr in it. Display only: the actions and
+/// the event identify a reviewr pane by its foreground process, never this label, so a failed
+/// read or write just logs. Nothing waits on it, so a hung herdr cannot sit between the first
+/// paint and the event loop. Outside herdr, with no pane id, a no-op.
 pub fn label_pane() {
     let (Ok(ws), Ok(pane)) = (env::var("HERDR_WORKSPACE_ID"), env::var("HERDR_PANE_ID")) else {
         return;
@@ -367,10 +366,9 @@ pub fn label_pane() {
     });
 }
 
-/// Clear the cosmetic label on a normal exit — but only a `reviewr` label, so a name the
-/// user set is never deleted. The wait is bounded:
-/// this runs after the terminal is restored, and a hung herdr must not hold the shell
-/// prompt hostage for a label a stale copy of which changes nothing.
+/// Clear the cosmetic label on a normal exit, but only a `reviewr` label, so a name the user
+/// set is never deleted. The wait is bounded: this runs after the terminal is restored, and a
+/// hung herdr must not hold the shell prompt for a stale label that changes nothing.
 pub fn clear_pane_label() {
     let (Ok(ws), Ok(pane)) = (env::var("HERDR_WORKSPACE_ID"), env::var("HERDR_PANE_ID")) else {
         return;
@@ -753,13 +751,13 @@ fn reply_outcome(reply: &str) -> Result<(), HerdrError> {
 /// per connection, answers it with one line, and closes.
 ///
 /// On unix each read and write waits at most the time left at connect, so a herdr that accepts
-/// and never answers frees the worker thread and its descriptor shortly after the send gives up. The connect itself
-/// returns at once unless herdr stopped accepting with its whole backlog queued. A Windows named
-/// pipe takes no read or write timeout (`interprocess` reports them unsupported, and herdr's own
-/// client goes without), so there the deadline bounds only the wait for a free pipe instance. A
-/// herdr that accepts and never answers keeps the worker thread and its pipe handle until herdr
-/// closes the pipe or exits. The frame loop waits at most [`SEND_BOUND`](super::SEND_BOUND)
-/// either way (`socket_call`).
+/// and never answers frees the worker thread and its descriptor shortly after the send gives
+/// up. The connect itself returns at once unless herdr stopped accepting with its whole backlog
+/// queued. A Windows named pipe takes no read or write timeout (`interprocess` reports them
+/// unsupported, and herdr's own client goes without), so there the deadline bounds only the
+/// wait for a free pipe instance. A herdr that accepts and never answers keeps the worker
+/// thread and its pipe handle until herdr closes the pipe or exits. The frame loop waits at
+/// most [`SEND_BOUND`](super::SEND_BOUND) either way (`socket_call`).
 mod socket {
     use std::ffi::OsStr;
     use std::io::{self, BufRead, BufReader, Write};

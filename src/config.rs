@@ -279,7 +279,8 @@ impl PluginConfig {
         &self.keymap
     }
 
-    /// Stable machine-readable output consumed by the shell entry points.
+    /// The normalized config as `--resolve-plugin-config` prints it, for a reviewer checking
+    /// what reviewr resolved.
     pub fn to_json(&self) -> serde_json::Value {
         let keybindings: serde_json::Map<String, serde_json::Value> = self
             .keymap
@@ -729,11 +730,11 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Print the shared normalized configuration, for a check from outside the binary (the
-/// `scripts/qa-install.sh` run check is one). This is its own
-/// entrypoint (`--resolve-plugin-config`), so it resolves the config directory itself — and
-/// initializes the log itself, or the herdr-side diagnostics of a failed lookup would be
-/// dropped on the one path that exercises the CLI fallback from a plain shell.
+/// Print the normalized configuration (`--resolve-plugin-config`). Its exit status is a check
+/// from outside the binary, and `scripts/qa-install.sh` runs it on every install. It is its own
+/// entrypoint, so it resolves the config directory itself, and initializes the log itself, or
+/// the herdr-side diagnostics of a failed lookup would be dropped on the one path that
+/// exercises the CLI fallback from a plain shell.
 pub fn print_plugin_config() -> Result<(), PluginConfigError> {
     crate::log::init();
     println!("{}", plugin_config_from_herdr()?.to_json());
