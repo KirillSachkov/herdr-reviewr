@@ -11,11 +11,12 @@
 //! Pure, so the tests run on every OS. Only `windows.rs` calls it in a build.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ratatui::crossterm::event::Event;
 
-/// How long an open paste may go without a byte before it is taken as complete.
+/// How long an open paste may wait for a byte before it is taken as complete. Only time spent
+/// waiting on the console counts: a frame reviewr spends drawing is no gap in the input.
 ///
 /// herdr writes a paste as one write, end marker included, so the bytes arrive back to back.
 /// The bound is only for a paste whose end marker never comes: without it every later key
@@ -34,8 +35,9 @@ pub(super) struct VtInput {
     surrogate: Option<u16>,
     /// Parsed events, oldest first.
     events: VecDeque<Event>,
-    /// When the last batch of input arrived, which an open paste's bound counts from.
-    last_input: Option<Instant>,
+    /// The time spent waiting on the console since the last batch of input arrived, which an
+    /// open paste's bound counts.
+    waited: Duration,
 }
 
 impl VtInput {
@@ -66,22 +68,26 @@ impl VtInput {
     ///
     /// A lone ESC waits while more input is queued, since it may open a sequence. With nothing
     /// queued it is the Esc key, the same call crossterm's unix reader makes.
-    pub(super) fn settle(&mut self, now: Instant) {
+    pub(super) fn settle(&mut self) {
         self.parse(false);
-        self.last_input = Some(now);
+        self.waited = Duration::ZERO;
     }
 
-    /// When an open paste counts as complete, if one is open.
-    pub(super) fn paste_deadline(&self) -> Option<Instant> {
-        let since = self.last_input?;
-        self.pending.starts_with(PASTE_START).then(|| since + PASTE_IDLE)
+    /// Count `time` spent waiting on the console.
+    pub(super) fn waited(&mut self, time: Duration) {
+        self.waited += time;
     }
 
-    /// Close an open paste that has passed its deadline, as a paste of what arrived.
+    /// The wait an open paste has left before it counts as complete, if one is open.
+    pub(super) fn paste_left(&self) -> Option<Duration> {
+        self.pending.starts_with(PASTE_START).then(|| PASTE_IDLE.saturating_sub(self.waited))
+    }
+
+    /// Close an open paste that has waited out its bound, as a paste of what arrived.
     ///
     /// Never as keys: a lost end marker must not turn pasted text into commands.
-    pub(super) fn expire(&mut self, now: Instant) {
-        if self.paste_deadline().is_some_and(|deadline| now >= deadline) {
+    pub(super) fn expire(&mut self) {
+        if self.paste_left() == Some(Duration::ZERO) {
             let text = String::from_utf8_lossy(&self.pending[PASTE_START.len()..]).into_owned();
             self.pending.clear();
             self.events.push_back(Event::Paste(text));
@@ -131,18 +137,18 @@ mod tests {
     };
 
     /// Feed each batch as one console read and collect every event, in order.
-    fn events(vt: &mut VtInput, batches: &[&str], now: Instant) -> Vec<Event> {
+    fn events(vt: &mut VtInput, batches: &[&str]) -> Vec<Event> {
         for batch in batches {
             for unit in batch.encode_utf16() {
                 vt.feed(unit);
             }
-            vt.settle(now);
+            vt.settle();
         }
         std::iter::from_fn(|| vt.pop()).collect()
     }
 
     fn parse(batches: &[&str]) -> Vec<Event> {
-        events(&mut VtInput::default(), batches, Instant::now())
+        events(&mut VtInput::default(), batches)
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
@@ -223,9 +229,9 @@ mod tests {
         let smile: Vec<u16> = "🙂".encode_utf16().collect();
         let mut vt = VtInput::default();
         vt.feed(smile[0]);
-        vt.settle(Instant::now());
+        vt.settle();
         vt.feed(smile[1]);
-        vt.settle(Instant::now());
+        vt.settle();
         assert_eq!(vt.pop(), Some(key(KeyCode::Char('🙂'), NONE)));
     }
 
@@ -240,13 +246,19 @@ mod tests {
     #[test]
     fn an_unterminated_paste_closes_as_a_paste_after_its_bound() {
         let mut vt = VtInput::default();
-        let start = Instant::now();
-        assert_eq!(events(&mut vt, &["\x1b[200~abc\rx"], start), vec![]);
-        vt.expire(start + PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
+        assert_eq!(events(&mut vt, &["\x1b[200~abc\rx"]), vec![]);
+        vt.waited(PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
+        vt.expire();
         assert_eq!(vt.pop(), None, "still inside the bound");
-        vt.expire(start + PASTE_IDLE);
-        assert_eq!(vt.pop(), Some(Event::Paste("abc\rx".into())));
+        // More input restarts the bound.
+        assert_eq!(events(&mut vt, &["y"]), vec![]);
+        vt.waited(PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
+        vt.expire();
+        assert_eq!(vt.pop(), None, "the bound counts from the last input");
+        vt.waited(Duration::from_millis(1));
+        vt.expire();
+        assert_eq!(vt.pop(), Some(Event::Paste("abc\rxy".into())));
         // Input reads as keys again.
-        assert_eq!(events(&mut vt, &["x"], start), vec![key(KeyCode::Char('x'), NONE)]);
+        assert_eq!(events(&mut vt, &["x"]), vec![key(KeyCode::Char('x'), NONE)]);
     }
 }

@@ -101,17 +101,21 @@ impl Reader {
             while wait_for_input(&self.handle, Some(Duration::ZERO))? {
                 self.read_records()?;
             }
-            let now = Instant::now();
-            self.vt.expire(now);
+            self.vt.expire();
             if self.vt.has_events() {
                 return Ok(true);
             }
-            // An open paste's bound wakes the wait too, so it closes on time.
-            let wake = deadline.into_iter().chain(self.vt.paste_deadline()).min();
-            if wait_for_input(&self.handle, wake.map(|wake| wake.saturating_duration_since(now)))? {
+            // An open paste's bound wakes the wait too, so it closes on time. Only the wait
+            // counts toward it: the time a frame took to draw is no gap in the input.
+            let started = Instant::now();
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(started));
+            let input =
+                wait_for_input(&self.handle, left.into_iter().chain(self.vt.paste_left()).min())?;
+            self.vt.waited(started.elapsed());
+            if input {
                 self.read_records()?;
             } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                self.vt.expire(Instant::now());
+                self.vt.expire();
                 return Ok(self.vt.has_events());
             }
         }
@@ -133,7 +137,7 @@ impl Reader {
                 _ => {}
             }
         }
-        self.vt.settle(Instant::now());
+        self.vt.settle();
         Ok(())
     }
 }
