@@ -1501,6 +1501,14 @@ impl App {
         // change that turned binary since the changeset landed.
         let sides = if self.changed.get(&path).is_some_and(|a| a.binary) {
             git::DiffSides::Binary
+        } else if self.worktree_over_budget(&path) {
+            // Too large to render, so read nothing: a full-context diff of the file would
+            // stream it whole through git on every poll only to be dropped.
+            self.diff = FileDiff::too_large_notice(path);
+            self.rendered.content = None;
+            self.rebuild_visible();
+            self.settle_read();
+            return;
         } else {
             self.content_sides(&path, previous_path.as_deref())
         };
@@ -1522,6 +1530,14 @@ impl App {
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
         self.rebuild_visible();
         self.settle_read();
+    }
+
+    /// Whether `path`'s diff would read a worktree file past the render budget. Only the scopes
+    /// whose new end is the worktree read it; a run of commits reads committed trees.
+    fn worktree_over_budget(&self, path: &str) -> bool {
+        self.diff_ends.as_ref().is_some_and(|ends| ends.new.is_none())
+            && std::fs::metadata(self.repo.join(path))
+                .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize))
     }
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
@@ -1557,8 +1573,7 @@ impl App {
         if oversize {
             (FileDiff::too_large_notice(path.to_string()), String::new())
         } else {
-            let bytes = std::fs::read(self.repo.join(path)).unwrap_or_default();
-            let content = String::from_utf8_lossy(&bytes).into_owned();
+            let content = worktree_content(&self.repo, path);
             let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
             (diff, content)
         }
@@ -1950,10 +1965,9 @@ impl App {
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
         let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
         if self.changed.get(path).is_some_and(|a| a.change == ChangeKind::Untracked) {
-            let new = std::fs::read(self.repo.join(path)).unwrap_or_default();
             return git::DiffSides::Text {
                 old: String::new(),
-                new: String::from_utf8_lossy(&new).into_owned(),
+                new: worktree_content(&self.repo, path),
             };
         }
         // The ends the changeset came from, whatever moved since: a commit, a new merge base,
@@ -3174,9 +3188,7 @@ impl App {
             // An over-budget file renders a notice, so it holds no hunk either. Check the size
             // before reading, as `set_file_view` does: pulling a vendored bundle in whole would
             // spike the UI thread for a file the reviewer only crosses over.
-            if std::fs::metadata(self.repo.join(&entry.path))
-                .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize))
-            {
+            if self.worktree_over_budget(&entry.path) {
                 continue;
             }
             let git::DiffSides::Text { old, new } =
@@ -5692,6 +5704,14 @@ fn is_markdown_path(path: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
+/// `path`'s worktree bytes as text, lossily, as the file has them: line endings included.
+/// Empty when the file is absent (a deletion) or unreadable.
+fn worktree_content(repo: &std::path::Path, path: &str) -> String {
+    std::fs::read(repo.join(path))
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
+}
+
 /// The current-content line source row `i` stands for: its own, else — a deletion or a fold
 /// names none — a fold's first hidden line, the nearest line below, then the nearest above.
 fn source_line_at(rows: &[Row], i: usize) -> Option<u32> {
@@ -6451,6 +6471,31 @@ mod tests {
     /// Git commands the current thread has built so far.
     fn git_commands() -> usize {
         crate::git::GIT_COMMANDS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn an_over_budget_worktree_file_opens_as_its_notice_without_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
+            assert!(out.unwrap().status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("big.txt"), "x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(repo.join("big.txt"), "y\n".repeat(crate::diff::MAX_BYTES / 2 + 1)).unwrap();
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        app.reload().unwrap();
+        let before = git_commands();
+        app.set_diff("big.txt".to_string(), None);
+
+        assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
+        assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
     }
 
     #[test]
