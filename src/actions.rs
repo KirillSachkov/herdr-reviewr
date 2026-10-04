@@ -278,7 +278,7 @@ fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
 fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
     match ProcessInfo::of(pane) {
         Ok(info) => Ok(info.foreground_processes.iter().any(is_review_ui)),
-        Err(error) if error.pane_gone() => Ok(false),
+        Err(HerdrError::PaneGone) => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -301,8 +301,7 @@ fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
     let mut failed = Vec::new();
     for &pane in existing {
         match herdr::close_pane(pane) {
-            Ok(()) => closed.push(pane),
-            Err(error) if error.pane_gone() => closed.push(pane),
+            Ok(()) | Err(HerdrError::PaneGone) => closed.push(pane),
             Err(_) => failed.push(pane),
         }
     }

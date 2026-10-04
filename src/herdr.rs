@@ -79,12 +79,23 @@ pub enum HerdrError {
     Refused(Option<String>),
     /// herdr exited 0 without the shape the call documents, never read as empty.
     Unreadable,
+    /// The addressed pane no longer exists: it exited between an earlier read and this call.
+    PaneGone,
+    /// The named agent waits on a permission or confirm prompt, which would drop a paste.
+    AtPrompt(String),
+    /// The workspace holds no agent to send to.
+    NoAgent,
+    /// The review is over the send cap, so it cannot go as one paste.
+    TooLarge,
 }
 
 impl HerdrError {
-    /// The addressed pane no longer exists: it exited between an earlier read and this call.
-    pub fn pane_gone(&self) -> bool {
-        matches!(self, Self::Refused(Some(code)) if code == "pane_not_found")
+    /// A refusal carrying herdr's `error.code`, a gone pane read as such.
+    fn refused(code: Option<String>) -> Self {
+        match code.as_deref() {
+            Some("pane_not_found") => Self::PaneGone,
+            _ => Self::Refused(code),
+        }
     }
 }
 
@@ -95,6 +106,10 @@ impl std::fmt::Display for HerdrError {
             Self::Refused(Some(code)) => write!(f, "herdr refused: {code}"),
             Self::Refused(None) => write!(f, "herdr refused"),
             Self::Unreadable => write!(f, "herdr answered in an unknown shape"),
+            Self::PaneGone => write!(f, "the pane is gone"),
+            Self::AtPrompt(name) => write!(f, "{name} is at a prompt"),
+            Self::NoAgent => write!(f, "no agent in the workspace"),
+            Self::TooLarge => write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap"),
         }
     }
 }
@@ -143,7 +158,7 @@ fn call(args: &[&str]) -> Result<String, HerdrError> {
     let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
     if !status.success() {
         logln!("herdr {args:?} failed: {}", stderr.trim());
-        return Err(HerdrError::Refused(error_code(&stderr)));
+        return Err(HerdrError::refused(error_code(&stderr)));
     }
     Ok(stdout)
 }
@@ -169,15 +184,7 @@ fn error_code(stderr: &str) -> Option<String> {
 
 /// [`call`] for the review UI, where any failure is just a failure.
 fn herdr(args: &[&str]) -> Result<String> {
-    call(args).map_err(for_reviewer)
-}
-
-/// A herdr failure as the app words it: no herdr is [`Refusal::Unanswered`].
-fn for_reviewer(error: HerdrError) -> anyhow::Error {
-    match error {
-        HerdrError::Unanswered => Refusal::Unanswered.into(),
-        error => error.into(),
-    }
+    Ok(call(args)?)
 }
 
 /// The `result` of a herdr JSON answer as `T`, else [`HerdrError::Unreadable`].
@@ -423,13 +430,13 @@ pub fn send_target() -> Result<SendTarget> {
         Err(e) => {
             // The status line names the clipboard; the cause is in the log.
             logln!("agent list failed: {e:#}");
-            return Err(Refusal::Unanswered.into());
+            return Err(HerdrError::Unanswered.into());
         }
     };
     // Candidacy is decided once, here: an `agent` field, our workspace, not our own pane.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
-        0 => Err(Refusal::NoAgent.into()),
+        0 => Err(HerdrError::NoAgent.into()),
         // The sole-agent send shows no row, so only the picker pays for the tab-label call.
         1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new()))),
         _ => {
@@ -553,35 +560,6 @@ fn candidates<'a>(
         .collect()
 }
 
-/// Why a send went nowhere; every comment stays.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Refusal {
-    /// The named agent waits on a permission or confirm prompt.
-    AtPrompt(String),
-    /// herdr did not answer a call: it could not run, or could not list the agents.
-    Unanswered,
-    /// The workspace holds no agent to send to.
-    NoAgent,
-    /// The review is over herdr's request cap, so it cannot go as one paste.
-    TooLarge,
-}
-
-/// The log's wording. The reviewer's line is the app's (`App::refusal_line`).
-impl std::fmt::Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Refusal::AtPrompt(name) => write!(f, "{name} is at a prompt"),
-            Refusal::Unanswered => write!(f, "herdr did not answer"),
-            Refusal::NoAgent => write!(f, "no agent in the workspace"),
-            Refusal::TooLarge => {
-                write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Refusal {}
-
 /// Whether an agent pane can take a send right now.
 #[derive(Debug, PartialEq, Eq)]
 enum Readiness {
@@ -599,16 +577,16 @@ fn ensure_ready(pane: &str) -> Result<()> {
         Ok(agents) => agents,
         Err(e) => {
             logln!("agent list failed before the send: {e:#}");
-            return Err(Refusal::Unanswered.into());
+            return Err(HerdrError::Unanswered.into());
         }
     };
     match readiness_in(&agents, pane) {
         Readiness::Ready => Ok(()),
-        Readiness::Busy(name) => Err(Refusal::AtPrompt(name).into()),
+        Readiness::Busy(name) => Err(HerdrError::AtPrompt(name).into()),
         // Gone from the agent list is the same verdict herdr's own send would return.
         Readiness::Gone => {
             logln!("agent pane {pane} is gone");
-            Err(HerdrError::Refused(Some("pane_not_found".into())).into())
+            Err(HerdrError::PaneGone.into())
         }
     }
 }
@@ -631,7 +609,7 @@ const SEND_BOUND: Duration = Duration::from_secs(5).saturating_add(ANSWER_BOUND)
 /// Paste literal text into the agent pane's input, unsubmitted, in one socket request.
 pub fn send_text(pane: &str, text: &str) -> Result<()> {
     let Some(socket) = env::var_os("HERDR_SOCKET_PATH") else {
-        return Err(Refusal::Unanswered.into());
+        return Err(HerdrError::Unanswered.into());
     };
     let request = serde_json::json!({
         "id": "reviewr:send",
@@ -640,10 +618,10 @@ pub fn send_text(pane: &str, text: &str) -> Result<()> {
     })
     .to_string();
     if request.len() > MAX_REQUEST_BYTES {
-        return Err(Refusal::TooLarge.into());
+        return Err(HerdrError::TooLarge.into());
     }
     ensure_ready(pane)?;
-    socket_call(socket, request).map_err(for_reviewer)
+    Ok(socket_call(socket, request)?)
 }
 
 /// One request line answered by one reply line, on its own thread, bounded by [`SEND_BOUND`].
@@ -671,7 +649,7 @@ fn socket_call(socket: OsString, request: String) -> Result<(), HerdrError> {
 fn reply_outcome(reply: &str) -> Result<(), HerdrError> {
     if let Some(code) = error_code(reply) {
         logln!("herdr refused over the socket: {}", reply.trim());
-        return Err(HerdrError::Refused(Some(code)));
+        return Err(HerdrError::refused(Some(code)));
     }
     answer::<serde::de::IgnoredAny>(reply).map(drop)
 }
@@ -1007,10 +985,7 @@ mod tests {
         assert_eq!(super::reply_outcome(ok), Ok(()));
         // herdr's error reply echoes the id and carries the same envelope as a failed CLI call.
         let gone = r#"{"id":"reviewr:send","error":{"code":"pane_not_found","message":"pane w8:p1 not found"}}"#;
-        assert_eq!(
-            super::reply_outcome(gone),
-            Err(HerdrError::Refused(Some("pane_not_found".into())))
-        );
+        assert_eq!(super::reply_outcome(gone), Err(HerdrError::PaneGone));
         assert_eq!(super::reply_outcome(r#"{"id":"reviewr:send"}"#), Err(HerdrError::Unreadable));
     }
 
@@ -1048,12 +1023,15 @@ mod tests {
         // The code tells a pane that exited mid-sweep from a herdr that failed.
         let gone = r#"{"error":{"code":"pane_not_found","message":"pane w1:p3 not found"},"id":"cli:request"}"#;
         assert_eq!(super::error_code(gone).as_deref(), Some("pane_not_found"));
-        assert!(HerdrError::Refused(super::error_code(gone)).pane_gone());
+        assert_eq!(HerdrError::refused(super::error_code(gone)), HerdrError::PaneGone);
         // An advisory line before the envelope does not hide it.
         let noisy = format!("warning: something\n{gone}\n");
         assert_eq!(super::error_code(&noisy).as_deref(), Some("pane_not_found"));
         let internal = r#"{"error":{"code":"internal","message":"boom"}}"#;
-        assert!(!HerdrError::Refused(super::error_code(internal)).pane_gone());
+        assert_eq!(
+            HerdrError::refused(super::error_code(internal)),
+            HerdrError::Refused(Some("internal".into()))
+        );
         assert_eq!(super::error_code("plain words"), None);
     }
 

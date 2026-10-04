@@ -166,7 +166,7 @@ impl ExportTarget for Agent {
 
     /// A pane that closed says so; any other refusal says herdr refused.
     fn failure_message(&self, error: &anyhow::Error) -> String {
-        if error.downcast_ref::<herdr::HerdrError>().is_some_and(herdr::HerdrError::pane_gone) {
+        if matches!(error.downcast_ref(), Some(herdr::HerdrError::PaneGone)) {
             format!("{} closed", self.name)
         } else {
             "herdr refused the send".to_string()
@@ -232,8 +232,7 @@ mod tests {
     #[test]
     fn a_failed_send_or_copy_says_what_to_do() {
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        let gone =
-            anyhow::Error::from(crate::herdr::HerdrError::Refused(Some("pane_not_found".into())));
+        let gone = anyhow::Error::from(crate::herdr::HerdrError::PaneGone);
         assert_eq!(agent.failure_message(&gone), "release-bot closed");
         // Any other refusal never claims the agent closed.
         for other in [

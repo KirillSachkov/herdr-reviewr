@@ -4353,24 +4353,19 @@ impl App {
         error: &anyhow::Error,
         other: impl Fn(&anyhow::Error) -> String,
     ) -> String {
-        match error.downcast_ref::<herdr::Refusal>() {
-            Some(refusal) => self.refusal_line(refusal),
-            None => other(error),
-        }
-    }
-
-    /// A refused send's line: the cause, then the way out.
-    fn refusal_line(&self, refusal: &herdr::Refusal) -> String {
         let copy = self.keymap().hint(crate::keymap::Action::Copy).label();
-        match refusal {
-            herdr::Refusal::AtPrompt(name) => format!("answer {name}'s prompt first"),
-            herdr::Refusal::Unanswered => {
+        match error.downcast_ref::<herdr::HerdrError>() {
+            Some(herdr::HerdrError::AtPrompt(name)) => format!("answer {name}'s prompt first"),
+            Some(herdr::HerdrError::Unanswered) => {
                 format!("herdr didn't answer, press {copy} to copy")
             }
-            herdr::Refusal::NoAgent => {
+            Some(herdr::HerdrError::NoAgent) => {
                 format!("no agent in this workspace, press {copy} to copy")
             }
-            herdr::Refusal::TooLarge => format!("review too large to send, press {copy} to copy"),
+            Some(herdr::HerdrError::TooLarge) => {
+                format!("review too large to send, press {copy} to copy")
+            }
+            _ => other(error),
         }
     }
 
