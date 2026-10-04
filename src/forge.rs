@@ -380,7 +380,9 @@ fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
         bytes
     });
     // Done once the CLI has exited and both pipes have closed. A descendant can outlive the
-    // CLI with a pipe still open, so a cancel keeps reaching the tree until then.
+    // CLI with a pipe still open: once the CLI has exited its answer is whole, so the rest of
+    // the tree is ended, once, and the pipes close with it.
+    let mut ended = false;
     let status = loop {
         if cancelled.load(Ordering::Acquire) {
             let _ = child.start_kill();
@@ -388,6 +390,10 @@ fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
         match child.try_wait() {
             Ok(Some(status)) if stdout_reader.is_finished() && stderr_reader.is_finished() => {
                 break status;
+            }
+            Ok(Some(_)) if !ended => {
+                ended = true;
+                let _ = child.start_kill();
             }
             Ok(_) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
@@ -2119,22 +2125,27 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-f", "o=owner"]));
     }
 
-    /// A provider that starts a grandchild holding its pipes, then either waits on it or
-    /// exits. The grandchild alone would keep the pipes open for a minute.
+    /// A provider that answers, starts a grandchild holding its pipes, then either waits on
+    /// it or exits. The grandchild alone would keep the pipes open for a minute.
     #[cfg(unix)]
     fn provider_with_grandchild(_dir: &Path, ready: &Path, waits: bool) -> Command {
-        let script =
-            if waits { r#"sleep 60 & touch "$1"; wait"# } else { r#"sleep 60 & touch "$1""# };
+        let script = if waits {
+            r#"echo answer; sleep 60 & touch "$1"; wait"#
+        } else {
+            r#"echo answer; sleep 60 & touch "$1""#
+        };
         let mut cmd = Command::new("sh");
         cmd.args(["-c", script, "provider"]).arg(ready);
         cmd
     }
 
-    /// The same provider as a batch file, the shape `az.cmd` has.
+    /// The same provider as a batch file, the shape `az.cmd` has. The grandchild's stdout
+    /// goes nowhere, so the answer is the provider's alone. Its stderr is the held pipe.
     #[cfg(windows)]
     fn provider_with_grandchild(dir: &Path, ready: &Path, waits: bool) -> Command {
         let mut script = String::from(
-            "@echo off\r\nstart /b \"\" ping -n 61 127.0.0.1\r\necho ready> \"%~1\"\r\n",
+            "@echo off\r\necho answer\r\nstart /b \"\" ping -n 61 127.0.0.1 >nul\r\n\
+             echo ready> \"%~1\"\r\n",
         );
         if waits {
             script.push_str("ping -n 61 127.0.0.1 >nul\r\n");
@@ -2146,34 +2157,52 @@ mod tests {
         cmd
     }
 
+    /// Run `cmd` as a fetch on its own thread, cancelled through `cancelled`. The result
+    /// arrives on the returned channel.
+    fn spawn_fetch(
+        cmd: Command,
+        cancelled: std::sync::Arc<AtomicBool>,
+    ) -> std::sync::mpsc::Receiver<Result<String, CliError>> {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || done_tx.send(run_cli(cmd, &cancelled)));
+        done_rx
+    }
+
     #[test]
     fn cancelling_a_fetch_ends_the_providers_whole_process_tree() {
-        use std::sync::{Arc, mpsc};
         use std::time::Instant;
 
-        for (shape, waits) in [("waits on its grandchild", true), ("exits before it", false)] {
-            let dir = tempfile::tempdir().unwrap();
-            let ready = dir.path().join("ready");
-            let cmd = provider_with_grandchild(dir.path(), &ready, waits);
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let (done_tx, done_rx) = mpsc::channel();
-            let flag = cancelled.clone();
-            thread::spawn(move || done_tx.send(run_cli(cmd, &flag)));
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let cmd = provider_with_grandchild(dir.path(), &ready, true);
+        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+        let done = spawn_fetch(cmd, cancelled.clone());
 
-            // Cancel once the grandchild exists, and once a provider that exits is long gone.
-            // Any earlier, the kill lands before the tree it has to reach.
-            let started = Instant::now();
-            while !ready.exists() {
-                assert!(started.elapsed() < Duration::from_secs(10), "{shape}: never started");
-                thread::sleep(Duration::from_millis(10));
-            }
-            thread::sleep(Duration::from_millis(300));
-            cancelled.store(true, Ordering::Release);
-
-            let result = done_rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_else(|_| panic!("{shape}: still reading the grandchild's pipes"));
-            assert!(matches!(result, Err(CliError::Cancelled)), "{shape}: {result:?}");
+        // Cancel once the grandchild exists. Any earlier, the kill lands before the tree it
+        // has to reach.
+        let started = Instant::now();
+        while !ready.exists() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never started");
+            thread::sleep(Duration::from_millis(10));
         }
+        thread::sleep(Duration::from_millis(300));
+        cancelled.store(true, Ordering::Release);
+
+        let result = done
+            .recv_timeout(Duration::from_secs(5))
+            .expect("still reading the grandchild's pipes after the cancel");
+        assert!(matches!(result, Err(CliError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn a_provider_that_exits_is_done_though_a_grandchild_holds_its_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = provider_with_grandchild(dir.path(), &dir.path().join("ready"), false);
+        // Never cancelled: the provider's own exit has to end the fetch.
+        let done = spawn_fetch(cmd, std::sync::Arc::default());
+        let result = done
+            .recv_timeout(Duration::from_secs(10))
+            .expect("still reading the grandchild's pipes after the provider exited");
+        assert_eq!(result.map(|out| out.trim().to_string()).ok().as_deref(), Some("answer"));
     }
 }
