@@ -95,6 +95,12 @@ impl Reader {
     /// The console is checked at least once, so a zero timeout still sees input already queued.
     fn poll(&mut self, deadline: Option<Instant>) -> io::Result<bool> {
         loop {
+            // Input already queued is read before an open paste's bound can close it: a frame
+            // that ran past the bound must not cut a paste whose rest is waiting, or that rest
+            // would run as keys.
+            while wait_for_input(&self.handle, Some(Duration::ZERO))? {
+                self.read_records()?;
+            }
             let now = Instant::now();
             self.vt.expire(now);
             if self.vt.has_events() {
