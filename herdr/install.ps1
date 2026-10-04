@@ -10,9 +10,7 @@
 # Like install.sh, the plugin root comes from this script's location, not $env:HERDR_PLUGIN_ROOT:
 # herdr runs the build without the runtime env. Windows gets no stable launch links (symlinks
 # need Developer Mode or admin), so this only installs the binary.
-#
-# REVIEWR_RELEASE_BASE_URL replaces https://github.com/<repo>/releases/download, and exists
-# only so CI can serve a fixture release. The tag and asset names below still apply under it.
+
 
 $ErrorActionPreference = 'Stop'
 # 5.1 draws a progress bar per downloaded chunk, which slows a download severalfold.
@@ -61,14 +59,14 @@ $Tag = "v$($Matches[1])"
 # 32-bit PowerShell on 64-bit Windows reports the OS's architecture in PROCESSOR_ARCHITEW6432.
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
 if ($arch -ne 'AMD64' -and $arch -ne 'ARM64') {
-    Fail "no prebuilt binary for Windows-$arch, build from source with 'cargo install --path .'"
+    Fail "no prebuilt binary for Windows-$arch, build with 'cargo build --release' and copy herdr-reviewr.exe into bin\"
 }
 $Target = 'x86_64-pc-windows-msvc'
 
 $Archive = "$Name-$Target.zip"
 # taiki-e's checksum sidecar drops the archive extension: <name>-<target>.sha256.
 $Checksum = "$Name-$Target.sha256"
-$BaseUrl = if ($env:REVIEWR_RELEASE_BASE_URL) { $env:REVIEWR_RELEASE_BASE_URL } else { "https://github.com/$Repo/releases/download" }
+$BaseUrl = "https://github.com/$Repo/releases/download"
 $Base = "$BaseUrl/$Tag"
 
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) "reviewr-install-$([guid]::NewGuid().ToString('N'))"

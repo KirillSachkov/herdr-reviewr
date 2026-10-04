@@ -2,15 +2,15 @@
 # herdr `[[build]]` step: download the prebuilt herdr-reviewr binary for this platform from the
 # matching GitHub Release into the plugin's bin/ dir. Runs on `herdr plugin install` (a managed
 # checkout); `herdr plugin link` skips the build step — for a local checkout, build from source
-# with `cargo install --path .`.
+# into bin/ with `just install`.
 #
 # The build runs with the plugin checkout as the working directory, so we resolve the plugin root
 # from this script's location rather than $HERDR_PLUGIN_ROOT (build commands may not receive the
-# runtime env). At runtime the pane command reads $HERDR_PLUGIN_ROOT/bin/herdr-reviewr.
+# runtime env). At runtime every pane and action command runs bin/herdr-reviewr.
 set -euo pipefail
 
 NAME="herdr-reviewr"
-# Every line this step prints starts with the plugin's name, as the pane script's lines do.
+# Every line this step prints starts with the plugin's name, as the action lines do.
 SAY="reviewr"
 REPO="persiyanov/herdr-reviewr"
 
@@ -30,7 +30,7 @@ case "$os-$arch" in
   Linux-aarch64 | Linux-arm64) target="aarch64-unknown-linux-musl" ;;
   Linux-x86_64)              target="x86_64-unknown-linux-musl" ;;
   *)
-    echo "$SAY: no prebuilt binary for $os-$arch, build from source with 'cargo install --path .'" >&2
+    echo "$SAY: no prebuilt binary for $os-$arch, build it into bin/ with 'just install'" >&2
     exit 1
     ;;
 esac

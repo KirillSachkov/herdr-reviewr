@@ -54,9 +54,15 @@ function New-PluginRoot([string]$Row) {
     return $root
 }
 
-# Start the manifest's Windows build argv in `Root`, against the release at `BaseUrl`.
+# Start the manifest's Windows build argv in `Root`, against the release at `BaseUrl`. The
+# shipped script reads only GitHub, so the staged copy in `Root` has its release URL rewritten:
+# the one line that differs from what users run.
 function Start-Install([string]$Root, [string]$BaseUrl) {
-    $env:REVIEWR_RELEASE_BASE_URL = $BaseUrl
+    $script = Join-Path $Root 'herdr\install.ps1'
+    $github = '$BaseUrl = "https://github.com/$Repo/releases/download"'
+    $text = Get-Content -LiteralPath $script -Raw
+    if (-not $text.Contains($github)) { throw "install.ps1 no longer names its release URL as $github" }
+    Set-Content -LiteralPath $script -Value $text.Replace($github, "`$BaseUrl = '$BaseUrl'") -Encoding ascii -NoNewline
     $proc = Start-Process -FilePath 'powershell' -WorkingDirectory $Root -NoNewWindow -PassThru `
         -RedirectStandardOutput (Join-Path $Root 'stdout.txt') `
         -RedirectStandardError (Join-Path $Root 'stderr.txt') `
@@ -136,7 +142,6 @@ try {
     if ($want -ne $got) { Fail-Row 'late' "installed $got, the release holds $want" }
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-    Remove-Item Env:REVIEWR_RELEASE_BASE_URL -ErrorAction SilentlyContinue
 }
 
 if ($failures.Count -gt 0) {
