@@ -106,8 +106,7 @@ fn classify_failure(stderr: &str) -> AzError {
         || s.contains("requires user authentication")
         || s.contains("az login")
         || s.contains("az devops login")
-        // TF400813 is Azure DevOps' unauthorized-identity error, raised for the anonymous and the
-        // wrong-account reader alike.
+        // TF400813: Azure DevOps' unauthorized-identity error.
         || s.contains("tf400813")
     {
         AzError::NotAuthed
@@ -197,8 +196,7 @@ fn fetch_inner(
                     &format!("project={project}"),
                     &format!("repositoryId={repo_name}"),
                     &format!("commitId={picked_tip}"),
-                    // The surface's one page; `latestOnly` collapses re-runs server-side and
-                    // `one_page_capped` reports the overflow.
+                    // One page; `latestOnly` collapses re-runs server-side.
                     "--query-parameters",
                     "latestOnly=true",
                     "top=100",

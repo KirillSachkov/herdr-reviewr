@@ -58,8 +58,7 @@ use crate::export::Clipboard;
 use crate::keymap::Keymap;
 use crate::model::Scope;
 
-/// The status-line note a slow config-dir lookup paints before its answer swaps the frame, and
-/// retracts if the lookup resolves nothing (`policies/ux-responsiveness.md`).
+/// The note a slow config-dir lookup paints, retracted when it finds nothing.
 const RESOLVING_NOTE: &str = "resolving plugin config…";
 
 /// Entry point: parse config, set up the terminal, run the loop, restore.
@@ -175,8 +174,7 @@ fn run_editor(
     open: &mut Vec<std::process::Child>,
 ) -> Result<()> {
     let Some(target) = app.editor_request.take() else { return Ok(()) };
-    // Absolute, so no editor can read the file name as one of its own flags and no dialect needs a
-    // `--` guard (`src/editor.rs`).
+    // Absolute, so no editor reads the file name as a flag.
     let joined = app.repo.join(&target.path);
     let path = std::path::absolute(&joined).unwrap_or(joined);
     let command = match editor::resolve(
@@ -205,8 +203,7 @@ fn run_editor(
         return Ok(());
     }
     logln!("editor run {} {:?}", command.program, command.args);
-    // The reviewer's own PATH first, so a version-managed editor wins over a stale copy in a common
-    // bin, with the host locations as the fallback a stripped pane PATH needs (`src/proc.rs`).
+    // The reviewer's own PATH first, the host bins as fallback.
     let Some(mut cmd) = proc::user_command(&command.program) else {
         app.status = format!("editor not found: {}", command.program);
         return Ok(());
@@ -624,8 +621,7 @@ impl PrRefresh {
         self.take_pending(&input, epoch)
     }
 
-    /// Apply the pending completion when it exactly matches the just-verified input, or ask for a
-    /// fresh fetch when it doesn't.
+    /// Apply the completion that matches the verified input, else fetch afresh.
     fn take_pending(&mut self, input: &crate::forge::PrFetchInput, epoch: u64) -> Option<PrEffect> {
         if let Some(completion) = self.pending.take() {
             if completion.generation == self.generation
@@ -817,8 +813,7 @@ fn event_loop(
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
             }
-            // The tab-strip refresh glyph: a commanded refresh lights it immediately, an ambient
-            // one past the appear delay, each tab only for its own refresh.
+            // The refresh glyph: a commanded refresh at once, an ambient one past the delay.
             if std::mem::take(&mut app.refresh_commanded) {
                 glyph_since.get_or_insert_with(Instant::now);
             }
@@ -839,8 +834,7 @@ fn event_loop(
                 }
             }
             app.refresh_indicator = glyph_since.is_some();
-            // Expire a stale status line: restart the timer when the message changes, and clear it
-            // once it has lingered past the TTL, so a notification doesn't stay up forever.
+            // Expire a status line once it has lingered past the TTL.
             if app.status != last_status {
                 last_status.clone_from(&app.status);
                 status_at = Instant::now();
@@ -868,8 +862,7 @@ fn event_loop(
             }
             app.bound_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
-            // While the navigator is hidden its viewport is zero, and a reveal computed there would
-            // zero the kept scroll — it stays pending for the show frame.
+            // A hidden navigator's reveal waits for the show frame.
             if !app.navigator_hidden_here() && std::mem::take(&mut app.reveal_files) {
                 app.reveal_file_cursor(file_vp);
             }
@@ -962,8 +955,7 @@ fn event_loop(
                 world_inflight = if world_tx.send(job).is_ok() {
                     Some((Instant::now(), builds))
                 } else {
-                    // A dead worker must not pin the in-flight marker (and its glyph and tight
-                    // wake) for the rest of the session.
+                    // A dead worker must not pin the in-flight marker.
                     app.status = "refresh worker unavailable".to_string();
                     None
                 };
@@ -1150,8 +1142,7 @@ fn event_loop(
                     }
                     Event::Mouse(m) => {
                         last_mouse = Instant::now();
-                        // Reuse this frame's `area` and `heights` (computed above for the scroll
-                        // settle) so a drag-select doesn't re-measure the whole diff per motion.
+                        // Reuse this frame's measurements, so a drag never re-measures the diff.
                         if let Err(e) =
                             handle_mouse(app, m, area, &heights, painted_frame.keymap(), &Clipboard)
                         {
@@ -1184,8 +1175,7 @@ fn event_loop(
             if app.config_error().is_none() {
                 app.tick_base_picker_probe();
             }
-            // An `edit` press named a file: run the editor, and hand it the pane when it is one
-            // that paints there.
+            // Run the editor an `edit` press named.
             if app.editor_request.is_some() {
                 run_editor(terminal, app, painted_frame.editor(), kbd, &mut open_editors)?;
             }
@@ -1308,8 +1298,7 @@ fn apply_pr_probe_result(
                     true
                 }
                 Some(PrEffect::Refetch) => {
-                    // The snapshot stays painted; only the refreshing indicator may appear once the
-                    // wait crosses the loading delay.
+                    // The snapshot stays painted; only the refresh indicator may appear.
                     pr.wait_started = (app.tab == crate::app::Tab::Pr).then(Instant::now);
                     false
                 }
@@ -1443,8 +1432,7 @@ fn apply_text_edit(app: &mut App, code: KeyCode, ctrl: bool, alt: bool, word: bo
         Char('e') if ctrl => app.caret_end(),
         Char('u') if ctrl => app.input_kill_to_start(),
         Char('k') if ctrl => app.input_kill_to_end(),
-        // Word-jump: `Alt+b`/`Alt+f` (readline; survives as ESC-prefixed, unlike modified arrows,
-        // which many terminals/multiplexers strip) and modified arrows where they are delivered.
+        // Word jumps: `Alt+b`/`Alt+f`, and modified arrows where delivered.
         Char('b') if alt => app.caret_word_left(),
         Char('f') if alt => app.caret_word_right(),
         Left if word => app.caret_word_left(),
@@ -1654,8 +1642,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
-    // The comments-list overlay acts through the same bindings and closes on `esc` and the
-    // `comments` binding.
+    // The comments list acts through the same bindings.
     if app.mode == Mode::List {
         match (action, key.code) {
             (Some(K::Comments), _) | (_, Esc) => app.close_list(),
@@ -1736,8 +1723,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     match key.code {
         Tab => app.toggle_focus(),
-        // `esc` peels one layer: a live selection, then an armed crossing, then the footer
-        // expansion (the `esc` ladder).
+        // `esc` peels one layer.
         Esc => app.escape(),
         _ => {}
     }
@@ -2143,8 +2129,7 @@ fn dispatch_mouse(
     target: &dyn crate::export::ExportTarget,
 ) -> Result<()> {
     app.hover = Some((m.column, m.row));
-    // A click or a wheel answers the quit question and does nothing else, like a key that is not
-    // one of its answers.
+    // A click or wheel answers the quit question and nothing else.
     if app.confirming_quit && answers_question(m.kind) {
         app.confirming_quit = false;
         return Ok(());
@@ -2162,8 +2147,7 @@ fn dispatch_mouse(
         use ui::SearchTarget as T;
         match m.kind {
             MouseEventKind::Drag(MouseButton::Left) if app.divider_drag_active() => {
-                // The share maps the pointer's row into the band-to-footer span the two panes
-                // divide, matching `search_layout`'s geometry.
+                // Map the pointer's row to the share, as `search_layout` divides it.
                 let l = ui::search_layout(ui::body_rect(area, app), app);
                 let axis_len = l.results.height + l.preview.height;
                 let offset = m.row.saturating_sub(l.results.y);
@@ -2201,11 +2185,9 @@ fn dispatch_mouse(
         return Ok(());
     }
 
-    // A modal captures new mouse gestures, but a divider gesture cancelled by the key that opened
-    // it still owns its remaining drag and mouse-up events.
+    // A cancelled divider gesture still owns its remaining events.
     if app.mode.is_modal() {
-        // Text selection stays available while the comment editor is open, selecting from the
-        // frozen view under it; its clicks stay inert like the rest of the modal's pane
+        // Text selection works under the comment editor; its clicks stay inert.
         if app.composing() {
             match m.kind {
                 MouseEventKind::Down(MouseButton::Left) if !app.divider_drag_captured() => {
@@ -2292,8 +2274,7 @@ fn dispatch_mouse(
         _ => {}
     }
 
-    // The read-only PR tab: click a tab or the open button, click a row to read it, drag over text
-    // to select and copy it, and wheel either pane without moving the selection.
+    // The PR tab's mouse: tabs, the open button, rows, selection, wheel.
     if app.tab == crate::app::Tab::Pr {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -3310,8 +3291,7 @@ mod refresh_tests {
         );
         assert!(app.gesture_active(), "an unchanged config leaves the gesture alive");
 
-        // The end table's config row: a theme change ends the gesture at the boundary, before the
-        // new frame applies.
+        // A theme change ends the gesture before the new frame applies.
         std::fs::write(&path, "theme = \"nord\"\n").unwrap();
         super::reconcile_plugin_config(
             &mut app,

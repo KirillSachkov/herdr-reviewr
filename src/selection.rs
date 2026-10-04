@@ -110,8 +110,7 @@ pub fn files_text(
         .join("\n")
 }
 
-/// The chars of `text` from `from` up to and including `to` (to the end when `to` is `None`),
-/// clamped to the text.
+/// The chars of `text` from `from` through `to`, clamped.
 fn slice_chars(text: &str, from: usize, to: Option<usize>) -> String {
     let iter = text.chars().skip(from);
     match to {

@@ -98,8 +98,7 @@ impl SnippetRowCache {
     }
 }
 
-/// `+` when the resolved side is new and the range has insertions, `-` when the side is old,
-/// otherwise no sign.
+/// `+` for a new side with insertions, `-` for an old side.
 pub(crate) fn snippet_caption_sign(rows: &[Row], start: u32, end: u32, side: Side) -> Option<char> {
     match side {
         Side::Old => Some('-'),

@@ -260,8 +260,7 @@ fn discussion_tail_pages(total: u64) -> Vec<u64> {
     [total.saturating_sub(1), total].into_iter().filter(|page| *page >= 2).collect()
 }
 
-/// Move a discussions response into its comment discussions, dropping system-only and empty threads
-/// so the cap counts what actually renders (`merge_comments`).
+/// Keep a discussions response's commentable threads, so the cap counts what renders.
 fn comment_discussions(response: Value) -> Vec<Value> {
     match response {
         Value::Array(rows) => rows.into_iter().filter(|d| comment_root(d).is_some()).collect(),

@@ -1,5 +1,4 @@
-//! The file-list directory tree: the scope's changed files grouped into a collapsible tree of
-//! directories and files, flattened to the rows the navigator paints.
+//! The file-list tree: changed files grouped into directories, flattened to rows.
 
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
@@ -11,8 +10,7 @@ use crate::model::{ChangeKind, ChangedFile};
 pub struct Row {
     /// Nesting level, for indentation.
     pub depth: usize,
-    /// The segment(s) shown — a directory name, a file basename, or a collapsed chain joined with
-    /// `/` (single-child directories fold into their child).
+    /// The shown name: a directory, a basename, or a collapsed single-child chain.
     pub name: String,
     pub kind: RowKind,
     /// Whether git ignores this row's path — rendered dimmed in `All files`.
@@ -101,8 +99,7 @@ impl Row {
     }
 }
 
-/// One directory node: its sub-directories and the files directly in it, both keyed by name so
-/// iteration is alphabetical.
+/// One directory node, its children keyed by name.
 #[derive(Default)]
 struct Dir {
     dirs: BTreeMap<String, Dir>,
@@ -387,8 +384,7 @@ mod tests {
 
     #[test]
     fn an_ignored_dir_placeholder_renders_as_a_collapsed_ignored_row() {
-        // A wholly-ignored directory shows as one dimmed dir row, with no children until the app
-        // loads them on expand.
+        // A wholly ignored directory is one dimmed row, loaded on expand.
         let rows = build(&[ignored_dir("target")], &HashSet::new(), false);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ignored, "the placeholder row is marked ignored (dimmed)");

@@ -28,8 +28,7 @@ impl Unit {
     }
 }
 
-/// The landing rule: the index in `ranges` (row order) of the range holding `line`, else of the
-/// first one below it — a gap between blocks belongs to the next block — else the last.
+/// The landing rule: the range holding `line`, else the next below, else the last.
 pub(crate) fn landing(ranges: &[(u32, u32)], line: Option<u32>) -> Option<usize> {
     let last = ranges.len().checked_sub(1);
     let Some(line) = line else { return last };

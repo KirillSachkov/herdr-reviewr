@@ -62,8 +62,7 @@ pub struct TurnTransition {
     pub ended: bool,
 }
 
-/// The turn baseline lifecycle: the previous status, a candidate snapshot awaiting promotion, and
-/// the live baseline tree the `last-turn` diff reads.
+/// The turn baseline lifecycle: last status, pending candidate, live baseline.
 #[derive(Default, Debug)]
 pub struct TurnTracker {
     /// Whether the previous sample rested.
@@ -109,8 +108,7 @@ impl TurnTracker {
         transition
     }
 
-    /// Store the worktree snapshot captured at a turn start as the pending candidate, replacing any
-    /// earlier unpromoted candidate (a question-only turn's).
+    /// Store a turn start's snapshot as the pending candidate.
     pub fn set_candidate(&mut self, sha: String) {
         self.candidate = Some(sha);
     }
@@ -130,8 +128,7 @@ mod tests {
 
     #[test]
     fn from_wire_reads_herdrs_four_spellings_and_folds_the_rest_to_unknown() {
-        // The spellings are herdr's, so they are pinned literally rather than derived from anything
-        // reviewr owns.
+        // herdr's spellings, pinned literally.
         assert_eq!(Status::from_wire("idle"), Status::Idle);
         assert_eq!(Status::from_wire("working"), Status::Working);
         assert_eq!(Status::from_wire("blocked"), Status::Blocked);
@@ -144,8 +141,7 @@ mod tests {
 
     #[test]
     fn an_empty_worktree_rests_so_its_first_working_agent_starts_a_turn() {
-        // The fold that makes a freshly opened reviewr pane track the next turn it sees, rather
-        // than waiting for an agent that was already there.
+        // A fresh pane tracks the next turn it sees.
         assert_eq!(WorktreeState::fold([]), WorktreeState::Resting);
         let mut t = TurnTracker::default();
         t.observe(WorktreeState::fold([]));

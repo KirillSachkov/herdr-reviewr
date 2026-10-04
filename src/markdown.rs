@@ -20,8 +20,7 @@ const CODE_INDENT: &str = "  ";
 /// A shrunk table column never drops below this width (or its natural width, when smaller).
 const COL_FLOOR: usize = 8;
 
-/// Rendered markdown: the styled lines, one metadata entry per line in lockstep, and the document's
-/// heading anchors — the position mapping and link hit-testing the surfaces consume.
+/// Rendered markdown: styled lines, per-line metadata, and heading anchors.
 #[derive(Clone, Debug, Default)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
@@ -208,16 +207,14 @@ struct Chunk {
     line: usize,
 }
 
-/// An in-progress code block: the fence's language tag, its content, and whether a fence line
-/// precedes the content in the source.
+/// An in-progress code block: language, content, fence position.
 struct CodeBlock {
     lang: Option<String>,
     content: String,
     fenced: bool,
 }
 
-/// An in-progress table: its source range (the wide-table fallback), rows of cells of chunks with
-/// each row's source lines, and how many leading rows are the header.
+/// An in-progress table: source range, rows of cells, header count.
 struct Table {
     range: Range<usize>,
     rows: Vec<Vec<Vec<Chunk>>>,
@@ -237,8 +234,7 @@ struct Renderer<'a> {
     block_end: usize,
     /// The source ranges of blocks that rendered at least one line.
     covered: Vec<(usize, usize)>,
-    /// The source lines the lines being pushed take their own text from, while narrower than their
-    /// block's ([`LineMeta::lines`]).
+    /// The source lines the pushed lines take their own text from.
     row_lines: Option<(usize, usize)>,
     /// The blocks open now: each one's closing tag, source lines, and the rendered line count at its start.
     open_blocks: Vec<(TagEnd, usize, usize, usize)>,
@@ -846,8 +842,7 @@ impl Renderer<'_> {
 
     // ---- block emission ------------------------------------------------------------------
 
-    /// The current block prefixes: quote bars plus list indent, with the pending item marker on the
-    /// first line.
+    /// The current block prefixes: quote bars and list indent.
     fn prefix(&self, marker: Option<&str>) -> (Span<'static>, Span<'static>) {
         let bars = "▎".repeat(self.quote.min(MAX_NEST));
         let gap = if bars.is_empty() { "" } else { " " };
@@ -1065,8 +1060,7 @@ impl Renderer<'_> {
         marker
     }
 
-    /// Emit one already-styled fragment run as block lines, char-wrapped, under the current block
-    /// prefix plus `extra_indent`.
+    /// Emit a styled run as block lines under the current prefix.
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
@@ -1087,8 +1081,7 @@ impl Renderer<'_> {
         }
     }
 
-    /// Close a code block: highlight it whole through the shared highlighter, then emit each line
-    /// indented, char-wrapped to the pane.
+    /// Close a code block: highlight it whole, then emit its lines.
     fn end_code(&mut self) {
         let Some(CodeBlock { lang, content, fenced }) = self.code.take() else {
             return;
@@ -1292,8 +1285,7 @@ impl Renderer<'_> {
     }
 }
 
-/// GitHub's slug normalization: lowercase, spaces to hyphens, everything but letters, digits,
-/// hyphens, and underscores dropped.
+/// GitHub's slug: lowercase, spaces to hyphens, only letters, digits, `-` and `_`.
 pub(crate) fn slug_text(text: &str) -> String {
     let mut slug = String::new();
     for c in text.trim().to_lowercase().chars() {
@@ -1462,8 +1454,7 @@ fn wrap_fragments(fragments: &[Fragment], budget: usize, by_words: bool) -> Vec<
     w.lines
 }
 
-/// The wrap state: finished lines, the line being filled (spans plus link column runs), and the
-/// word being assembled (a word can span styled fragments).
+/// The wrap state: finished lines, the current line, the word being built.
 struct Wrapper {
     budget: usize,
     lines: Vec<WrappedLine>,
@@ -1480,8 +1471,7 @@ impl Wrapper {
         self.line_w = 0;
     }
 
-    /// Append `text` to the line, merging into the last span when the style matches and extending
-    /// the line's last link run when `link` continues it.
+    /// Append `text`, merging into a matching span and link run.
     fn place(&mut self, text: &str, style: Style, link: Option<usize>, w: usize) {
         if let Some(id) = link {
             match self.line_links.last_mut() {
@@ -1521,8 +1511,7 @@ impl Wrapper {
         self.word_w += char_width(c);
     }
 
-    /// Place the assembled word: break the line first when the word no longer fits, and hard-break
-    /// the word itself when it is wider than a whole line.
+    /// Place the word: break the line first, or hard-break an over-wide word.
     fn place_word(&mut self) {
         if self.word.is_empty() {
             return;
@@ -1707,8 +1696,7 @@ mod tests {
     #[test]
     fn the_underline_never_bleeds_into_the_gaps_around_a_link() {
         let (hl, p) = setup();
-        // One-word link followed by its dim destination, and a two-word link whose interior space
-        // stays part of the underlined run.
+        // A link's interior space stays in its underlined run.
         for md in ["built for [herdr](https://herdr.dev).", "see [the run](https://ci.example/1)"] {
             let lines = render_lines(md, 80, &hl, &p);
             for span in &lines[0].spans {
@@ -1793,8 +1781,7 @@ mod tests {
     #[test]
     fn an_over_wide_table_shrinks_its_widest_column_and_wraps() {
         let (hl, p) = setup();
-        // Natural widths: id 2, note 26; at pane 24 the note column shrinks to 19 and wraps, the id
-        // column keeps its natural width, one dim rule under the header.
+        // At pane 24 the note column shrinks to 19 and wraps.
         let md = "| id | note |\n|---|---|\n| a | wraps beyond the pane edge |\n| b | short |";
         let t = texts(&render_lines(md, 24, &hl, &p));
         assert_eq!(t[0].trim_end(), "id │ note");

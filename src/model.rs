@@ -42,8 +42,7 @@ impl Scope {
     }
 }
 
-/// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit ids,
-/// equal for a run of one.
+/// The `commits` pick: a contiguous run from `oldest` to `newest`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommitPick {
     pub oldest: String,

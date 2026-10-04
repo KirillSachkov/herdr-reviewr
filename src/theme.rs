@@ -53,16 +53,14 @@ pub struct Palette {
     pub ins_bg: Color,
     pub emph_del_bg: Color,
     pub emph_ins_bg: Color,
-    /// The search match highlight: a warm fill behind a matched substring, legible over a plain
-    /// row, a syntax-colored row, and the preview's banded hit line alike.
+    /// The search match fill, legible over plain and syntax-colored rows.
     pub match_hl: Color,
     /// The text-selection highlight, live and settled.
     pub sel_bg: Color,
 }
 
 impl Palette {
-    /// The cursor-row fill: the strongest-contrast surface (`surface2`) in the focused pane, a step
-    /// softer (`surface1`) when not, so which pane holds the cursor reads at a glance.
+    /// The cursor-row fill, stronger in the focused pane.
     pub fn cursor_bg(&self, focused: bool) -> Color {
         if focused { self.surface2 } else { self.surface1 }
     }
@@ -83,8 +81,7 @@ impl Palette {
         lift(hue, self.base, self.text, MIN_MARK_CONTRAST)
     }
 
-    /// A marker row's color: the deletion red for a removed block, the amber for changed source
-    /// that renders nothing — lifted like [`Self::bar_color`].
+    /// A marker row's color, lifted like [`Self::bar_color`].
     #[must_use]
     pub fn marker_color(&self, kind: crate::diff::MarkerKind) -> Color {
         use crate::diff::MarkerKind;
@@ -217,8 +214,7 @@ fn bundled(
     Theme { name, palette: derive(anchors, appearance), syntax: SyntaxChoice::Bundled(syntax) }
 }
 
-/// Vendored `.tmTheme` assets for the syntax themes `two-face` does not carry (and Mocha, kept as
-/// the byte-identical source of today's highlighting).
+/// Vendored `.tmTheme` assets for themes `two-face` lacks, and Mocha.
 const MOCHA_TM: &[u8] = include_bytes!("../assets/Catppuccin Mocha.tmTheme");
 const TOKYO_NIGHT_TM: &[u8] = include_bytes!("../assets/tokyo-night.tmTheme");
 const TOKYO_NIGHT_DAY_TM: &[u8] = include_bytes!("../assets/tokyo-night-day.tmTheme");
@@ -236,8 +232,7 @@ fn everforest() -> Theme {
     }
 }
 
-/// Catppuccin Latte: a light theme, derived from its anchors to exercise the derivation path (and
-/// paired with `two-face`'s Latte syntax theme).
+/// Catppuccin Latte, derived from its anchors.
 fn catppuccin_latte() -> Theme {
     derived(
         "catppuccin-latte",
@@ -250,8 +245,7 @@ fn catppuccin_latte() -> Theme {
 const CATPPUCCIN_LATTE: Anchors =
     anchors(0xeff1f5, 0x4c4f69, 0xd20f39, 0x40a02b, 0xdf8e1d, 0xfe640b, 0x8839ef, 0x7287fd);
 
-/// Canonical anchors for the derived themes. base, text, then the six accents (red, green, yellow,
-/// orange, purple, blue); surfaces and diff fills are derived.
+/// Anchors for the derived themes: base, text, six accents.
 const DRACULA: Anchors =
     anchors(0x282a36, 0xf8f8f2, 0xff5555, 0x50fa7b, 0xf1fa8c, 0xffb86c, 0xbd93f9, 0x8be9fd);
 const NORD: Anchors =
@@ -387,8 +381,7 @@ pub fn legible(fg: Color, fill: Color, base: Color, toward: Color) -> Color {
     toward
 }
 
-/// A diff-row fill: tint `base` with `accent`, stepping the tint down from its start strength until
-/// the row's `fg` clears [`MIN_FILL_CONTRAST`].
+/// A diff-row fill: `base` tinted with `accent` until `fg` stays legible.
 fn readable_tint(
     accent: Color,
     base: Color,

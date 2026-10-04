@@ -116,8 +116,7 @@ impl Repo {
         self.plant_blob("refs/reviewr/base-pick", content);
     }
 
-    /// A leftover path-hashed last-turn ref from before the worktree-private cutover, using the
-    /// FNV-1a key the old binary wrote.
+    /// A leftover path-hashed last-turn ref from before the worktree-private cutover.
     pub fn plant_legacy_turn_base(&self, sha: &str) {
         let key = legacy_worktree_key(self.path());
         self.git(&["update-ref", &format!("refs/reviewr/turn-base/{key}"), sha]);

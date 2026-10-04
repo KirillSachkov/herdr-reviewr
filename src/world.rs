@@ -37,13 +37,11 @@ pub struct WorldSnapshot {
     pub changed: HashMap<String, Annotation>,
     pub entries: Vec<Entry>,
     pub branch_base: git::BaseStatus,
-    /// The `commits` scope's pick verdict, from the same build as the changeset it heads `None` on
-    /// every other scope.
+    /// The `commits` pick verdict from the same build, `None` elsewhere.
     pub pick_status: Option<PickStatus>,
     /// The two ends the changeset was diffed between, which a file's diff reads too.
     pub ends: Option<DiffEnds>,
-    /// The commit `HEAD` named when the build ran, the commit picker's universe key `None` in an
-    /// unborn repository.
+    /// The commit `HEAD` named at build time, `None` while unborn.
     pub head: Option<String>,
 }
 
@@ -85,8 +83,7 @@ pub struct ScopeBuild {
 
 /// Build the snapshot for `input`; the changeset is built on every tab.
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
-    // Outside a git repo, an empty snapshot paints the quiet empty state rather than a failing
-    // status line every poll.
+    // Outside a git repo, an empty snapshot paints the quiet empty state.
     if !git::is_repo(&input.repo) {
         return Ok(WorldSnapshot {
             changed: HashMap::new(),
@@ -207,8 +204,7 @@ pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
     git::read_baseline_ref(repo)
 }
 
-/// The `All files` entries: every worktree path (ignored dimmed), with the children of expanded
-/// ignored directories loaded lazily.
+/// The `All files` entries, expanded ignored directories loaded lazily.
 pub(crate) fn all_files_entries(
     input: &WorldInput,
     changed: &HashMap<String, Annotation>,
@@ -331,8 +327,7 @@ impl TurnHost {
             return if member { Membership::Member } else { Membership::NotMember };
         }
         match git::worktree_of(Path::new(cwd)) {
-            // A resolved root is stable, so record whether it is a member and never shell out for
-            // this cwd again. git canonicalizes it, so the worktree root itself matches too.
+            // A resolved root is stable: record its membership once.
             git::Worktree::Root(top) => {
                 let member = same_root(&top, &self.repo);
                 self.resolved.insert(cwd.to_string(), member);

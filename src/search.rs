@@ -12,11 +12,9 @@ use fff_search::{
 /// The most results one query fetches per group.
 const FILE_LIMIT: usize = 50;
 const CODE_LIMIT: usize = 200;
-/// Cap on one grep's runtime, so a pathological query returns partial results instead of pinning
-/// the worker while newer keystrokes queue.
+/// Cap on one grep's runtime.
 const GREP_BUDGET_MS: u64 = 80;
-/// How long a not-yet-warm worker waits for the next keystroke before re-checking whether the scan
-/// finished and the pending query can run for real.
+/// How long a cold worker waits before re-checking the scan.
 const WARMUP_POLL: Duration = Duration::from_millis(50);
 
 /// The engine's cache home. The frecency store lives here, never the worktree

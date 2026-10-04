@@ -221,8 +221,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     )
     .unwrap();
 
-    // Several agents: `s` opens the picker over both rows, labelled from `tab list`, and with
-    // nothing sent yet the highlight arms on the first row.
+    // Several agents: the picker opens on the first row.
     agents(&fake_dir, TWO_AGENTS);
     write_comment(&mut app, "one");
     press(&mut app, KeyCode::Char('s'), area, &keymap);

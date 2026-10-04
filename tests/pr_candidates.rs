@@ -1,5 +1,4 @@
-//! Integration tests for the PR fetch's local reads (`git::pr_local`, `git::contains_commit`,
-//! `git::ahead_behind_oids`) against real temp repos.
+//! The PR fetch's local reads against real temp repos.
 
 mod common;
 
@@ -168,8 +167,7 @@ fn a_recorded_upstream_joins_the_names_unless_it_names_a_base() {
 
 #[test]
 fn every_resolved_base_source_excludes_names() {
-    // Gitflow: the picked `develop` wins the pin, but a tip on the default `main`'s history must
-    // still contribute no name — every source that resolved excludes.
+    // A tip on the default branch's history contributes no name.
     let repo = worktree();
     repo.git(&["switch", "-qc", "develop", "main"]);
     repo.write("d.txt", "dev\n");

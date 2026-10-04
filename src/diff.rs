@@ -1,5 +1,4 @@
-//! The structured diff model: a file's changes as rows built from its old and new content,
-//! syntax-highlighted, ready to paint.
+//! The structured diff model: a file's changes as highlighted rows.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -68,8 +67,7 @@ pub enum Bar {
     Modified,
 }
 
-/// A marker row's kind: `Removed` source deleted with its whole block, `Unrendered` changed source
-/// that renders nothing.
+/// A marker row's kind: source removed with its block, or source that renders nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MarkerKind {
     Removed,
@@ -290,8 +288,7 @@ impl FileDiff {
         }
     }
 
-    /// Build the File view: the whole current `content` as `Context` rows, syntax-highlighted, with
-    /// no folds, change rows, or emphasis.
+    /// The File view: the whole `content` as highlighted `Context` rows.
     fn build_file(path: String, content: &str, hl: &Highlighter) -> Self {
         let notice = |state| Self::rowless(path.clone(), None, state, View::File);
         if content.contains('\0') {
@@ -498,8 +495,7 @@ fn word_emphasis(old: &str, new: &str) -> (f32, Vec<CharRange>, Vec<CharRange>) 
     (diff.ratio(), old_e, new_e)
 }
 
-/// Shrink each emphasis range off its leading and trailing whitespace, dropping any range that is
-/// all whitespace.
+/// Trim emphasis ranges of surrounding whitespace, dropping blank ones.
 fn trim_range_edges(ranges: Vec<CharRange>, text: &str) -> Vec<CharRange> {
     let chars: Vec<char> = text.chars().collect();
     ranges
@@ -516,8 +512,7 @@ fn trim_range_edges(ranges: Vec<CharRange>, text: &str) -> Vec<CharRange> {
         .collect()
 }
 
-/// Merge consecutive emphasis ranges whose in-between text is all whitespace, swallowing that
-/// whitespace into the highlight.
+/// Merge emphasis ranges separated only by whitespace.
 fn coalesce_ws_gaps(ranges: Vec<CharRange>, text: &str) -> Vec<CharRange> {
     let chars: Vec<char> = text.chars().collect();
     let mut out: Vec<CharRange> = Vec::new();
@@ -548,8 +543,7 @@ fn push_range(ranges: &mut Vec<CharRange>, pos: u32, len: u32) {
 /// Context lines kept adjacent to each change; longer unchanged runs collapse to a fold.
 const FOLD_MARGIN: usize = 3;
 
-/// Replace each run of unchanged `Context` rows that exceeds the margin with a single `Fold` owning
-/// the hidden rows, keeping `FOLD_MARGIN` lines next to every change and at the file head and tail.
+/// Fold each long unchanged run, keeping `FOLD_MARGIN` lines around changes and file edges.
 fn collapse_context(rows: &[Row]) -> Vec<Row> {
     let n = rows.len();
     let mut keep = vec![false; n];
@@ -603,8 +597,7 @@ impl DiffCache {
         Self::default()
     }
 
-    /// Return the cached diff when `old`/`new`/`previous_path` are unchanged for `path`, else
-    /// build, cache, and return it.
+    /// The cached diff for unchanged sides, else build and cache it.
     pub fn get(
         &mut self,
         path: String,
@@ -623,8 +616,7 @@ impl DiffCache {
         self.get_or_build(format!("file:{path}"), key, || FileDiff::build_file(path, content, hl))
     }
 
-    /// Shared cache body: return the entry under `cache_key` when its stored hash still equals
-    /// `content_key`, else `build` it, evict-on-cap, and insert.
+    /// The entry under `cache_key` while its hash matches, else build, evict, insert.
     fn get_or_build(
         &mut self,
         cache_key: String,

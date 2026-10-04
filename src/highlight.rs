@@ -16,8 +16,7 @@ use crate::theme::SyntaxChoice;
 /// The default text color when a theme carries none, or its syntax theme fails to load.
 const DEFAULT_FG: Rgb = (0xcd, 0xd6, 0xf4);
 
-/// The broad bat/two-face syntax set, built once per process (it is expensive to deserialize) and
-/// shared across every `Highlighter`.
+/// The broad syntax set, deserialized once per process.
 fn syntaxes() -> &'static SyntaxSet {
     static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
     SYNTAXES.get_or_init(two_face::syntax::extra_newlines)

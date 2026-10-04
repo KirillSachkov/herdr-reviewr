@@ -17,8 +17,7 @@ pub enum PrView {
     Pending,
     /// Work crossed the loading-indicator delay without producing a snapshot.
     Loading,
-    /// An open (or merged/closed) PR resolved from the current branch's published heads, or the one
-    /// its upstream record pins.
+    /// A PR resolved from the branch's published heads, or the one its upstream pins.
     Pr(Box<PrSnapshot>),
     /// No PR resolves from the current branch's heads.
     NoPr,
@@ -54,8 +53,7 @@ impl PrView {
                 forge.display_name(),
                 forge.cli()
             )),
-            // Total over every forge: one without an extension concept still renders a retryable
-            // message, never a missing remedy the render would trip over.
+            // Total over every forge, so the render always has a message.
             Self::NoExtension(forge) => Some(match extension_hint(*forge) {
                 Some(hint) => format!(
                     "{} CLI extension missing. Run {hint}, then press {refresh}.",
@@ -771,8 +769,7 @@ pub struct Association {
     pub history: Vec<AssocPr>,
 }
 
-/// The GitHub branch lookup: one aliased `pullRequests(headRefName:)` block per name, every
-/// lifecycle state, newest first, admitted against the branch's heads.
+/// The GitHub branch lookup: one aliased block per name, admitted against the heads.
 fn branch_lookup(
     target: &FetchTarget<'_>,
     queried: &crate::git::RepoTarget,
@@ -791,8 +788,7 @@ fn branch_lookup(
     Ok(parse_branch_lookup(&v, names.len(), queried, heads))
 }
 
-/// The branch-lookup query text: per name, an open block (`o{i}`) apart from the finished block
-/// (`h{i}`), each newest-created-first and capped at 20.
+/// The branch-lookup query: per name an open and a finished block, newest first, capped at 20.
 fn build_branch_query(names: usize) -> String {
     use std::fmt::Write;
     let mut q = String::from("query($o:String!,$n:String!");
@@ -1140,8 +1136,7 @@ fn check_status(node: &Value) -> CheckStatus {
         Some("COMPLETED") => match node["conclusion"].as_str() {
             Some("SUCCESS") => CheckStatus::Success,
             Some("SKIPPED" | "NEUTRAL") => CheckStatus::Skipped,
-            // FAILURE / TIMED_OUT / CANCELLED / ACTION_REQUIRED / a missing conclusion all read as
-            // a failed check — something needs attention.
+            // Any other conclusion reads as a failed check.
             _ => CheckStatus::Failure,
         },
         Some("IN_PROGRESS") => CheckStatus::Running,
@@ -1149,8 +1144,7 @@ fn check_status(node: &Value) -> CheckStatus {
     }
 }
 
-/// Merge the three comment surfaces (GraphQL `reviews`, `comments`, and `reviewThreads` node
-/// arrays) into one newest-first list, keeping only a bot's latest PR-level post and each human's.
+/// Merge the three comment surfaces newest first, keeping each author's latest PR-level post.
 fn merge_comments(reviews: &Value, issues: &Value, threads: &Value) -> Vec<Comment> {
     let mut out: Vec<Comment> = Vec::new();
 

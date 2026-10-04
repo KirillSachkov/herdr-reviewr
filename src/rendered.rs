@@ -13,8 +13,7 @@ pub(crate) struct RenderedView {
     pub old_map: Option<OldMap>,
     /// The reviewer's own `<details>` choices, by key: open or closed.
     pub details: HashMap<String, bool>,
-    /// The render behind the rows: the styled lines a `Row::Rendered` block line paints, each
-    /// line's links and `<details>`, and the heading anchors.
+    /// The render behind the rows: styled lines, links, details, anchors.
     pub doc: crate::markdown::Rendered,
     /// The change marks of the rows on screen.
     pub marks: MarkMap,
@@ -150,8 +149,7 @@ pub(crate) struct RenderedIndex {
     /// The blocks' positions in `units`, and their source ranges: where a source line lands.
     blocks: Vec<usize>,
     block_ranges: Vec<(u32, u32)>,
-    /// Per row: the source lines its own text comes from ([`RenderedKind::Block`]'s `source`; a
-    /// marker's own line), and whether it is a block's gap.
+    /// Per row: its source lines, and whether it is a gap.
     row_source: Vec<(u32, u32)>,
     gap: Vec<bool>,
     /// The units a new-side line can sit in.

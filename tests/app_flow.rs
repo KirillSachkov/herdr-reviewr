@@ -65,8 +65,7 @@ fn edited_repo() -> Repo {
     r
 }
 
-/// Settle the diff scroll with one display row per logical row (no wrap), for tests that drive
-/// short-line diffs — reveal the cursor, then bound the offset, as the loop does.
+/// Settle the diff scroll with one display row per logical row.
 fn clamp(app: &mut App, viewport: usize) {
     let heights = vec![1usize; app.visible.len()];
     app.reveal_diff_cursor(&heights, viewport);
@@ -372,8 +371,7 @@ fn file_skips_jump_file_to_file_from_either_pane() {
     r.write("a.rs", "y2\n");
     let mut app = app_on(&r);
 
-    // Directories sort first, so the tree is [src/, src/b.rs, src/c.rs, a.rs] and the initial
-    // cursor lands on the first *file* row.
+    // Directories sort first; the cursor lands on the first file row.
     assert_eq!(app.diff_path.as_deref(), Some("src/b.rs"));
 
     app.next_file();
@@ -805,8 +803,7 @@ fn the_footer_offers_edit_file_on_a_diff_with_no_rows() {
     assert_eq!(request.line, 1, "at its start, since no row names a line");
 }
 
-/// The footer never names a key that would not work, and a deleted file is the case that separates
-/// "the cursor names a file" from "the worktree still holds it".
+/// The footer never names a key that would not work.
 #[test]
 fn edit_reaches_a_file_the_changeset_only_calls_deleted() {
     // `git rm --cached` reports the file as deleted while it sits in the worktree.
@@ -868,8 +865,7 @@ fn edit_opens_the_file_under_the_cursor_and_the_comment_when_one_is_there() {
     assert_eq!(from_row.path, "a.rs");
     assert_eq!(from_row.line, 1, "a navigator row names no line, so the file opens at its start");
 
-    // The `All files` read pane is built by a different builder and its comments anchor to content
-    // rather than to the diff, so both branches take a different route there.
+    // `All files` builds and anchors differently.
     enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
     app.focus = Focus::Diff;
     app.diff_cursor = 2;
@@ -2153,8 +2149,7 @@ fn editing_from_the_list_navigates_to_the_comments_file() {
     app.select_file(ai).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
 
-    // Editing the comment from the list pulls the view back to its file and lands the cursor on a
-    // real diff line there (so the inline box opens over the comment).
+    // Editing from the list pulls the view back to its file.
     app.open_list();
     app.start_edit();
     assert!(app.composing());
@@ -2561,8 +2556,7 @@ fn agent_in(cwd: &Path, status: Status) -> AgentSample {
     AgentSample { cwd: Some(cwd.to_string_lossy().into_owned()), status }
 }
 
-/// Drive one enumeration on the worker-owned turn host and mirror its baseline and membership into
-/// the app, exactly as a world completion landing would `None` is a failed enumeration.
+/// Drive one enumeration and mirror it into the app; `None` is a failure.
 fn observe_agents(
     app: &mut App,
     host: &mut herdr_reviewr::world::TurnHost,
@@ -2791,8 +2785,7 @@ fn an_agent_in_a_second_worktree_of_the_repository_is_not_a_member() {
     r.git(&["worktree", "add", "-q", sibling.to_str().unwrap(), "-b", "other"]);
 
     let (mut app, mut host) = turn_setup(&r);
-    // Rest first, so a wrongly-admitted sibling's rest→work edge would start a turn and fail the
-    // baseline assertion below rather than hiding behind the unobserved first sample.
+    // Rest first, so a wrongly admitted sibling would start a turn.
     observe_agents(&mut app, &mut host, Some(&[agent_in(&sibling, Status::Idle)]));
     observe_agents(&mut app, &mut host, Some(&[agent_in(&sibling, Status::Working)]));
     assert_eq!(
@@ -2826,8 +2819,7 @@ fn an_agent_whose_cwd_is_not_an_absolute_path_is_not_a_member() {
 
 #[test]
 fn an_agent_in_a_subdirectory_belongs_to_the_worktree() {
-    // The path is not the repo root, so this goes through the git resolution rather than the
-    // exact-match fast path.
+    // Not the root, so this goes through git resolution.
     let r = Repo::init();
     r.write("sub/a.rs", "one\n");
     r.commit_all("init");
@@ -3081,8 +3073,7 @@ fn switching_scope_on_all_files_remarks_in_place() {
     );
     assert_eq!(annotation_of(&app, "b.rs"), Some(None), "b.rs is unmarked under uncommitted");
 
-    // Branch is a superset: the changed set rebuilds before the frame, the tree's annotations land
-    // with the queued refresh.
+    // The changed set rebuilds before the frame; annotations land after.
     app.set_scope(Scope::Branch).unwrap();
     assert_eq!(app.file_cursor, cursor, "the cursor holds across a scope re-mark");
     assert_eq!(app.changed_count(), 2, "branch marks both the committed and the dirty file");
@@ -3426,8 +3417,7 @@ fn the_pr_tab_detour_preserves_each_file_tab_state() {
     assert_eq!(app.diff_path.as_deref(), Some("a.rs"), "Changes restored without bleeding b.rs");
 }
 
-/// The PR navigator cursor walks comments only (checks are a status display), the read pane tracks
-/// the selected comment, and `pr_move` clamps at both ends.
+/// The PR cursor walks comments only and clamps at both ends.
 #[test]
 fn pr_navigator_walks_comments_only_and_clamps() {
     use herdr_reviewr::app::Tab;
@@ -3904,8 +3894,7 @@ fn find_in_rendered_markdown_reads_the_rendered_text() {
         assert_eq!(app.find_count(), Some((None, 0)), "{q}");
     }
 
-    // Flipping with the band open keeps the query, the cursor stays on its block, and the hits
-    // recompute over the new rows — `keep` matches nothing, so the cursor never chases one.
+    // Flipping keeps the query and the cursor's block.
     app.find.as_mut().unwrap().query = "total".to_string();
     app.diff_cursor = rendered_row(&app, "keep");
     app.toggle_rendered();
@@ -4230,8 +4219,7 @@ fn m_flips_between_rendered_and_source_at_the_same_block() {
         _ => panic!("the cursor is on a rendered row"),
     };
 
-    // All files: the rendered cursor's block lands the source cursor on its first line, and back
-    // again onto the block whose source range holds the source cursor's line.
+    // The cursor crosses views by its block's source line.
     let doc = "# Title\n\npara one\n\n## Section two\n\npara two\n";
     let r = Repo::init();
     r.write("doc.md", doc);
@@ -5494,8 +5482,7 @@ fn the_picker_swallows_every_key_it_does_not_bind() {
         assert!(!app.should_quit, "{code:?} quit the app from the picker");
         assert_eq!(app.mode, Mode::Picker, "{code:?} left the picker");
         assert_eq!(app.store.len(), 2, "{code:?} consumed comments from the picker");
-        // `y` reaching the clipboard and `s` re-entering the send both change these even where the
-        // action itself fails, so they catch the leak on a machine with no clipboard tool.
+        // These change even where the action fails.
         assert_eq!(app.picker_rows, rows_before, "{code:?} rebuilt the frozen rows");
         assert_eq!(app.status, status_before, "{code:?} acted and reported from the picker");
     }
@@ -5520,8 +5507,7 @@ fn a_chord_never_fires_the_pickers_irreversible_send() {
         assert_eq!(app.picker_cursor, 0, "{modifiers:?}+3 armed a row");
     }
 
-    // `esc` stays permissive: cancelling is always safe, and no stray modifier may trap the
-    // reviewer in a modal that swallows every other key.
+    // `esc` stays permissive.
     let mut app = app_with_picker(&r);
     handle_key(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::SHIFT), area, &keymap).unwrap();
     assert_eq!(app.mode, Mode::Normal, "a modified `esc` still cancels");
@@ -5555,8 +5541,7 @@ fn a_second_open_never_stacks_a_picker_that_one_esc_cannot_leave() {
     let keymap = Keymap::default();
     let area = Rect::new(0, 0, 80, 24);
 
-    // A second open must not capture `Picker` as the mode to restore, or `esc` would land back in a
-    // picker whose rows are gone — a modal that swallows every key and whose `enter` does nothing.
+    // A second open must not capture `Picker` as the mode to restore.
     let mut app = app_with_picker(&r);
     app.picker_goto(2);
     app.open_picker(vec![choice("w8:p9", "other")]);
@@ -5657,8 +5642,7 @@ fn goto_row(app: &mut App, name: &str) {
     app.base_picker_goto(i);
 }
 
-/// A repo on branch `feature` with sibling branches `dev` and `main`, `origin/HEAD` naming `main`
-/// the default, and one committed edit to diff.
+/// A repo on `feature` with siblings `dev` and `main`.
 fn based_repo() -> Repo {
     let r = Repo::init();
     r.write("a.rs", "one\n");
@@ -6305,8 +6289,7 @@ fn sel_mouse(app: &mut App, kind: MouseEventKind, col: u16, row: u16) {
     handle_mouse(app, event, SEL_AREA, &heights, &Keymap::default(), &SelClipboard).unwrap();
 }
 
-/// The screen cell of `(row, display column)` in the read pane, for a short-lined file where each
-/// row paints one display line: the gutter is one bar cell, a 3-column number, a space.
+/// The screen cell of `(row, display column)` in the read pane.
 fn sel_cell(app: &App, row: usize, display_col: u16) -> (u16, u16) {
     let inner = herdr_reviewr::ui::read_inner_rect(SEL_AREA, app);
     (inner.x + 5 + display_col, inner.y + u16::try_from(row).unwrap())
@@ -6572,8 +6555,7 @@ fn a_settled_rendered_highlight_follows_its_text() {
     r.write("doc.md", "# Title\n\nplain body words changed\n");
     let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
-    // Settle the body's first word by double-click on its rendered row (row 2: the heading, the
-    // blank between, the paragraph).
+    // Double-click the body's first word.
     let (col, row) = sel_cell(&app, 2, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), col, row);
     sel_mouse(&mut app, MouseEventKind::Up(MouseButton::Left), col, row);
@@ -6701,8 +6683,7 @@ fn a_navigator_drag_gates_the_world_drain_and_its_end_lifts_the_gate() {
     assert!(!app.gesture_active());
     assert!(!app.gates_world_drain());
 
-    // A code drag gates no drain: the lists land beneath it and only the open view holds
-    // (`a_world_result_waits_out_an_active_drag`).
+    // A code drag holds only the open view.
     let (c0, r0) = sel_cell(&app, 0, 0);
     let (c1, r1) = sel_cell(&app, 1, 2);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
@@ -6937,8 +6918,7 @@ fn a_rendered_drag_selects_and_copies_through_the_read_surface() {
     let mut app = app_on_rendered(&r);
     assert!(app.rendered_active());
 
-    // The rendered heading is row 0; a drag from its first cell selects its text through the read
-    // pane's own surface and copies it.
+    // A drag over the rendered heading copies its text.
     let (c0, r0) = sel_cell(&app, 0, 0);
     sel_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), c0, r0);
     assert_eq!(app.text_drag().map(|d| d.surface), Some(Surface::Read));
@@ -7376,8 +7356,7 @@ fn a_gone_pick_reads_as_gone_and_g_reopens_the_picker() {
     let bands = app.footer_bands();
     assert_ne!(bands[0].0, FooterAction::CommitPick, "the gone row is the Changes tab's");
     assert!(bands.iter().any(|&(a, _)| a == FooterAction::TogglePane));
-    // `g` from another scope knows the pick is gone and opens the picker instead of switching into
-    // the empty scope.
+    // `g` elsewhere opens the picker over a gone pick.
     enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
     app.set_scope(Scope::Uncommitted).unwrap();
     press(&mut app, &keymap, KeyCode::Char('g'));
@@ -7582,8 +7561,7 @@ fn a_poll_moves_the_pick_between_the_pick_row_and_the_list() {
     assert_eq!(picker(&app).list_row(picker(&app).cursor).unwrap().sha, shas[2]);
     assert_eq!(picker(&app).list_row(picker(&app).anchor.unwrap()).unwrap().sha, shas[1]);
     assert_eq!(picker(&app).run_len(), 2);
-    // And away again: the pick row returns, and the highlight relocates by sha first, then to the
-    // nearest surviving row.
+    // The highlight relocates by sha, then to the nearest row.
     r.git(&["reset", "-q", "--hard", &shas[0]]);
     common::land_world(&mut app);
     assert_eq!(picker(&app).pick_row, Some(run));
@@ -8063,8 +8041,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     assert_eq!(source, rendered, "same side, range, snippet, kind, and rev");
     assert_eq!(herdr_reviewr::export::format_all(&[&source]), rendered_export);
 
-    // A rendered range over two blocks anchors the contiguous span, the blank line between them
-    // included, and equals the source selection over lines 1..=4.
+    // A rendered range equals the source selection over lines 1..=4.
     app.store.take(0);
     app.toggle_rendered();
     app.diff_cursor = 0;
@@ -8088,8 +8065,7 @@ fn a_rendered_comment_equals_the_source_comment() {
     assert_eq!(herdr_reviewr::export::format_all(&[source]), rendered_export);
 }
 
-/// Comment the first `-` row of `doc.md`'s diff in source, flip to rendered, and return the
-/// rendered row its card sits under.
+/// Comment `doc.md`'s first `-` row, flip, and return its card's row.
 fn old_side_card_row(old: &str, new: &str) -> (Repo, App, usize) {
     let r = Repo::init();
     r.write("doc.md", old);
@@ -8295,8 +8271,7 @@ fn comments_survive_view_flips_and_polls_in_both_views() {
     assert_eq!(app.store.get(1).unwrap().side, Side::Old);
     assert_eq!(app.card_rows().len(), 3);
 
-    // Back to rendered: every card shows, the old-side one under the block holding the deletion,
-    // the blank-line one under the block below it.
+    // Back to rendered: every card shows.
     app.toggle_rendered();
     assert!(app.rendered_active());
     let cards = app.card_rows();
@@ -8547,8 +8522,7 @@ fn a_card_click_picks_its_comment() {
 
 // --- rendered change marks -----------------------------------------------------
 
-/// `a.md` with each kind of mark — an amber paragraph, a removed block, a changed HTML comment, a
-/// green list item — and `b.md` with one changed paragraph.
+/// `a.md` with each kind of mark, `b.md` with one change.
 fn marked_repo() -> Repo {
     let r = Repo::init();
     r.write(
@@ -8618,8 +8592,7 @@ fn hunk_steps_visit_rendered_marks_in_order_and_cross_files() {
     app.prev_hunk();
     assert_eq!(cursor_text(&app), "para ONE");
 
-    // Past the last mark the step arms a crossing, and the repeat lands on the next file's first
-    // mark, rendered.
+    // Past the last mark the step crosses to the next file.
     for _ in 0..3 {
         app.next_hunk();
     }
@@ -9073,8 +9046,7 @@ fn a_pick_is_the_comment_chosen_under_the_cursor() {
             assert_eq!(edit_target_text(&mut app, &keymap), "second");
         }
 
-        // (c) An export empties the store: the pick on "second" (index 1) never lands on whatever
-        // takes index 1 next.
+        // (c) An export empties the store; the pick never lands on a successor.
         let (_r, mut app) = two_comments_app(rendered);
         n(&mut app);
         let cursor = app.diff_cursor;
@@ -9138,8 +9110,7 @@ fn a_pick_is_the_comment_chosen_under_the_cursor() {
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(edit_target_text(&mut app, &keymap), "third", "rendered {rendered}");
 
-        // (d) Away to another file and back: the cursor reopens at the top, off the comment, so the
-        // pick is gone and `e` there opens nothing.
+        // (d) Away and back: the pick is gone.
         let (_r, mut app) = two_comments_app(rendered);
         n(&mut app);
         press(&mut app, &keymap, KeyCode::Char('f'));

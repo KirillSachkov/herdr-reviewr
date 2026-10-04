@@ -1,5 +1,4 @@
-//! The rebindable action keymap: action names, default keys, resolution of `[keybindings]`
-//! overrides, and the key → action lookup the dispatcher and the hint renderers share
+//! The rebindable keymap: names, defaults, `[keybindings]` overrides, and the lookup.
 
 use std::sync::LazyLock;
 

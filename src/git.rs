@@ -44,8 +44,7 @@ fn run(mut cmd: std::process::Command, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// A failed git call's message: the subcommand and git's own words for the reviewer, and the whole
-/// argv for the log.
+/// A failed git call's message: subcommand and git's words; the argv goes to the log.
 fn git_error(args: &[&str], what: &str, detail: impl std::fmt::Display) -> String {
     crate::logln!("git {args:?} {what}: {detail}");
     format!("git {} {what}: {detail}", subcommand(args))
@@ -77,8 +76,7 @@ fn git_lenient(repo: &Path, args: &[&str]) -> String {
         .unwrap_or_default()
 }
 
-/// Run `git -C <repo> <args>` and return its trimmed stdout, or `None` if the command fails to
-/// spawn, exits non-zero, or prints nothing.
+/// `git -C <repo> <args>`'s trimmed stdout, `None` on failure or no output.
 fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
     let out = git_command(repo).args(args).output().ok()?;
     if !out.status.success() {
@@ -243,8 +241,7 @@ impl RepoTarget {
         &self.host
     }
 
-    /// The first path segment — the owner at the GitHub API boundary, the organization at the Azure
-    /// DevOps one.
+    /// The first path segment: GitHub's owner, Azure DevOps' organization.
     pub fn owner(&self) -> &str {
         &self.path[0]
     }
@@ -273,8 +270,7 @@ impl RepoTarget {
             && self.path.iter().zip(&other.path).all(|(a, b)| a.eq_ignore_ascii_case(b))
     }
 
-    /// The second path segment — the project at the Azure DevOps API boundary, whose targets always
-    /// carry `[organization, project, repository]`.
+    /// The second path segment: Azure DevOps' project.
     pub fn project(&self) -> &str {
         &self.path[1]
     }
@@ -390,8 +386,7 @@ fn ado_canonicalize(host: &str, segments: &[&str]) -> Option<(String, Vec<String
         },
     };
     let saw_git_marker = segments.contains(&"_git");
-    // `DefaultCollection` is URL filler only on the legacy organization hosts, whose organization
-    // lives in the hostname.
+    // `DefaultCollection` is filler on the legacy organization hosts.
     let org_host = host.ends_with(".visualstudio.com");
     let mut path: Vec<String> = segments
         .iter()
@@ -410,8 +405,7 @@ fn ado_canonicalize(host: &str, segments: &[&str]) -> Option<(String, Vec<String
     (path.len() == 3).then_some((host, path))
 }
 
-/// Decode `%XX` escapes in one URL path segment, or `None` when an escape is broken or the bytes
-/// are not UTF-8.
+/// Decode `%XX` escapes in a path segment, `None` when broken or not UTF-8.
 fn percent_decode(segment: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(segment.len());
     let mut rest = segment.bytes();
@@ -563,8 +557,7 @@ pub(crate) fn pr_local(
     let tips = remote_tips(repo, &remote_list)?;
     let mut remotes = Remotes::new(repo, &config, hosts);
     let push_remote_record = config.get(&format!("branch.{branch}.pushremote"));
-    // A base resolved without a configured name (through `origin/HEAD` or a verbatim `--base` rev)
-    // is recognized by the recorded remote's tracking tip sitting on it.
+    // A base with no configured name is recognized by a tracking tip on it.
     let tracks_base_tip = |remote: &str, name: &str| {
         tips.iter().any(|tip| tip.remote == remote && tip.name == name && bases.contains(&tip.oid))
     };
@@ -682,8 +675,7 @@ impl BaseResolution {
     }
 }
 
-/// Resolve the base chain: the `--base` flag, then this worktree's pick, then the default branch
-/// ([`default_branch_name`]).
+/// Resolve the base chain: `--base`, then the pick, then the default branch.
 pub fn resolve_base(repo: &Path, base_flag: Option<&str>) -> Result<BaseResolution, GitFail> {
     let mut candidates: Vec<ResolvedBase> = Vec::new();
     let mut recorded: Vec<String> = Vec::new();
@@ -1099,8 +1091,7 @@ impl GitConfig {
 enum BranchMerge {
     /// A branch on that remote (`refs/heads/<name>`, or a bare `<name>` as git reads it).
     Branch(String),
-    /// A forge's pull request ref — what `gh pr checkout` (`refs/pull/<N>/head`) and `glab mr
-    /// checkout` (`refs/merge-requests/<N>/head`) record without push access.
+    /// A forge's PR ref, recorded by `gh pr checkout` and `glab mr checkout`.
     Pull(Forge, u64),
     /// Any other ref: a remote, but no branch or pull request on it.
     Other,
@@ -1800,8 +1791,7 @@ pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     Ok(out)
 }
 
-/// The ignored entries: a wholly-ignored directory comes back as `dir/` (mapped to `is_dir =
-/// true`), an individually-ignored file as itself.
+/// The ignored entries, a wholly ignored directory as one.
 fn ignored_entries(repo: &Path) -> Result<Vec<(String, bool)>> {
     let out = git(
         repo,

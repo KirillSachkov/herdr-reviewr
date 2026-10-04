@@ -415,8 +415,7 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // `--base origin/main` resolves as a verbatim rev, but the header and the PR name shield carry
-    // the bare spelling.
+    // A verbatim rev carries its bare spelling.
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "main");
 
@@ -778,8 +777,7 @@ fn list_branches_merges_names_newest_first_and_lists_the_checked_out() {
     r.commit_all("two");
     r.git(&["branch", "newer"]);
 
-    // Local and origin names merge (main is local and origin/main, at the same commit), the newest
-    // tip sorts first, and the checked-out branch is listed: a base like any other.
+    // Local and origin names merge, newest first, the checked-out branch included.
     let rows = list_branches(r.path()).unwrap();
     assert_eq!(names(&rows), ["feature", "newer", "main", "older"]);
     let by_name = |n: &str| rows.iter().find(|r| r.name == n).unwrap().tip_secs;
@@ -1103,8 +1101,7 @@ fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
 
     let base = snapshot_worktree(r.path()).unwrap();
 
-    // The turn: edit a tracked file, create a new file, delete one, and leave the pre-existing
-    // untracked file untouched.
+    // The turn: edit, create, delete; leave the untracked file alone.
     r.write("tracked.rs", "one\nTWO\nthree\n");
     r.write("created.rs", "new\n");
     r.remove("doomed.rs");

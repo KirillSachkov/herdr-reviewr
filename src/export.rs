@@ -10,8 +10,7 @@ pub fn format_comment(comment: &Comment) -> String {
     format!("{}\n{}\n{}", comment.location(), comment.lines, normalize_text(&comment.text))
 }
 
-/// Comment text for export: drop `\r`, trim trailing space per line, and drop blank lines so a
-/// multi-line comment can never introduce the blank-line block separator.
+/// Comment text for export, with no blank line to break the block separators.
 fn normalize_text(text: &str) -> String {
     text.replace('\r', "")
         .lines()
