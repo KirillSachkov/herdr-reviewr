@@ -1,7 +1,4 @@
 //! In-memory review model: scopes, changed files, and comments.
-//!
-//! Comments live only for the session and are
-//! removed by export or delete — never by a refresh.
 
 /// Which set of changes the Changes view shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -23,8 +20,8 @@ impl Scope {
         }
     }
 
-    /// The scope's name in the specs and in config values (`default_scope`): kebab-case,
-    /// unlike the header chip's spaced `label`.
+    /// The scope's name in the specs and in config values (`default_scope`): kebab-case, unlike the
+    /// header chip's spaced `label`.
     pub fn name(self) -> &'static str {
         match self {
             Scope::Uncommitted => "uncommitted",
@@ -34,8 +31,7 @@ impl Scope {
         }
     }
 
-    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn →
-    /// commits.
+    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn → commits.
     #[must_use]
     pub fn cycle(self) -> Self {
         match self {
@@ -47,8 +43,8 @@ impl Scope {
     }
 }
 
-/// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit
-/// ids, equal for a run of one.
+/// The `commits` scope's pick: a contiguous run from `oldest` to `newest`, both full commit ids,
+/// equal for a run of one.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommitPick {
     pub oldest: String,
@@ -65,9 +61,7 @@ impl CommitPick {
     }
 }
 
-/// Where a comment's diff was read: the worktree, or the picked run it came from. A diff
-/// comment renders only while the active scope reads the same diff, both sides: a run and
-/// its newest commit alone share a new side but not an old one.
+/// Where a comment's diff was read: the worktree, or the picked run it came from.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Rev {
     Worktree,
@@ -132,8 +126,8 @@ pub struct Comment {
     /// Verbatim diff lines the comment anchors to, each keeping its `+`/`-`/space marker.
     pub lines: String,
     pub text: String,
-    /// True when anchored to a diff (the `Changes` tab); false for a File-view content comment
-    /// (the `All files` tab). Selects how staleness is judged.
+    /// True when anchored to a diff (the `Changes` tab); false for a File-view content comment (the
+    /// `All files` tab).
     pub diff_anchored: bool,
     /// Where the new side was read.
     pub rev: Rev,
@@ -154,9 +148,7 @@ impl Comment {
     }
 }
 
-/// The in-memory comment list for one worktree review session. Every comment gets an id on
-/// add — monotonic, never reused, kept through an edit — so a reference to one never lands
-/// on another after the list shifts.
+/// The in-memory comment list for one worktree review session.
 #[derive(Default, Debug)]
 pub struct CommentStore {
     items: Vec<Comment>,

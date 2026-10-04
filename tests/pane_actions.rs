@@ -721,8 +721,7 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
     procinfo(dir.path(), "w1:p1", &json!([review_ui()]));
     procinfo(dir.path(), "w1:p3", &json!([review_ui()]));
     // w1:p1's close fails with the pane still there — a wedged herdr, not the benign
-    // exited-between-read-and-close race. Reporting it closed would leave a running pane
-    // the user believes gone, so the sweep refuses.
+    // exited-between-read-and-close race.
     fs::write(fixture(dir.path(), "closefail", "w1:p1", ""), herdr_error("internal")).unwrap();
 
     let output = run("close", dir.path());

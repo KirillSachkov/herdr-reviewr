@@ -1,10 +1,5 @@
-//! Component attribution for the perceived-latency work: times the individual blocking
-//! calls (git spawns, diff builds, highlights) that make up a switch, against a real repo.
-//! `scripts/bench_tui.py` is the acceptance instrument — it measures keypress to painted
-//! frame in the real binary. Reach for this tool to find out *where* a slow number in that
-//! harness comes from.
-//!
-//! Usage: `cargo run --release --example bench_latency -- <repo-path> [label]`
+//! Component attribution for the perceived-latency work: times the individual blocking calls (git
+//! spawns, diff builds, highlights) that make up a switch, against a real repo.
 
 use std::path::PathBuf;
 use std::time::Instant;

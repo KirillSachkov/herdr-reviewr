@@ -47,9 +47,7 @@ impl Repo {
     pub fn init() -> Self {
         let repo = Self { dir: TempDir::new().expect("tempdir") };
         repo.git(&["init", "-q", "-b", "main"]);
-        // The base chain reads `init.defaultBranch`, and `--get` sees the developer's
-        // global config. Pin it locally to a name no test creates, so the suite never
-        // depends on the machine it runs on.
+        // The base chain reads `init.defaultBranch`, and `--get` sees the developer's global config.
         repo.git(&["config", "init.defaultBranch", "no-such-default"]);
         repo
     }
@@ -110,8 +108,8 @@ impl Repo {
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for
-    /// the values only a foreign writer could put on this worktree's pick ref.
+    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for the
+    /// values only a foreign writer could put on this worktree's pick ref.
     pub fn write_raw_base_pick(&self, content: &str) {
         self.plant_blob("refs/worktree/reviewr/base-pick", content);
     }
@@ -121,8 +119,8 @@ impl Repo {
         self.plant_blob("refs/reviewr/base-pick", content);
     }
 
-    /// A leftover path-hashed last-turn ref from before the worktree-private cutover,
-    /// using the FNV-1a key the old binary wrote.
+    /// A leftover path-hashed last-turn ref from before the worktree-private cutover, using the
+    /// FNV-1a key the old binary wrote.
     pub fn plant_legacy_turn_base(&self, sha: &str) {
         let key = legacy_worktree_key(self.path());
         self.git(&["update-ref", &format!("refs/reviewr/turn-base/{key}"), sha]);
@@ -188,9 +186,7 @@ pub fn typed(app: &mut App, text: &str) {
     }
 }
 
-/// A minimal open-PR snapshot. Tests override only the fields they exercise:
-/// `PrSnapshot { comments, ..common::pr_snapshot() }` — so a new snapshot field
-/// touches this one literal instead of every test.
+/// A minimal open-PR snapshot.
 pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
     use herdr_reviewr::forge::{Merge, PrSnapshot, PrState, Sync};
     PrSnapshot {
@@ -213,8 +209,7 @@ pub fn pr_snapshot() -> herdr_reviewr::forge::PrSnapshot {
     }
 }
 
-/// A minimal PR conversation comment. Tests override the fields they exercise:
-/// `Comment { body: "...".into(), ..common::comment() }`.
+/// A minimal PR conversation comment.
 pub fn comment() -> herdr_reviewr::forge::Comment {
     use herdr_reviewr::forge::{Comment, CommentKind};
     Comment {
@@ -232,8 +227,8 @@ pub fn comment() -> herdr_reviewr::forge::Comment {
     }
 }
 
-/// Switch to `tab` and service the deferred reload the switch schedules, so assertions run
-/// against the freshly reloaded state — the same sequence the event loop performs.
+/// Switch to `tab` and service the deferred reload the switch schedules, so assertions run against
+/// the freshly reloaded state — the same sequence the event loop performs.
 pub fn enter_tab(app: &mut App, tab: herdr_reviewr::app::Tab) {
     app.set_tab(tab).unwrap();
     land_world(app);

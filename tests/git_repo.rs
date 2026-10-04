@@ -183,9 +183,8 @@ fn the_binary_macro_and_real_binary_content_both_carry_the_verdict() {
 
 #[test]
 fn an_untracked_file_the_diff_attribute_unsets_carries_the_verdict_too() {
-    // The common shape right after an agent scaffolds a project: the lockfile is written and
-    // marked `-diff`, but nothing is committed yet. Identical bytes must not be treated
-    // differently for being untracked.
+    // The common shape right after an agent scaffolds a project: the lockfile is written and marked
+    // `-diff`, but nothing is committed yet.
     let r = Repo::init();
     r.write("keep.rs", "fn a() {}\n");
     r.commit_all("init");
@@ -205,8 +204,7 @@ fn an_untracked_file_the_diff_attribute_unsets_carries_the_verdict_too() {
 
 #[test]
 fn an_untracked_binary_file_carries_the_verdict_from_its_content() {
-    // No numstat speaks for an untracked path, so content answers the half `.gitattributes`
-    // does not.
+    // No numstat speaks for an untracked path, so content answers the half `.gitattributes` does not.
     let r = Repo::init();
     r.write("keep.rs", "fn a() {}\n");
     r.commit_all("init");
@@ -352,8 +350,8 @@ fn picking_the_default_name_deletes_the_pick_so_a_re_default_is_followed() {
     assert_eq!(status.winner.unwrap().name(), "trunk");
     assert_eq!(status.skipped, None);
 
-    // A ref an earlier release wrote with the default's name changes nothing: the default
-    // step yields the same base, nothing is skipped, and a pick replaces it as ever.
+    // A ref an earlier release wrote with the default's name changes nothing: the default step
+    // yields the same base, nothing is skipped, and a pick replaces it as ever.
     r.write_raw_base_pick("trunk");
     let status = resolve_base(r.path(), None).unwrap().status;
     assert_eq!(status.winner.unwrap().name(), "trunk");
@@ -403,8 +401,8 @@ fn a_nonexistent_flag_falls_through_and_reads_as_skipped() {
     r.git(&["branch", "picked", "main"]);
     write_base_pick(r.path(), "picked").unwrap();
 
-    // A `--base` naming no existing ref is skipped, not an error; the pick resolves, and
-    // the header can name the dead flag.
+    // A `--base` naming no existing ref is skipped, not an error; the pick resolves, and the header
+    // can name the dead flag.
     assert_eq!(merge_base(r.path(), Some("no-such-ref")), Some(branch_point));
     let status = resolve_base(r.path(), Some("no-such-ref")).unwrap().status;
     assert_eq!(status.skipped.as_deref(), Some("no-such-ref"));
@@ -420,21 +418,21 @@ fn a_prefixed_flag_spelling_resolves_to_the_bare_name() {
     r.write("base.rs", "2\n");
     r.commit_all("diverge");
 
-    // `--base origin/main` resolves as a verbatim rev, but the header and the PR name
-    // shield carry the bare spelling.
+    // `--base origin/main` resolves as a verbatim rev, but the header and the PR name shield carry
+    // the bare spelling.
     let winner = resolve_base(r.path(), Some("origin/main")).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "main");
 
-    // A prefixed rev that is not a branch keeps the flag spelling, so `origin/HEAD` does
-    // not paint as live `HEAD`.
+    // A prefixed rev that is not a branch keeps the flag spelling, so `origin/HEAD` does not paint
+    // as live `HEAD`.
     let winner = resolve_base(r.path(), Some("origin/HEAD")).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "origin/HEAD");
 
     let status = resolve_base(r.path(), Some("origin/HEAD~99")).unwrap().status;
     assert_eq!(status.skipped.as_deref(), Some("origin/HEAD~99"));
 
-    // A prefixed spelling that resolves to nothing is skipped under the same bare name,
-    // so the header reads `· gone missing`, never `· origin/gone missing`.
+    // A prefixed spelling that resolves to nothing is skipped under the same bare name, so the
+    // header reads `· gone missing`, never `· origin/gone missing`.
     let status = resolve_base(r.path(), Some("origin/gone")).unwrap().status;
     assert_eq!(status.skipped.as_deref(), Some("gone"));
 }
@@ -455,8 +453,7 @@ fn a_pick_git_could_never_have_written_is_no_pick() {
     r.write_raw_base_pick("dev\u{1b}]0;pwned\u{7}");
     assert_eq!(read_base_pick(r.path()).unwrap(), None);
 
-    // A leftover expression in the blob is a spelling. Too
-    // deep to resolve, it is skipped, not discarded.
+    // A leftover expression in the blob is a spelling.
     r.write_raw_base_pick("main~5");
     assert_eq!(read_base_pick(r.path()).unwrap().as_deref(), Some("main~5"));
 
@@ -481,8 +478,7 @@ fn a_dormant_pick_is_skipped_and_reactivates() {
     let winner = resolve_base(r.path(), None).unwrap().status.winner.unwrap();
     assert_eq!(winner.name(), "dev");
 
-    // The branch disappears: the pick is kept and skipped, the default wins, and the
-    // header can say so.
+    // The branch disappears: the pick is kept and skipped, the default wins, and the header can say so.
     r.git(&["branch", "-D", "dev"]);
     let status = resolve_base(r.path(), None).unwrap().status;
     let winner = status.winner.unwrap();
@@ -504,8 +500,8 @@ fn a_dormant_pick_survives_even_when_nothing_resolves() {
     r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     write_base_pick(r.path(), "gone").unwrap();
 
-    // No flag, no default, and the picked branch is missing: the skip still reports, so
-    // the header reads `no base · gone missing`, never a bare `no base`.
+    // No flag, no default, and the picked branch is missing: the skip still reports, so the header
+    // reads `no base · gone missing`, never a bare `no base`.
     let status = resolve_base(r.path(), None).unwrap().status;
     assert_eq!(status.winner, None);
     assert_eq!(status.skipped.as_deref(), Some("gone"));
@@ -756,8 +752,8 @@ fn a_dangling_origin_head_symref_names_no_default() {
     r.git(&["branch", "-m", "main", "trunk"]); // no `main`/`master`: no default to fall back on
     r.set_origin_default("master", "HEAD");
 
-    // `fetch --prune` after a server-side rename deletes the target but leaves the
-    // symref: a name resolving to nothing is no default.
+    // `fetch --prune` after a server-side rename deletes the target but leaves the symref: a name
+    // resolving to nothing is no default.
     r.git(&["update-ref", "-d", "refs/remotes/origin/master"]);
     assert_eq!(default_branch_name(r.path()).unwrap(), None);
 }
@@ -770,8 +766,8 @@ fn a_plain_ref_origin_head_names_the_matching_tip() {
     let oid = r.git(&["rev-parse", "HEAD"]).trim().to_string();
     r.git(&["update-ref", "refs/remotes/origin/trunk", &oid]);
 
-    // Some clones carry `origin/HEAD` as a plain ref, not a symref: the default is the
-    // origin tip at the same commit.
+    // Some clones carry `origin/HEAD` as a plain ref, not a symref: the default is the origin tip
+    // at the same commit.
     r.git(&["update-ref", "refs/remotes/origin/HEAD", &oid]);
     assert_eq!(default_branch_name(r.path()).unwrap().as_deref(), Some("trunk"));
 }
@@ -787,8 +783,8 @@ fn list_branches_merges_names_newest_first_and_lists_the_checked_out() {
     r.git(&["add", "-A"]);
     r.git_env(&["commit", "-q", "-m", "one"], &[("GIT_COMMITTER_DATE", "2026-01-01T00:00:00")]);
     r.git(&["branch", "older"]);
-    // Every branch gets its own commit date, so the asserted order follows the contract
-    // rather than git's tie-break between two branches sharing a timestamp.
+    // Every branch gets its own commit date, so the asserted order follows the contract rather than
+    // git's tie-break between two branches sharing a timestamp.
     r.write("a.rs", "1b\n");
     r.git(&["add", "-A"]);
     r.git_env(&["commit", "-q", "-m", "middle"], &[("GIT_COMMITTER_DATE", "2026-02-01T00:00:00")]);
@@ -798,8 +794,8 @@ fn list_branches_merges_names_newest_first_and_lists_the_checked_out() {
     r.commit_all("two");
     r.git(&["branch", "newer"]);
 
-    // Local and origin names merge (main is local and origin/main, at the same commit), the
-    // newest tip sorts first, and the checked-out branch is listed: a base like any other.
+    // Local and origin names merge (main is local and origin/main, at the same commit), the newest
+    // tip sorts first, and the checked-out branch is listed: a base like any other.
     let rows = list_branches(r.path()).unwrap();
     assert_eq!(names(&rows), ["feature", "newer", "main", "older"]);
     let by_name = |n: &str| rows.iter().find(|r| r.name == n).unwrap().tip_secs;
@@ -857,8 +853,8 @@ fn branch_scope_is_a_superset_of_uncommitted() {
 
 #[test]
 fn branch_scope_equals_uncommitted_when_head_is_the_base() {
-    // HEAD sits exactly on the base, so the merge-base is HEAD: branch shows the
-    // working-tree changes rather than going empty.
+    // HEAD sits exactly on the base, so the merge-base is HEAD: branch shows the working-tree
+    // changes rather than going empty.
     let r = Repo::init();
     r.write("base.rs", "1\n");
     r.commit_all("base");
@@ -876,8 +872,7 @@ fn ignored_paths_never_enter_changes() {
     r.write("ignored/note.md", "scratch\n");
     r.write("build/out.o", "junk\n");
 
-    // Every scope respects .gitignore, without exception: a path git ignores is not a
-    // change. To review a file, track it.
+    // Every scope respects .gitignore, without exception: a path git ignores is not a change.
     let has_ignored = |files: &[ChangedFile]| {
         files.iter().any(|f| f.path.starts_with("ignored/") || f.path.starts_with("build/"))
     };
@@ -887,8 +882,8 @@ fn ignored_paths_never_enter_changes() {
     );
     assert!(!has_ignored(&changed_files(r.path(), Scope::Branch, Some("main")).unwrap()), "branch");
 
-    // last-turn: even an ignored file that changes within the turn stays out, because the
-    // baseline snapshot and the live snapshot both honor .gitignore.
+    // last-turn: even an ignored file that changes within the turn stays out, because the baseline
+    // snapshot and the live snapshot both honor .gitignore.
     let base = snapshot_worktree(r.path()).unwrap();
     r.write("ignored/note.md", "scratch v2\n");
     assert!(!has_ignored(&changed_against_tree(r.path(), &base).unwrap()), "last-turn");
@@ -904,8 +899,7 @@ fn branch_scope_is_empty_without_a_recorded_base() {
     r.write("feature.rs", "x\n");
     r.commit_all("feature work");
 
-    // base = None and nothing recorded → no base, and the scope lists nothing rather than
-    // guessing.
+    // base = None and nothing recorded → no base, and the scope lists nothing rather than guessing.
     let files = changed_files(r.path(), Scope::Branch, None).unwrap();
     assert!(files.is_empty(), "no source resolves, so the scope shows nothing");
 
@@ -1079,7 +1073,6 @@ fn untracked_files_in_a_new_directory_are_listed_individually() {
 #[test]
 fn a_repo_with_no_commits_lists_untracked_without_erroring() {
     // A fresh `git init` has no HEAD; diffing against it would error and kill the process.
-    // Diffing against the empty tree lets a commitless repo list its files instead.
     let r = Repo::init();
     r.write("fresh.rs", "one\ntwo\n");
     let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
@@ -1129,8 +1122,8 @@ fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
 
     let base = snapshot_worktree(r.path()).unwrap();
 
-    // The turn: edit a tracked file, create a new file, delete one, and leave the
-    // pre-existing untracked file untouched.
+    // The turn: edit a tracked file, create a new file, delete one, and leave the pre-existing
+    // untracked file untouched.
     r.write("tracked.rs", "one\nTWO\nthree\n");
     r.write("created.rs", "new\n");
     r.remove("doomed.rs");
@@ -1148,8 +1141,8 @@ fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
 
 #[test]
 fn changed_against_tree_sees_an_untracked_only_turn() {
-    // A turn whose only act is creating a new file must register as a change — the
-    // promotion path depends on this being a real diff.
+    // A turn whose only act is creating a new file must register as a change — the promotion path
+    // depends on this being a real diff.
     let r = Repo::init();
     r.write("a.rs", "a\n");
     r.commit_all("init");
@@ -1337,8 +1330,7 @@ fn list_ignored_dir_returns_immediate_children_only() {
 
 // --- commits scope ---------------------------------------
 
-/// `main` with three commits over the root, each touching its own file, plus `feature`
-/// with one commit. Returns the shas of the four `main` commits, root first.
+/// `main` with three commits over the root, each touching its own file, plus `feature` with one commit.
 fn run_repo() -> (Repo, Vec<String>) {
     let r = Repo::init();
     r.write("root.rs", "r\n");
@@ -1421,8 +1413,8 @@ fn a_merge_commit_contributes_its_tree_change() {
     assert_eq!(rows[0].refs, [CommitRef::Tag("v1".into())], "HEAD and its branch are dropped");
     assert_eq!(rows[1].refs, [CommitRef::Branch("other".into())]);
     assert_eq!(rows[2].refs, [CommitRef::Remote("origin/main".into())]);
-    // The universe is the first-parent walk: the side branch's commit is behind the merge
-    // row, never a row of its own, so any contiguous run is one ancestor chain.
+    // The universe is the first-parent walk: the side branch's commit is behind the merge row,
+    // never a row of its own, so any contiguous run is one ancestor chain.
     let subjects: Vec<&str> = rows.iter().map(|c| c.subject.as_str()).collect();
     assert_eq!(subjects, ["merge side", "three", "two", "one", "root"]);
 }

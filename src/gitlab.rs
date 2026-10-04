@@ -1,9 +1,4 @@
 //! Read-only GitLab access: the merge request's identity, state, pipelines, and discussions.
-//!
-//! The GitLab provider behind `src/forge.rs`. It follows the
-//! neutral resolution contract — the branch's published heads list
-//! merge requests by `source_branch` — through `glab api` REST calls, and fills the
-//! same normalized [`PrSnapshot`] the GitHub provider does. It never writes to GitLab.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -35,7 +30,6 @@ enum GlabError {
     NoGlab,
     NotAuthed,
     /// The endpoint answered 404 or 403 — the addressed object is unknown or unreadable.
-    /// GitLab answers 404 for private objects, so the two are one state.
     Unavailable(String),
     LocalGit(String),
     Other(String),
@@ -59,8 +53,8 @@ fn died(surface: &str) -> GlabError {
     GlabError::Other(format!("{surface} read panicked"))
 }
 
-/// Fold an unreadable optional surface to an empty payload: the fetch stands on what it
-/// has instead of failing the whole view.
+/// Fold an unreadable optional surface to an empty payload: the fetch stands on what it has instead
+/// of failing the whole view.
 fn optional_surface(result: Result<Value, GlabError>) -> Result<Value, GlabError> {
     match result {
         Err(GlabError::Unavailable(_)) => Ok(Value::Null),
@@ -68,10 +62,7 @@ fn optional_surface(result: Result<Value, GlabError>) -> Result<Value, GlabError
     }
 }
 
-/// The `glab` argument list for one explicitly hosted API read. `--hostname` pins the
-/// instance, so an inherited `GITLAB_HOST` override can never redirect the fetch
-/// `--include` keeps the response headers, which carry the pagination
-/// totals; a read that ignores them simply drops them.
+/// The `glab` argument list for one explicitly hosted API read.
 fn glab_args(host: &str, endpoint: &str) -> Vec<String> {
     vec![
         "api".to_string(),
@@ -110,8 +101,7 @@ fn glab_api(
     glab_api_paged(repo, host, endpoint, cancelled).map(|(_, value)| value)
 }
 
-/// Run several `glab api` reads concurrently, returning their results in call order. Wall-clock
-/// is the slowest single read. Callers stay bounded: the branch names are capped upstream.
+/// Run several `glab api` reads concurrently, returning their results in call order.
 fn glab_api_fan_out(
     repo: &Path,
     host: &str,
@@ -128,7 +118,6 @@ fn glab_api_fan_out(
 }
 
 /// Run one `glab api -i` read and parse the `x-total-pages` header plus the JSON body.
-/// The body is the text after the last blank line — GitLab returns compact one-line JSON.
 fn glab_api_paged(
     repo: &Path,
     host: &str,
@@ -142,8 +131,6 @@ fn glab_api_paged(
 }
 
 /// Split a `--include` response into the `x-total-pages` header value and the JSON body.
-/// The body is the text after the last blank line — GitLab returns compact one-line JSON,
-/// and raw newlines cannot appear inside a JSON string.
 fn split_headers(out: &str) -> (Option<u64>, &str) {
     // Header lines end with CRLF; the blank separator line is then `\r\n\r\n` or `\n\n`.
     let at = out.rfind("\r\n\r\n").or_else(|| out.rfind("\n\n"));
@@ -158,8 +145,8 @@ fn split_headers(out: &str) -> (Option<u64>, &str) {
     (total_pages, body.trim())
 }
 
-/// Map a failed `glab`'s stderr to a degraded state by its wording — like `gh`, `glab` has
-/// no stable exit codes for these. An unrecognised failure is `Other` → a transient `Error`.
+/// Map a failed `glab`'s stderr to a degraded state by its wording — like `gh`, `glab` has no
+/// stable exit codes for these.
 fn classify_failure(stderr: &str) -> GlabError {
     let s = stderr.to_lowercase();
     if crate::forge::reports_status(&s, 401)
@@ -167,8 +154,8 @@ fn classify_failure(stderr: &str) -> GlabError {
         || s.contains("authentication")
         || s.contains("glab auth login")
         || s.contains("no token")
-        // GitLab answers an under-scoped token with 403 `insufficient_scope`; only a
-        // re-login with the right scopes unblocks it.
+        // GitLab answers an under-scoped token with 403 `insufficient_scope`; only a re-login with
+        // the right scopes unblocks it.
         || s.contains("insufficient_scope")
     {
         GlabError::NotAuthed
@@ -185,8 +172,7 @@ fn fetch_inner(
     target: &crate::git::RepoTarget,
     cancelled: &AtomicBool,
 ) -> Result<PrView, GlabError> {
-    // `glab mr checkout` recorded the merge request itself: exact, so it outranks the
-    // lookup. A pin GitLab no longer resolves (a stale record) falls back to the lookup.
+    // `glab mr checkout` recorded the merge request itself: exact, so it outranks the lookup.
     let (mr, iid, project) = if let Some(pin) = input.local.pin_on(crate::git::Forge::GitLab)
         && let Some(mr) = pin_outcome(read_mr(repo, &pin.repo, pin.number, cancelled))?
     {
@@ -208,15 +194,14 @@ fn fetch_inner(
     let sync = crate::forge::local_sync(repo, input.local.head_oid.as_deref(), mr_head)
         .map_err(|error| GlabError::LocalGit(error.0))?;
 
-    // The three detail surfaces are independent reads; they run concurrently so the
-    // fetch's wall clock is the slowest call, not the sum.
+    // The three detail surfaces are independent reads; they run concurrently so the fetch's wall
+    // clock is the slowest call, not the sum.
     let target_path = project_path.as_str();
     let (discussions, approvals, checks) = std::thread::scope(|scope| {
         let discussions =
             scope.spawn(|| newest_discussions(repo, host, target_path, iid, cancelled));
         let approvals = scope.spawn(|| {
-            // An unavailable approvals surface contributes no review rows instead of
-            // failing the whole view.
+            // An unavailable approvals surface contributes no review rows instead of failing the whole view.
             optional_surface(glab_api(
                 repo,
                 host,
@@ -246,10 +231,7 @@ fn fetch_inner(
     ))))
 }
 
-/// The newest comment discussions. GitLab returns discussions oldest-first with no sort
-/// control, so the newest rows live on the last pages: read `x-total-pages`, then fetch the
-/// final two pages. Each page keeps only its comment discussions before the cap, so a stream
-/// of system events never spends the surface's 100 slots.
+/// The newest comment discussions.
 fn newest_discussions(
     repo: &Path,
     host: &str,
@@ -261,14 +243,12 @@ fn newest_discussions(
     let (total_pages, first) = glab_api_paged(repo, host, &format!("{base}&page=1"), cancelled)?;
     let raw_first = first.as_array().map_or(0, Vec::len);
     let page1 = comment_discussions(first);
-    // GitLab omits `x-total-pages` past ~10k rows. With no total the newest pages are
-    // unreachable, so the oldest page stands in — a capped prefix, never presented as complete.
+    // GitLab omits `x-total-pages` past ~10k rows.
     if total_pages.is_none() && raw_first >= crate::forge::SURFACE_CAP {
         return Ok((page1, true));
     }
     let total = total_pages.unwrap_or(1).max(1);
-    // The endpoint returns oldest-first with no sort control, so the newest rows live on the
-    // last pages. Read them concurrently (each surface reads its newest 100 rows).
+    // The endpoint returns oldest-first with no sort control, so the newest rows live on the last pages.
     let endpoints: Vec<String> = discussion_tail_pages(total)
         .into_iter()
         .map(|page| format!("{base}&page={page}"))
@@ -281,13 +261,12 @@ fn newest_discussions(
 }
 
 /// The page numbers beyond page 1 to fetch — the last two pages, which hold the newest rows.
-/// A single-page thread needs none.
 fn discussion_tail_pages(total: u64) -> Vec<u64> {
     [total.saturating_sub(1), total].into_iter().filter(|page| *page >= 2).collect()
 }
 
-/// Move a discussions response into its comment discussions, dropping system-only and empty
-/// threads so the cap counts what actually renders (`merge_comments`).
+/// Move a discussions response into its comment discussions, dropping system-only and empty threads
+/// so the cap counts what actually renders (`merge_comments`).
 fn comment_discussions(response: Value) -> Vec<Value> {
     match response {
         Value::Array(rows) => rows.into_iter().filter(|d| comment_root(d).is_some()).collect(),
@@ -295,20 +274,12 @@ fn comment_discussions(response: Value) -> Vec<Value> {
     }
 }
 
-/// Keep the newest 100 comment discussions from the fetched pages, and report whether any were
-/// dropped. Rows arrive oldest-first. The fetched set is page 1 plus the last two pages, so it is
-/// contiguous through `total == 3`; beyond that an unread middle separates page 1, and the fetch
-/// reports itself truncated.
+/// Keep the newest 100 comment discussions from the fetched pages, and report whether any were dropped.
 fn assemble_discussions(page1: Vec<Value>, total: u64, later: Vec<Value>) -> (Vec<Value>, bool) {
-    // Oldest-first throughout: page 1 leads the fetched run, the tail pages follow. Page 1 is
-    // already in hand, and a page of system events can filter down to nothing, so keeping it
-    // spends the surface's slots on real comments instead of leaving them empty. Rows carry
-    // their own timestamps and render newest-first, so an unread middle shows as a gap, never
-    // as the wrong order.
+    // Oldest-first throughout: page 1 leads the fetched run, the tail pages follow.
     let mut pool = page1;
     pool.extend(later);
-    // Pages between the first and the tail go unread past three, and a pool over the cap is
-    // itself a prefix.
+    // Pages between the first and the tail go unread past three, and a pool over the cap is itself a prefix.
     let truncated = total > 3 || pool.len() > crate::forge::SURFACE_CAP;
     (crate::forge::newest_capped(pool), truncated)
 }
@@ -330,8 +301,8 @@ fn read_mr(
     Ok(mr["iid"].as_u64().is_some().then_some(mr))
 }
 
-/// What a pinned merge request's read decides: the MR, or `None` to fall back to the head
-/// lookup — a pin GitLab no longer resolves (404) is a stale record, never the tab's answer.
+/// What a pinned merge request's read decides: the MR, or `None` to fall back to the head lookup —
+/// a pin GitLab no longer resolves (404) is a stale record, never the tab's answer.
 fn pin_outcome(read: Result<Option<Value>, GlabError>) -> Result<Option<Value>, GlabError> {
     match read {
         Err(GlabError::Unavailable(_)) => Ok(None),
@@ -356,8 +327,7 @@ fn associate_by_branch<'a>(
         return Ok(None);
     }
     let head = input.local.head_oid.as_deref();
-    // A fork clone: `origin` is the fork, the target is upstream. Both projects are
-    // asked, and upstream's pick outranks the fork's own.
+    // A fork clone: `origin` is the fork, the target is upstream.
     let fork = crate::forge::fork_repository(input.origin_repository.as_ref(), target);
     let projects = id_projects(target, fork, heads);
     let path = |project: &crate::git::RepoTarget| crate::forge::urlencode(&project.full_path());
@@ -388,11 +358,7 @@ fn associate_by_branch<'a>(
     Ok(None)
 }
 
-/// Consume the wave's leading project lookups, one per project, target first. Every listed
-/// MR names its source by numeric project id. The target's id must read. Another project the
-/// reader cannot see (403/404) proves nothing and admits nothing sourced there; any other
-/// failure fails the fetch, like a failed listing in the same wave. The listings follow in
-/// the same iterator.
+/// Consume the wave's leading project lookups, one per project, target first.
 fn read_ids<'a>(
     projects: &[&'a crate::git::RepoTarget],
     responses: &mut impl Iterator<Item = Result<Value, GlabError>>,
@@ -422,9 +388,8 @@ fn project_id(
     ids.iter().find(|(have, _)| have.is(project)).and_then(|(_, id)| *id)
 }
 
-/// Whether a listed MR in `queried` is the branch's: its source (project id, branch) must be
-/// one of the heads. A source in `queried` itself matches by id; any other by the head
-/// project's looked-up id.
+/// Whether a listed MR in `queried` is the branch's: its source (project id, branch) must be one of
+/// the heads.
 fn mr_admitted(
     node: &Value,
     queried: &crate::git::RepoTarget,
@@ -468,9 +433,7 @@ fn id_projects<'a>(
 }
 
 /// The per-name merge-request listings against `project`: an opened page apart from the
-/// created-ordered all-state page, both newest-created-first and capped at 20. The opened
-/// page keeps the shared resolver's open-before-history precedence whole when a reused
-/// branch name's history runs past the cap.
+/// created-ordered all-state page, both newest-created-first and capped at 20.
 fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
     names
         .iter()
@@ -487,8 +450,7 @@ fn branch_listings(project: &str, names: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Fold one project's listings into an association, keeping only MRs `allowed` admits. A
-/// 404 listing proves nothing and never fails the fetch
+/// Fold one project's listings into an association, keeping only MRs `allowed` admits.
 fn collect_assoc(
     rows: Vec<Result<Value, GlabError>>,
     allowed: impl Fn(&Value) -> bool,
@@ -528,8 +490,7 @@ fn assoc_mr(node: &Value) -> Option<AssocPr> {
     })
 }
 
-/// The head pipeline's jobs as the checks list, one row per job — no pipeline is an empty
-/// list. Returns the rows and whether the job page was capped.
+/// The head pipeline's jobs as the checks list, one row per job — no pipeline is an empty list.
 fn fetch_checks(
     repo: &Path,
     host: &str,
@@ -538,7 +499,7 @@ fn fetch_checks(
     cancelled: &AtomicBool,
 ) -> Result<(Vec<Check>, bool), GlabError> {
     // The MR detail names its own head pipeline, so the checks are the head's jobs rather than
-    // whichever pipeline ran last. No head pipeline is no checks.
+    // whichever pipeline ran last.
     let pipeline = &mr["head_pipeline"];
     let Some(pipeline_id) = pipeline["id"].as_u64() else {
         return Ok((Vec::new(), false));
@@ -548,8 +509,7 @@ fn fetch_checks(
         Some(id) => id.to_string(),
         None => target_path.to_string(),
     };
-    // A fork MR's pipeline can be unreadable to the reviewer (private fork). An
-    // unreadable pipeline project shows an empty checks list instead of failing the view
+    // A fork MR's pipeline can be unreadable to the reviewer (private fork).
     let (job_pages, jobs) = match glab_api_paged(
         repo,
         host,
@@ -576,8 +536,7 @@ fn fetch_checks(
     let capped = job_pages.map_or(rows.len() >= crate::forge::SURFACE_CAP, |total| total > 1);
     if capped {
         // The rollup reads the rows it has, so a prefix of a large pipeline could report a pass
-        // while an unread job failed. The pipeline states its own verdict, which stands in for
-        // the jobs left unread.
+        // while an unread job failed.
         let status = pipeline_status(pipeline["status"].as_str().unwrap_or_default());
         upsert_latest(&mut checks, Check { name: "pipeline".to_string(), status });
     }
@@ -595,9 +554,7 @@ fn pipeline_status(status: &str) -> CheckStatus {
     }
 }
 
-/// Normalise one GitLab job status to a [`CheckStatus`]. An allowed-to-fail job leaves the
-/// pipeline green and the merge request mergeable, so its failure is a warning, never a
-/// failing check.
+/// Normalise one GitLab job status to a [`CheckStatus`].
 fn job_status(status: &str, allow_failure: bool) -> CheckStatus {
     match status {
         "success" => CheckStatus::Success,
@@ -628,8 +585,8 @@ fn build_snapshot(
         title: mr["title"].as_str().unwrap_or_default().to_string(),
         url: mr["web_url"].as_str().unwrap_or_default().to_string(),
         body: mr["description"].as_str().unwrap_or_default().to_string(),
-        // A missing state must not read as reviewable: the empty string falls through
-        // `parse_state` to the closed arm — stale, never wrong.
+        // A missing state must not read as reviewable: the empty string falls through `parse_state`
+        // to the closed arm — stale, never wrong.
         state: parse_state(mr["state"].as_str().unwrap_or_default()),
         is_draft: mr["draft"].as_bool().unwrap_or(false),
         head_ref: mr["source_branch"].as_str().unwrap_or_default().to_string(),
@@ -683,15 +640,13 @@ fn derive_merge(mr: &Value) -> Merge {
     Merge::Clean
 }
 
-/// The first non-system note carrying a body — the comment's root — or `None` when the
-/// discussion is a system-only or empty thread that renders no comment. The one definition of
-/// "a discussion is a comment", shared by the newest-100 cap and the render.
+/// The first non-system note carrying a body — the comment's root — or `None` when the discussion
+/// is a system-only or empty thread that renders no comment.
 fn comment_root(discussion: &Value) -> Option<&Value> {
     discussion["notes"].as_array()?.iter().find(|note| is_comment_note(note))
 }
 
-/// A note that renders: human-authored and carrying a body. The one predicate behind the
-/// root pick and `replies`, so the two can never disagree.
+/// A note that renders: human-authored and carrying a body.
 fn is_comment_note(note: &Value) -> bool {
     !note["system"].as_bool().unwrap_or(false)
         && !note["body"].as_str().unwrap_or("").trim().is_empty()
@@ -766,8 +721,8 @@ fn merge_comments(discussions: &[Value], approvals: &Value) -> Vec<Comment> {
             continue;
         }
         let bot = is_gitlab_bot(&author);
-        // The approvals surface carries no timestamp, so approvals sort after the
-        // dated rows in the newest-first list.
+        // The approvals surface carries no timestamp, so approvals sort after the dated rows in the
+        // newest-first list.
         out.push(prose_row(
             CommentKind::Review,
             author,
@@ -813,16 +768,15 @@ fn gitlab_end(end: &Value) -> (Option<u64>, bool) {
 }
 
 /// Whether a GitLab username is a service account: the shared name heuristics, or GitLab's
-/// access-token bots (`project_{id}_bot…` / `group_{id}_bot…`). GitLab exposes no bot flag
-/// on a note's author, so the name is the only signal.
+/// access-token bots (`project_{id}_bot…` / `group_{id}_bot…`).
 fn is_gitlab_bot(username: &str) -> bool {
     crate::forge::is_named_bot(username)
         || is_access_token_bot(username, "project_")
         || is_access_token_bot(username, "group_")
 }
 
-/// Whether `username` is `{prefix}{digits}_bot…` — the exact shape GitLab mints for
-/// project and group access-token accounts.
+/// Whether `username` is `{prefix}{digits}_bot…` — the exact shape GitLab mints for project and
+/// group access-token accounts.
 fn is_access_token_bot(username: &str, prefix: &str) -> bool {
     let Some(rest) = username.strip_prefix(prefix) else {
         return false;
@@ -892,9 +846,8 @@ mod tests {
 
     #[test]
     fn branch_listings_pair_an_opened_page_with_the_finished_history_page() {
-        // The all-state page is created-ordered and capped at 20, so on a reused branch
-        // name it could bury an older still-open MR behind newer finished rows. The
-        // opened page keeps the shared resolver's open-before-history promise whole.
+        // The all-state page is created-ordered and capped at 20, so on a reused branch name it
+        // could bury an older still-open MR behind newer finished rows.
         let listings = branch_listings("group%2Frepo", &["feat".to_string()]);
         assert_eq!(listings.len(), 2);
         assert!(listings[0].contains("source_branch=feat") && listings[0].contains("state=opened"));
@@ -1067,8 +1020,8 @@ mod tests {
         assert!(crate::forge::reports_status("glab: 404 not found (http 404)", 404));
         assert!(crate::forge::reports_status("{\"message\":\"404 project not found\"}", 404));
         assert!(crate::forge::reports_status("glab: 401 unauthorized (http 401)", 401));
-        // A transport error echoes the endpoint; a 40-hex OID carries those digits about one
-        // time in a hundred and must not read as absence or as an expired token.
+        // A transport error echoes the endpoint; a 40-hex OID carries those digits about one time
+        // in a hundred and must not read as absence or as an expired token.
         let transport = "get \"https://gitlab.com/api/v4/projects/1/repository/commits/\
                          de401f404a3b/merge_requests\": i/o timeout";
         assert!(!crate::forge::reports_status(transport, 404));
@@ -1128,8 +1081,7 @@ mod tests {
 
     #[test]
     fn three_or_more_pages_drop_page_one_and_keep_the_newest_hundred() {
-        // Page 1 [0,100) is the oldest and must not appear. Tail pages are [100,250); the kept
-        // rows are the newest 100 of the tail.
+        // Page 1 [0,100) is the oldest and must not appear.
         let (rows, truncated) = assemble_discussions(page_rows(0, 100), 3, page_rows(100, 150));
         assert_eq!(rows.len(), 100);
         assert_eq!(rows.first().unwrap(), &json!(150));

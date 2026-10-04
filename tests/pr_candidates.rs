@@ -1,7 +1,5 @@
-//! Integration tests for the PR fetch's local reads (`git::pr_local`,
-//! `git::contains_commit`, `git::ahead_behind_oids`) against real temp repos.
-//! Remote-tracking branches are faked with `git update-ref
-//! refs/remotes/origin/<name> <sha>` — no network, no `gh`.
+//! Integration tests for the PR fetch's local reads (`git::pr_local`, `git::contains_commit`,
+//! `git::ahead_behind_oids`) against real temp repos.
 
 mod common;
 
@@ -119,8 +117,8 @@ fn a_github_com_prefixed_host_is_only_supported_when_configured_literally() {
 
 #[test]
 fn push_head_other_name_adds_the_pushed_name() {
-    // The headline workflow: `git push origin HEAD:other` with no `-u` updates the
-    // remote-tracking ref; the pushed name joins the branch's forge names.
+    // The headline workflow: `git push origin HEAD:other` with no `-u` updates the remote-tracking
+    // ref; the pushed name joins the branch's forge names.
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
@@ -140,8 +138,8 @@ fn unpushed_commits_keep_the_published_boundary_name() {
 
 #[test]
 fn a_zero_work_branch_carries_only_its_own_name() {
-    // The parallel-worktree adversary: HEAD parked at (or behind) the base tip while
-    // sibling branches with open PRs sit at it. Their names never join this branch's.
+    // The parallel-worktree adversary: HEAD parked at (or behind) the base tip while sibling
+    // branches with open PRs sit at it.
     let repo = worktree();
     repo.git(&["switch", "-qC", "work", "main"]); // zero work: HEAD == base tip
     repo.git(&["update-ref", "refs/remotes/origin/sibling", "HEAD"]);
@@ -166,8 +164,8 @@ fn a_recorded_upstream_joins_the_names_unless_it_names_a_base() {
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.head_names(), ["work", "pub"]);
 
-    // The record `git switch -c work origin/main` auto-writes is tracking, not
-    // publication — it never joins the names.
+    // The record `git switch -c work origin/main` auto-writes is tracking, not publication — it
+    // never joins the names.
     repo.git(&["config", "branch.work.merge", "refs/heads/main"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.head_names(), ["work"]);
@@ -175,8 +173,8 @@ fn a_recorded_upstream_joins_the_names_unless_it_names_a_base() {
 
 #[test]
 fn every_resolved_base_source_excludes_names() {
-    // Gitflow: the picked `develop` wins the pin, but a tip on the default `main`'s
-    // history must still contribute no name — every source that resolved excludes.
+    // Gitflow: the picked `develop` wins the pin, but a tip on the default `main`'s history must
+    // still contribute no name — every source that resolved excludes.
     let repo = worktree();
     repo.git(&["switch", "-qc", "develop", "main"]);
     repo.write("d.txt", "dev\n");
@@ -200,8 +198,8 @@ fn every_resolved_base_source_excludes_names() {
 
 #[test]
 fn a_dormant_pick_still_shields_its_name() {
-    // The picked `develop` was never created, so it resolves to nothing, but the record stands:
-    // an upstream naming it is still tracking a base, not publishing to it
+    // The picked `develop` was never created, so it resolves to nothing, but the record stands: an
+    // upstream naming it is still tracking a base, not publishing to it
     let repo = worktree();
     herdr_reviewr::git::write_base_pick(repo.path(), "develop").unwrap();
     repo.git(&["config", "branch.work.remote", "origin"]);
@@ -213,10 +211,8 @@ fn a_dormant_pick_still_shields_its_name() {
 
 #[test]
 fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
-    // The `develop`-default repo under the stock `main`/`master` config: the base
-    // resolves only through `origin/HEAD`, so no configured entry carries its name.
-    // The auto-written tracking record must still be recognized as a base, or the
-    // base branch's own PR attaches to every branch cut from it
+    // The `develop`-default repo under the stock `main`/`master` config: the base resolves only
+    // through `origin/HEAD`, so no configured entry carries its name.
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
@@ -237,8 +233,8 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
     assert_eq!(local.base_oid.as_deref(), Some(develop_tip.as_str()), "origin/HEAD wins the pin");
     assert_eq!(local.head_names(), ["work"], "the default branch never joins the names");
 
-    // A verbatim-rev flag (a raw SHA here) has no canonical name either; the tip
-    // comparison still recognizes the upstream as that base.
+    // A verbatim-rev flag (a raw SHA here) has no canonical name either; the tip comparison still
+    // recognizes the upstream as that base.
     let local = pr_local(repo.path(), Some(&develop_tip)).expect("pr_local");
     assert_eq!(local.head_names(), ["work"]);
 }
@@ -265,8 +261,8 @@ fn a_merged_branch_keeps_its_local_name_and_its_recorded_upstream() {
 
 #[test]
 fn resolve_pick_drives_the_ancestry_guard_against_a_real_repo() {
-    // The history pick wired end to end: a finished PR admits on the branch that holds
-    // its head commit and never on a fresh branch reusing the name
+    // The history pick wired end to end: a finished PR admits on the branch that holds its head
+    // commit and never on a fresh branch reusing the name
     let repo = worktree();
     let old_tip = head(&repo);
     repo.write("c.txt", "three\n");
@@ -298,8 +294,7 @@ fn resolve_pick_drives_the_ancestry_guard_against_a_real_repo() {
 
 #[test]
 fn the_reused_name_guard_admits_only_contained_history() {
-    // The ancestry guard: a merged PR's head commit admits only when this branch holds
-    // it.
+    // The ancestry guard: a merged PR's head commit admits only when this branch holds it.
     let repo = worktree();
     let old_tip = head(&repo);
     // Continuing on the branch: the old tip stays in history.
@@ -316,9 +311,7 @@ fn the_reused_name_guard_admits_only_contained_history() {
 
 #[test]
 fn an_on_base_agent_carries_the_side_branch_name_until_the_pull() {
-    // The on-main agent flow: commits on local main, pushed as `HEAD:side`, PR from
-    // `side`. After the merged result is pulled, main carries no side name and is empty
-    // (a synced base branch is always empty).
+    // The on-main agent flow: commits on local main, pushed as `HEAD:side`, PR from `side`.
     let repo = worktree();
     repo.git(&["switch", "-q", "main"]);
     repo.write("f.txt", "feature\n");
@@ -362,8 +355,8 @@ fn the_base_flag_resolves_verbatim_revs_before_canonical_entries() {
 
 #[test]
 fn without_a_resolvable_base_no_frontier_name_joins() {
-    // A repo whose only branch is `trunk` and no origin/HEAD: no base resolves, so no
-    // frontier name can be proven beyond one.
+    // A repo whose only branch is `trunk` and no origin/HEAD: no base resolves, so no frontier name
+    // can be proven beyond one.
     let repo = Repo::init();
     repo.git(&["branch", "-qm", "trunk"]);
     repo.write("a.txt", "one\n");
@@ -526,8 +519,7 @@ fn a_named_remote_follows_instead_of_rewrites() {
 
 #[test]
 fn an_unusable_origin_publishes_nowhere_never_on_the_target() {
-    // A fork clone whose origin sits behind an ssh Host alias: no forge repository. Pairing
-    // the branch with upstream would admit upstream's own same-named PR, a stranger's.
+    // A fork clone whose origin sits behind an ssh Host alias: no forge repository.
     let repo = worktree();
     repo.git(&["remote", "set-url", "origin", "git@github-work:me/repo.git"]);
     repo.git(&["remote", "add", "upstream", "https://github.com/acme/repo.git"]);

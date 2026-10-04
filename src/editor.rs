@@ -22,9 +22,6 @@ enum LineArg {
 }
 
 /// One editor family: the binary names that select it, how it takes a line, and where it draws.
-///
-/// A window editor hands the file to an instance of its own and returns, so reviewr keeps the
-/// pane. A terminal editor draws in the pane and is given it.
 struct Dialect {
     names: &'static [&'static str],
     line: LineArg,
@@ -40,8 +37,6 @@ const DIALECTS: &[Dialect] = &[
     },
     Dialect { names: &["nano", "micro", "kak"], line: LineArg::Plus, window: false },
     // Emacs is whichever its build and `DISPLAY` make it, and neither is readable from here.
-    // The pane is the survivable guess: a windowed Emacs handed the pane leaves the pane blank
-    // until it quits, where a terminal Emacs denied it is invisible.
     Dialect { names: &["emacs", "emacsclient"], line: LineArg::Plus, window: false },
     Dialect { names: &["hx", "helix"], line: LineArg::Suffix, window: false },
     // MacVim and gVim open a window and return, unlike every other vi-family binary.
@@ -53,13 +48,12 @@ const DIALECTS: &[Dialect] = &[
         window: true,
     },
     Dialect { names: &["subl", "sublime_text"], line: LineArg::Suffix, window: true },
-    // Plain `zed` collides with the OpenZFS event daemon, so Linux packages ship the CLI
-    // under a name of their own.
+    // Plain `zed` collides with the OpenZFS event daemon, so Linux packages ship the CLI under a
+    // name of their own.
     Dialect { names: &["zed", "zeditor", "zedit"], line: LineArg::Suffix, window: true },
     Dialect { names: &["bbedit", "gedit"], line: LineArg::Plus, window: true },
     Dialect { names: &["mate"], line: LineArg::Flag, window: true },
-    // `xed` names two editors. On macOS it is Xcode's opener, which takes `--line`. On Linux it
-    // is Mint's X-Apps editor, a gedit fork that takes `+LINE` and rejects `--line` outright.
+    // `xed` names two editors.
     #[cfg(target_os = "macos")]
     Dialect { names: &["xed"], line: LineArg::Flag, window: true },
     #[cfg(not(target_os = "macos"))]
@@ -207,13 +201,6 @@ fn dialect_for(program: &str) -> Option<&'static Dialect> {
 }
 
 /// Build the command from a user template, substituting every `{file}` and `{line}`.
-///
-/// `{line}` goes first, and that ordering is the whole trick: a path is only ever substituted
-/// into text nothing looks at again, so a file named `{line}.cshtml` stays a file name rather
-/// than becoming a second placeholder.
-///
-/// The config layer rejects an empty value, but a value of two quote characters is not empty and
-/// splits to one empty word, which names no program.
 fn from_template(template: &str, file: &str, line: u32) -> Result<EditorCommand, NoEditor> {
     let named_file = template.contains("{file}");
     let line = line.to_string();

@@ -49,8 +49,7 @@ pub struct AgentChoice {
     pub tab: String,
 }
 
-/// What `Send` does with the agents herdr reports. A refusal is the
-/// `Err` of [`send_target`], so zero agents and a failed enumeration land in one place.
+/// What `Send` does with the agents herdr reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendTarget {
     /// Exactly one agent. The send goes straight to it, with no picker.
@@ -336,8 +335,7 @@ pub fn clear_pane_label() {
     }
 }
 
-/// Our pane's current label from `pane list`, or `None` when it has none or the listing
-/// fails. Blocking — the label threads call it, never the frame loop.
+/// Our pane's current label from `pane list`, or `None` when it has none or the listing fails.
 fn current_label(ws: &str, pane: &str) -> Option<String> {
     PaneList::of(ws).ok()?.label(pane).map(str::to_owned)
 }
@@ -365,9 +363,7 @@ pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
     (!dir.is_empty()).then(|| dir.to_owned())
 }
 
-/// The (workspace, pane) id pair identifying this reviewr pane in the herdr environment. There is
-/// no tab here on purpose: the send scopes to the workspace and turn tracking scopes to the
-/// worktree, so nothing reads `HERDR_TAB_ID` and the reviewr pane's placement changes neither.
+/// The (workspace, pane) id pair identifying this reviewr pane in the herdr environment.
 fn agent_env() -> (Option<String>, Option<String>) {
     (env::var("HERDR_WORKSPACE_ID").ok(), env::var("HERDR_PANE_ID").ok())
 }
@@ -389,8 +385,6 @@ pub fn send_target() -> Result<SendTarget> {
         }
     };
     // Candidacy is decided once, here: an `agent` field, our workspace, not our own pane.
-    // Rows keep `agent list` order, which is herdr's own. Turn
-    // tracking does not come through here: it asks where each agent works instead.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
         0 => Err(Refusal::NoAgent.into()),
@@ -424,9 +418,7 @@ impl AgentPane {
             .unwrap_or_else(|| self.pane_id.clone())
     }
 
-    /// The agent's `state_labels` entry for its state, else the state itself. Both the lookup
-    /// key and the fallback are herdr's own spelling, so a state reviewr does not know still
-    /// names itself on the row instead of reading `unknown`.
+    /// The agent's `state_labels` entry for its state, else the state itself.
     fn row_state(&self) -> String {
         self.state_labels
             .as_ref()
@@ -441,16 +433,14 @@ impl AgentPane {
         Status::from_wire(&self.agent_status)
     }
 
-    /// A real agent pane other than our own — the shared gate both readers apply, so turn
-    /// sampling and send targeting never drift on what counts as an agent
-    /// (`../docs/herdr-api-notes.md`).
+    /// A real agent pane other than our own — the shared gate both readers apply, so turn sampling
+    /// and send targeting never drift on what counts as an agent (`../docs/herdr-api-notes.md`).
     fn is_agent_other_than(&self, me: Option<&str>) -> bool {
         self.agent.is_some() && Some(self.pane_id.as_str()) != me
     }
 }
 
-/// Tab id to tab label for one workspace. Labelling is best effort: a failed call or a
-/// missing tab leaves the row's tab part empty rather than failing the send.
+/// Tab id to tab label for one workspace.
 fn tab_labels(ws: Option<&str>) -> HashMap<String, String> {
     let Some(ws) = ws else { return HashMap::new() };
     let Ok(json) = herdr(&["tab", "list", "--workspace", ws]) else {
@@ -459,8 +449,7 @@ fn tab_labels(ws: Option<&str>) -> HashMap<String, String> {
     parse_tab_labels(&json).unwrap_or_default()
 }
 
-/// The documented `result.tabs` array from `herdr tab list`, as tab id → label. A tab
-/// without a label is dropped, so its rows show no tab part.
+/// The documented `result.tabs` array from `herdr tab list`, as tab id → label.
 fn parse_tab_labels(json: &str) -> Result<HashMap<String, String>> {
     Ok(answer::<TabList>(json)
         .context("parsing tab list")?
@@ -494,16 +483,13 @@ pub struct AgentSample {
     pub status: Status,
 }
 
-/// Every agent herdr reports, minus our own pane. Neither the tab nor the workspace narrows
-/// this (see the module header). `Err` means the enumeration failed, which the caller treats
-/// as "nothing changed" rather than "no agents".
+/// Every agent herdr reports, minus our own pane.
 pub fn agent_samples() -> Result<Vec<AgentSample>> {
     let (_, me) = agent_env();
     Ok(samples_of(agent_list()?, me.as_deref()))
 }
 
-/// The sampling rule, split out so it is testable without the CLI. Only entries carrying an
-/// `agent` field count, and our own pane never does.
+/// The sampling rule, split out so it is testable without the CLI.
 fn samples_of(agents: Vec<AgentPane>, me: Option<&str>) -> Vec<AgentSample> {
     agents
         .into_iter()
@@ -512,10 +498,7 @@ fn samples_of(agents: Vec<AgentPane>, me: Option<&str>) -> Vec<AgentSample> {
         .collect()
 }
 
-/// The real agents in workspace `ws`, ignoring our own pane `me`. Only entries carrying an
-/// `agent` field count. herdr 0.7.5 already keeps non-agent panes
-/// out of `agent list`, so both filters are defensive: a reviewr pane or a plain shell shows
-/// up in `pane list` without an `agent` key and never here (`../docs/herdr-api-notes.md`).
+/// The real agents in workspace `ws`, ignoring our own pane `me`.
 fn candidates<'a>(
     agents: &'a [AgentPane],
     ws: Option<&str>,
@@ -569,10 +552,8 @@ enum Readiness {
     Gone,
 }
 
-/// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of
-/// sending: a prompt drops a paste, so the comments would never reach the input
-/// (`docs/herdr-api-notes.md`). The read and the send are two herdr calls, so an agent can
-/// still raise a prompt in between. herdr offers no atomic send-if-ready.
+/// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of sending:
+/// a prompt drops a paste, so the comments would never reach the input (`docs/herdr-api-notes.md`).
 fn ensure_ready(pane: &str) -> Result<()> {
     let agents = match agent_list() {
         Ok(agents) => agents,
@@ -1006,8 +987,7 @@ mod tests {
 
     #[test]
     fn a_pane_label_reads_only_our_pane_and_absent_or_empty_is_none() {
-        // The live `pane list` entry shape (docs/herdr-api-notes.md): `label` appears only
-        // on labeled panes. The label logic stamps the unlabeled and clears only its own.
+        // The live `pane list` entry shape (docs/herdr-api-notes.md): `label` appears only on labeled panes.
         let json = r#"{"result":{"panes":[{"pane_id":"w1:p1","label":"build"},{"pane_id":"w1:p2"},{"pane_id":"w1:p3","label":""}]}}"#;
         let list: super::PaneList = super::answer(json).unwrap();
         assert_eq!(list.label("w1:p1"), Some("build"));
