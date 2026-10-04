@@ -1461,3 +1461,29 @@ fn reading_a_touched_file_never_rewrites_the_index() {
 
     assert_eq!(stamp(), before, ".git/index was rewritten");
 }
+
+/// Two reviewr panes on one worktree snapshot it through the same temp index. Taking turns,
+/// neither clears the index the other is adding into, so every snapshot lands, and lands the
+/// same tree.
+#[test]
+fn concurrent_snapshots_of_one_worktree_all_land_the_same_tree() {
+    let r = Repo::init();
+    for i in 0..50 {
+        r.write(&format!("f{i}.txt"), &format!("{i}\n"));
+    }
+    r.commit_all("init");
+    r.write("f0.txt", "edited\n");
+    let path = r.path_buf();
+    let snap = |path: std::path::PathBuf| {
+        std::thread::spawn(move || (0..20).map(|_| snapshot_worktree(&path)).collect::<Vec<_>>())
+    };
+    let (a, b) = (snap(path.clone()), snap(path.clone()));
+    let trees: Vec<String> = a
+        .join()
+        .unwrap()
+        .into_iter()
+        .chain(b.join().unwrap())
+        .map(|tree| tree.expect("a snapshot failed"))
+        .collect();
+    assert!(trees.windows(2).all(|w| w[0] == w[1]), "snapshots disagree: {trees:?}");
+}

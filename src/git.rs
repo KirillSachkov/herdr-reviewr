@@ -1590,6 +1590,17 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
     let tmp_index = git_dir.join("reviewr-turn-index");
     let real_index = git_dir.join("index");
+    // Two reviewr panes on one worktree share the temp index, so their snapshots take turns:
+    // one clearing the index the other is adding into would fail both. An OS lock on an empty
+    // file beside it, released when this returns or the process dies.
+    let turn = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(git_dir.join("reviewr-turn.lock"))
+        .context("opening the snapshot lock")?;
+    turn.lock().context("taking the snapshot lock")?;
     // Clear whatever a prior hard crash left — the temp index and the `.lock` git holds
     // while writing it (a leftover lock fails every later `add` with "File exists") — then
     // drop both on every exit path via the guard, so even a failed snapshot leaves nothing
@@ -1599,15 +1610,20 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // Seed from the real index so git's stat cache lets unchanged files skip hashing;
     // a fresh repo may have no index yet, so start empty in that case.
     if real_index.exists() {
-        std::fs::copy(&real_index, &tmp_index).context("seeding the snapshot index")?;
         // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
         // older than its index gets its content compared, since a same-size edit in that
         // tick matches every stat field. A copy stamped now (Linux's copy does) would pass
-        // that edit as clean. macOS and Windows copies keep the mtime already.
+        // that edit as clean. macOS and Windows copies keep the mtime already. Read before
+        // the copy: an index the agent swaps in meanwhile is newer, so the stamp errs old,
+        // the safe side, never new.
         let modified = std::fs::metadata(&real_index).and_then(|m| m.modified());
-        let tmp = std::fs::File::options().write(true).open(&tmp_index);
-        if let (Ok(modified), Ok(tmp)) = (modified, tmp) {
-            tmp.set_modified(modified).context("dating the snapshot index")?;
+        std::fs::copy(&real_index, &tmp_index).context("seeding the snapshot index")?;
+        // Best effort, like the read: a copy left undated costs the racy-clean edge case,
+        // never the snapshot.
+        if let (Ok(modified), Ok(tmp)) =
+            (modified, std::fs::File::options().write(true).open(&tmp_index))
+        {
+            let _ = tmp.set_modified(modified);
         }
     }
     git_with_index(repo, &tmp_index, &["add", "-A"])?;
