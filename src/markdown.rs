@@ -27,7 +27,7 @@ pub struct Rendered {
     pub meta: Vec<LineMeta>,
     /// Each heading's GitHub slug and the rendered line it starts on.
     pub anchors: Vec<(String, usize)>,
-    /// The source lines that render nothing (HTML comments, reference definitions, lone tags).
+    /// Source lines whose content renders nothing, wholly or in part; a collapsed `<details>` body excluded.
     pub silent: Vec<usize>,
     /// Every `<details>` with a summary, open or not, in close order.
     pub disclosures: Vec<Disclosure>,

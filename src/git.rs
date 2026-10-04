@@ -1391,6 +1391,7 @@ fn branch_name_shaped(value: &str) -> bool {
 
 /// Record `name` as this worktree's pick; the default branch deletes the pick instead.
 pub fn write_base_pick(repo: &Path, name: &str) -> Result<(), GitFail> {
+    // Read here, never from the picker's rows, which a fetch can leave stale.
     if Some(name) == default_branch_name(repo)?.as_deref() {
         return delete_base_pick(repo);
     }

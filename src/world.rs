@@ -240,7 +240,7 @@ pub struct TurnHost {
 #[derive(Clone, Debug)]
 pub struct TurnReport {
     pub ended: bool,
-    /// `None` when the sample saw only part of the worktree, so the reader keeps what it knew.
+    /// `None` when the enumeration failed or a member didn't resolve, so the reader keeps what it knew.
     pub agents_present: Option<bool>,
 }
 

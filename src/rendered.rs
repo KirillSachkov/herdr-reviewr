@@ -7,7 +7,7 @@ use std::collections::HashMap;
 /// The open file's rendered view in one file tab.
 #[derive(Debug, Default)]
 pub(crate) struct RenderedView {
-    /// The render's input, `None` when nothing renders: not markdown, a notice, an empty side.
+    /// The render's input; `None` for a non-markdown file, a notice, or an empty new side.
     pub content: Option<Content>,
     /// The old side's source map, width-independent, so a resize re-renders only the new side.
     pub old_map: Option<OldMap>,

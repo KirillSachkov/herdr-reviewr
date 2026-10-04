@@ -1643,7 +1643,7 @@ impl App {
         }
     }
 
-    /// Expand the fold under the cursor for good, growing away from the nearer viewport edge.
+    /// Expand the fold under the cursor for good, growing toward the nearer viewport edge.
     pub fn expand_fold(&mut self, heights: &[usize], viewport: usize) {
         let fold_idx = self.diff_cursor;
         let Some(anchor) = self.visible.get(fold_idx).and_then(Row::fold_anchor) else {
@@ -1749,7 +1749,7 @@ impl App {
         self.turn_baseline = baseline;
     }
 
-    /// Follow what a sample saw; `None`, a partial sample, holds the last answer.
+    /// Follow what a sample saw; `None` (a failed or partial sample) holds the last answer.
     pub fn sync_agents_present(&mut self, present: Option<bool>) {
         self.agents_present = present.or(self.agents_present);
     }

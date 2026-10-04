@@ -9339,7 +9339,7 @@ fn quitting_with_unsent_comments_asks_first() {
         assert!(!app.should_quit && app.confirming_quit, "{code:?}");
     }
 
-    // `send` and `copy` answer too, tested elsewhere.
+    // `send` answers too (tests/send_flow.rs); `copy` would write the real clipboard.
 
     // A click or wheel answers and does nothing else; motion, drag, and release don't answer.
     let (_r, mut app) = asking();

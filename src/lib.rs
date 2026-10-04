@@ -152,7 +152,8 @@ fn restore_terminal(kbd: bool) {
     ratatui::restore();
 }
 
-/// Drop the input an external program left in flight, for 50 ms; a resize still applies.
+/// Drop the input an external program left behind, for 50 ms, never 0: its teardown replies
+/// are still in flight when it exits. A resize still applies.
 fn drain_input(app: &mut App) -> Result<()> {
     let deadline = Instant::now() + Duration::from_millis(50);
     let mut resized = false;

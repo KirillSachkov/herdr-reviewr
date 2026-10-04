@@ -74,7 +74,7 @@ fn opener_argv(template: &str, url: &str) -> Option<(String, Vec<String>)> {
     Some((program, args))
 }
 
-/// A link the OS opener may take: http(s) with a host, and no character the display would hide.
+/// A link the OS opener may take: http(s) with something after the scheme, and no character the display would hide.
 pub fn openable_url(url: &str) -> Result<&str, &'static str> {
     let trimmed = url.trim();
     let hostile = trimmed.chars().any(crate::markdown::hostile_char);

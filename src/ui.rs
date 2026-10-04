@@ -3099,7 +3099,7 @@ fn base_row_width(row: &crate::app::BaseChoice, now: u64) -> usize {
     BASE_ROW_LEAD.width() + name.width() + trail_w
 }
 
-/// The base picker's box, held at its full-list size so typing never moves it.
+/// The base picker's box, held at its full-list size while filtering, plus a probe hit's row.
 fn base_picker_popup(area: Rect, app: &App, now: u64) -> Rect {
     let Some(bp) = &app.base_picker else { return Rect::default() };
     // `visible` decides whether the hit is its own row; the box follows that one decision.
