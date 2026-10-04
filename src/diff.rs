@@ -304,7 +304,7 @@ impl FileDiff {
         // Pair on the text alone, then mark the endings: a line that changed only its ending
         // pairs with its twin, and the marker is the one thing emphasized.
         let pairs = compute_emphasis(&mut rows);
-        mark_crs(&mut rows, &crs);
+        mark_crs(&mut rows, &crs, &pairs);
         Self {
             path,
             previous_path,
@@ -375,22 +375,29 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
 /// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
 pub const CR_MARKER: &str = "^M";
 
-/// Mark the line-ending CRs of each change block whose lines disagree on one, `crs` saying
-/// which rows' lines ended in a CR. Text read in git's canonical form keeps only the CRs git
-/// keeps, and the highlighter leaves every one out of the row text, so a line that changed
-/// only its ending would otherwise paint as an identical −/+ pair. Each marked row paints
-/// [`CR_MARKER`] after its text, emphasized; the text itself stays the file's, so a snippet,
-/// a find, or a copy never sees the marker. A block whose lines all agree changed no ending
-/// and stays unmarked, so a file that is CRLF throughout reads like any other.
-fn mark_crs(rows: &mut [Row], crs: &[bool]) {
+/// Mark the line-ending CR of each paired line whose ending changed, `crs` saying which rows'
+/// lines ended in a CR and `pairs` which deletion and insertion are one line edited. The
+/// sides keep only the CRs git keeps, and the highlighter leaves every one out of the row
+/// text, so a line that changed only its ending would otherwise paint as an identical −/+
+/// pair. The side that has the CR paints [`CR_MARKER`] after its text, emphasized; the text
+/// itself stays the file's, so a snippet, a find, or a copy never sees the marker. A pair that
+/// agrees on its ending changed none, and an unpaired line has no old ending to compare, so
+/// neither is marked: a file that is CRLF throughout reads like any other.
+fn mark_crs(rows: &mut [Row], crs: &[bool], pairs: &[(u32, u32)]) {
     for (dels, inss) in change_blocks(rows) {
-        let block = &crs[dels.start..inss.end];
-        if block.iter().all(|&cr| cr == block[0]) {
-            continue;
-        }
-        for i in (dels.start..inss.end).filter(|&i| crs[i]) {
-            if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[i] {
-                *cr = true;
+        for d in dels {
+            let Some(&(_, new_no)) = pairs.iter().find(|(o, _)| Some(*o) == rows[d].old_no())
+            else {
+                continue;
+            };
+            let Some(i) = inss.clone().find(|&i| rows[i].new_no() == Some(new_no)) else {
+                continue;
+            };
+            if crs[d] != crs[i] {
+                let row = if crs[d] { d } else { i };
+                if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[row] {
+                    *cr = true;
+                }
             }
         }
     }
@@ -775,6 +782,24 @@ mod tests {
         // CRLF throughout: an edit shows its text, and no ending changed.
         let d = build("alpha\r\nbeta\r\n", "alpha\r\nBETA\r\n");
         assert_eq!(changes(&d), [("-beta".into(), false), ("+BETA".into(), false)]);
+        // One block, two edited lines: only the line whose own ending changed is marked.
+        let d = build("alpha\r\nbeta\n", "alpha!\r\nbeta\r\n");
+        assert_eq!(
+            changes(&d),
+            [
+                ("-alpha".into(), false),
+                ("-beta".into(), false),
+                ("+alpha!".into(), false),
+                ("+beta".into(), true),
+            ]
+        );
+        // A block whose pairs each keep their ending marks nothing, though the block mixes
+        // endings: `x` → `X` stays CRLF, `y` → `y2` stays LF.
+        let d = build("x\r\ny\n", "X\r\ny2\n");
+        assert!(changes(&d).iter().all(|&(_, cr)| !cr), "{:?}", changes(&d));
+        // An unpaired line has no old ending to compare: an added CRLF line is unmarked.
+        let d = build("alpha\n", "alpha\nzzz\r\n");
+        assert_eq!(changes(&d), [("+zzz".into(), false)]);
     }
 
     #[test]
