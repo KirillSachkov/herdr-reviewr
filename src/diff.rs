@@ -338,17 +338,15 @@ impl FileDiff {
         Self { rows, ..Self::rowless(path, None, FileState::Normal, View::File) }
     }
 
-    /// The Diff-view `binary` notice, for a change git already reported as having no text
-    /// diff. `set_diff` builds this rather than reading either side's blob, so a `-diff`
-    /// lockfile costs no `git show` at all.
-    pub fn binary_notice(path: String, previous_path: Option<String>) -> Self {
-        Self::rowless(path, previous_path, FileState::Binary, View::Diff)
-    }
-
-    /// The File-view `too_large` notice, for an over-budget file the caller declines to read.
-    /// `set_file_view` checks the on-disk size and builds this rather than reading the bytes.
-    pub fn too_large_notice(path: String) -> Self {
-        Self::rowless(path, None, FileState::TooLarge, View::File)
+    /// A notice in `state` for a file the caller declines to read: a change git already
+    /// reported as having no text diff, or one past the render budget.
+    pub fn notice(
+        path: String,
+        previous_path: Option<String>,
+        state: FileState,
+        view: View,
+    ) -> Self {
+        Self::rowless(path, previous_path, state, view)
     }
 }
 

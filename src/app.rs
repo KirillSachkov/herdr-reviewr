@@ -1495,32 +1495,23 @@ impl App {
             self.open_fresh();
         }
         self.diff_path = Some(path.clone());
-        // Git already reported no text diff for this change — binary content, or a path whose
-        // `diff` attribute `.gitattributes` unsets. Take that verdict rather than re-deciding
-        // from content, which would paint a `-diff` lockfile as a full text diff, and skip
-        // the diff read while we are at it. The read itself carries git's verdict too, for a
-        // change that turned binary since the changeset landed.
-        let sides = if self.changed.get(&path).is_some_and(|a| a.binary) {
-            git::DiffSides::Binary
-        } else {
-            self.content_sides(&path, previous_path.as_deref())
-        };
-        let (old, new) = match sides {
-            git::DiffSides::Binary => {
-                self.diff = FileDiff::binary_notice(path, previous_path);
-                (String::new(), String::new())
-            }
-            git::DiffSides::TooLarge => {
-                self.diff = FileDiff::too_large_notice(path);
-                (String::new(), String::new())
-            }
-            git::DiffSides::Text { old, new } => {
+        // The rename source comes from the landed build, the same record the sides are read
+        // by; the painted row's is only a fallback for a path the build no longer lists.
+        let previous_path =
+            self.changed.get(&path).map_or(previous_path, |a| a.previous_path.clone());
+        let (old, new) = match self.content_sides(&path) {
+            Sides::Text { old, new } => {
                 self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
                 (old, new)
             }
+            Sides::Notice(state) => {
+                self.diff = FileDiff::notice(path, previous_path, state, View::Diff);
+                (String::new(), String::new())
+            }
         };
-        // Hold the new side as the render input, the same current content the File view
-        // renders, and the old side the marks read deletions against. A non-markdown file, a
+        // Hold the new side as the render input, the content git compares (the worktree's,
+        // cleaned, or the scope's newer tree), and the old side the marks read deletions
+        // against. A non-markdown file, a
         // notice, or a deleted file (empty new side) holds nothing, so it shows its source and
         // its toggle stays inert.
         let renders = self.markdown_file() && self.diff.state == crate::diff::FileState::Normal;
@@ -1560,7 +1551,8 @@ impl App {
         let oversize = std::fs::metadata(self.repo.join(path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
         if oversize {
-            (FileDiff::too_large_notice(path.to_string()), String::new())
+            let state = crate::diff::FileState::TooLarge;
+            (FileDiff::notice(path.to_string(), None, state, View::File), String::new())
         } else {
             let content = worktree_content(&self.repo, path);
             let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
@@ -1948,45 +1940,53 @@ impl App {
     /// scope's two ends ([`git::diff_sides`]), so the sides are exactly what `git diff`
     /// compares: the worktree against `HEAD` or the branch's merge-base, the turn baseline
     /// against the snapshot its changeset came from, `A^` against `B` for a commit run. A
-    /// rename reads its old side from `previous_path`, so the diff shows real edits, not a
+    /// rename reads its old side from its source, so the diff shows real edits, not a
     /// wholesale delete-and-add. An untracked file is in no `git diff`: it reads raw, all
     /// additions. A git that can't answer shows no sides.
     ///
-    /// Sides past the render budget read as [`git::DiffSides::TooLarge`] before anything reads
-    /// them: git's sides by the sizes the changeset build took, the worktree's by a stat of
-    /// the file as it is read, so nothing streams a large file through the frame loop. The stat
-    /// sees the raw file, before any clean filter: a large file git-lfs stores as a pointer
-    /// shows its notice, though git would diff the pointer.
-    fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
-        let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
+    /// Everything comes from the landed build's record for `path`. A change git reported as
+    /// having no text diff (binary content, an unset `diff` attribute) is its notice, which
+    /// would otherwise paint a `-diff` lockfile as text. Sides past the render budget are
+    /// their notice before anything reads them: git's sides by the sizes the build took, the
+    /// worktree's by a stat of the file as it is read. The stat sees the raw file, before any
+    /// clean filter: a large file git-lfs stores as a pointer shows its notice, though git
+    /// would diff the pointer.
+    fn content_sides(&self, path: &str) -> Sides {
+        use crate::diff::FileState;
+        let empty = || Sides::Text { old: String::new(), new: String::new() };
         // A path outside the landed changeset is a row painted from an older build, which the
         // landed ends cannot diff: it shows empty until the next reconcile repaints the list.
         let Some(annotation) = self.changed.get(path) else { return empty() };
+        if annotation.binary {
+            return Sides::Notice(FileState::Binary);
+        }
+        // The ends the changeset came from, whatever moved since: a commit, a new merge base,
+        // a promoted turn baseline. No ends means the scope lists nothing.
+        let Some(ends) = &self.diff_ends else { return empty() };
         let untracked = annotation.change == ChangeKind::Untracked;
-        let new_size = annotation.new_size.unwrap_or_else(|| {
+        let new_size = if ends.new.is_some() {
+            annotation.new_size
+        } else {
             // git diffs a tracked symlink as its target's path; an untracked file reads raw,
             // through the link.
             let at = self.repo.join(path);
             let stat =
                 if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
             stat.map_or(0, |m| m.len())
-        });
+        };
         let total = annotation.old_size.saturating_add(new_size);
         if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
-            return git::DiffSides::TooLarge;
+            return Sides::Notice(FileState::TooLarge);
         }
         if untracked {
-            return git::DiffSides::Text {
-                old: String::new(),
-                new: worktree_content(&self.repo, path),
-            };
+            return Sides::Text { old: String::new(), new: worktree_content(&self.repo, path) };
         }
-        // The ends the changeset came from, whatever moved since: a commit, a new merge base,
-        // a promoted turn baseline. No ends means the scope lists nothing.
-        let Some(ends) = &self.diff_ends else { return empty() };
-        let origin = git::Origin::of(annotation.change, previous_path);
-        let sides = git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, origin);
-        sides.unwrap_or_else(|_| empty())
+        let origin = git::Origin::of(annotation.change, annotation.previous_path.as_deref());
+        match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, origin) {
+            Ok(git::DiffSides::Text { old, new }) => Sides::Text { old, new },
+            Ok(git::DiffSides::Binary) => Sides::Notice(FileState::Binary),
+            Err(_) => empty(),
+        }
     }
 
     /// Whether the `commits` scope is active over a pruned pick: the empty state both panes
@@ -3191,11 +3191,7 @@ impl App {
             }
             // An over-budget file reads as its notice, sized before anything is read, so it
             // holds no hunk either.
-            let git::DiffSides::Text { old, new } =
-                self.content_sides(&entry.path, entry.previous_path.as_deref())
-            else {
-                continue;
-            };
+            let Sides::Text { old, new } = self.content_sides(&entry.path) else { continue };
             let diff =
                 self.cache.get(entry.path, entry.previous_path, &old, &new, &self.highlighter);
             if hunk_row(&diff.rows, None, forward).is_some() {
@@ -5704,6 +5700,13 @@ fn is_markdown_path(path: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
+/// What reading a changed file's two sides found: their text, or the notice that stands in
+/// for them.
+enum Sides {
+    Text { old: String, new: String },
+    Notice(crate::diff::FileState),
+}
+
 /// `path`'s worktree bytes as text, lossily, as the file has them: line endings included.
 /// Empty when the file is absent (a deletion), unreadable, or no regular file (a link to a
 /// device never ends). The read stops past the render budget, which the callers check first.
@@ -6517,10 +6520,19 @@ mod tests {
         git(&["commit", "-q", "-am", "grow"]);
         std::fs::write(repo.join("big.txt"), "small\n").unwrap();
         open(&mut app);
-        // Both sides committed, in a run of commits.
+        // Both sides committed, in a run of commits: the big side old, then new, the worktree
+        // small throughout.
         git(&["commit", "-q", "-am", "shrink"]);
         app.commit_pick = Some(CommitPick::single(&git(&["rev-parse", "HEAD"])));
         app.scope = Scope::Commits;
+        open(&mut app);
+        app.commit_pick = Some(CommitPick::single(&git(&["rev-parse", "HEAD~1"])));
+        open(&mut app);
+        // `last-turn`, whose new side is the snapshot the build took.
+        let baseline = git(&["rev-parse", "HEAD^{tree}"]);
+        std::fs::write(repo.join("big.txt"), &big).unwrap();
+        app.sync_turn_baseline(Some(baseline));
+        app.set_scope(Scope::LastTurn).unwrap();
         open(&mut app);
         // A row painted from an older build names a path the landed changeset lacks: it has
         // no diff at the landed ends, so nothing reads it.
@@ -6528,6 +6540,62 @@ mod tests {
         let before = git_commands();
         app.set_diff("gone.txt".to_string(), None);
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
+    }
+
+    /// An over-budget rename is still the diff of a rename: its notice keeps the source the
+    /// title reads `old → new` from, and the view its diff comments render in.
+    #[test]
+    fn an_over_budget_rename_keeps_its_source_and_its_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
+            assert!(out.unwrap().status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("big.txt"), "y\n".repeat(crate::diff::MAX_BYTES / 2 + 1)).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["mv", "big.txt", "moved.txt"]);
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        app.reload().unwrap();
+        app.set_diff("moved.txt".to_string(), None);
+        assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
+        assert_eq!(app.diff.previous_path.as_deref(), Some("big.txt"));
+        assert_eq!(app.diff.view, crate::diff::View::Diff);
+    }
+
+    /// git diffs a tracked symlink as the path it names, so a link to a large file is a
+    /// one-line diff, never the too-large notice.
+    #[cfg(unix)]
+    #[test]
+    fn a_tracked_link_to_a_large_file_diffs_as_its_target_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
+            assert!(out.unwrap().status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let big = elsewhere.path().join("big");
+        std::fs::write(&big, "y\n".repeat(crate::diff::MAX_BYTES)).unwrap();
+        std::os::unix::fs::symlink("nowhere", repo.join("link")).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::remove_file(repo.join("link")).unwrap();
+        std::os::unix::fs::symlink(&big, repo.join("link")).unwrap();
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        app.reload().unwrap();
+        app.set_diff("link".to_string(), None);
+        assert_eq!(app.diff.state, crate::diff::FileState::Normal);
+        assert!(app.diff.rows.iter().any(|r| r.marker() == '+'));
     }
 
     #[test]

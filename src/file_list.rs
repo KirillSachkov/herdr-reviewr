@@ -45,9 +45,11 @@ pub struct Annotation {
     /// attribute. Carried for the read pane, not painted here:
     /// such a change has no countable lines, so it already shows no stats.
     pub binary: bool,
+    /// The rename or copy source, from the same build as `change`.
+    pub previous_path: Option<String>,
     /// The sides' sizes as git stores them ([`ChangedFile::old_size`], [`ChangedFile::new_size`]).
     pub old_size: u64,
-    pub new_size: Option<u64>,
+    pub new_size: u64,
 }
 
 impl From<&ChangedFile> for Annotation {
@@ -59,6 +61,7 @@ impl From<&ChangedFile> for Annotation {
             additions: f.additions,
             deletions: f.deletions,
             binary: f.binary,
+            previous_path: f.previous_path.clone(),
             old_size: f.old_size,
             new_size: f.new_size,
         }
@@ -250,7 +253,7 @@ mod tests {
             previous_path: None,
             binary: false,
             old_size: 0,
-            new_size: None,
+            new_size: 0,
         }
     }
 

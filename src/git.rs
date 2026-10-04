@@ -1358,8 +1358,6 @@ pub enum DiffSides {
     },
     /// "Binary files … differ": binary content, or a path whose `diff` attribute is unset.
     Binary,
-    /// Sides past the render budget ([`crate::diff::over_byte_budget`]), which nothing read.
-    TooLarge,
 }
 
 /// Where a changed path's old side lives.
@@ -1374,12 +1372,13 @@ pub enum Origin<'a> {
 }
 
 impl<'a> Origin<'a> {
-    /// The origin of a changeset entry of `kind` with `previous_path`.
+    /// The origin of a changeset entry of `kind` with `previous_path`. Only a rename or a
+    /// copy has a source, so any other kind reads at its own path.
     pub fn of(kind: ChangeKind, previous_path: Option<&'a str>) -> Self {
         match (kind, previous_path) {
-            (_, None) => Self::Same,
+            (ChangeKind::Renamed, Some(source)) => Self::Renamed(source),
             (ChangeKind::Copied, Some(source)) => Self::Copied(source),
-            (_, Some(source)) => Self::Renamed(source),
+            _ => Self::Same,
         }
     }
 }
@@ -2022,7 +2021,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
             deletions,
             binary: verdict.is_none(),
             old_size: size(&row.old_oid),
-            new_size: (!worktree).then(|| size(&row.new_oid)),
+            new_size: if worktree { 0 } else { size(&row.new_oid) },
             path: row.path,
             previous_path: row.previous_path,
         });
@@ -2060,7 +2059,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
                 previous_path: None,
                 binary,
                 old_size: 0,
-                new_size: None,
+                new_size: 0,
             });
         }
     }

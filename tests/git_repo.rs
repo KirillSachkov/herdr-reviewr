@@ -971,12 +971,12 @@ fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     // path holding a newline sizes like any other.
     let between = changed_between(r.path(), "HEAD~1", "HEAD").unwrap();
     let sizes: Vec<_> = between.iter().map(|f| (f.path.as_str(), f.old_size, f.new_size)).collect();
-    assert_eq!(sizes, [("a.txt", 5, Some(13)), (odd, 6, Some(10))]);
+    assert_eq!(sizes, [("a.txt", 5, 13), (odd, 6, 10)]);
     // Against the worktree, the new side is the file itself, sized when it is read.
     r.write("a.txt", "x\n");
     let from = changed_from(r.path(), "HEAD").unwrap();
     let sizes: Vec<_> = from.iter().map(|f| (f.path.as_str(), f.old_size, f.new_size)).collect();
-    assert_eq!(sizes, [("a.txt", 13, None)]);
+    assert_eq!(sizes, [("a.txt", 13, 0)]);
 }
 
 #[test]
