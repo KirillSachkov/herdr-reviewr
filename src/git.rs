@@ -1358,6 +1358,8 @@ pub enum DiffSides {
     },
     /// "Binary files … differ": binary content, or a path whose `diff` attribute is unset.
     Binary,
+    /// A side past the render budget ([`crate::diff::MAX_BYTES`]), which git never streamed.
+    TooLarge,
 }
 
 /// Where a changed path's old side lives.
@@ -1399,7 +1401,11 @@ pub fn diff_sides(
     // (each line is at least a byte), so the one hunk is the whole file. A file past the
     // budget renders its too-large notice, whatever part of it this reads.
     let context = format!("-U{}", crate::diff::MAX_BYTES);
+    // A side past the budget diffs as binary, sized but never read whole, in every scope.
+    let threshold = format!("core.bigFileThreshold={}", crate::diff::MAX_BYTES);
     let mut args = vec![
+        "-c",
+        &threshold,
         // An empty context line prints as a lone space, the form unified diff defines, whatever
         // the user set; the parser reads a bare newline too.
         "-c",
@@ -1426,23 +1432,58 @@ pub fn diff_sides(
     }
     args.push(path);
     let out = git(repo, &args)?;
+    let blob = |rev: &str, at: &str| format!("{rev}:{at}");
     let same = |rev: &str, at: &str| {
+        if over_budget(repo, &[blob(rev, at)], None) {
+            return DiffSides::TooLarge;
+        }
         let text = file_content(repo, rev, at);
         DiffSides::Text { old: text.clone(), new: text }
     };
+    let source = match origin {
+        Origin::Same => path,
+        Origin::Renamed(source) | Origin::Copied(source) => source,
+    };
     Ok(match (parse_sides(&out), origin) {
+        // Binary, or a side past the threshold: sized apart, since git says the same of both.
+        (Some(DiffSides::Binary), _) => {
+            let new_blob = new.map(|new| blob(new, path));
+            let worktree = new.is_none().then_some(path);
+            let blobs: Vec<String> = [blob(old, source)].into_iter().chain(new_blob).collect();
+            if over_budget(repo, &blobs, worktree) {
+                DiffSides::TooLarge
+            } else {
+                DiffSides::Binary
+            }
+        }
         // A copy's source is still there, in a section of its own if it changed too, so its
         // old side is read rather than diffed.
         (Some(DiffSides::Text { new: text, .. }), Origin::Copied(source)) => {
-            DiffSides::Text { old: file_content(repo, old, source), new: text }
+            if over_budget(repo, &[blob(old, source)], None) {
+                DiffSides::TooLarge
+            } else {
+                DiffSides::Text { old: file_content(repo, old, source), new: text }
+            }
         }
         (Some(sides), _) => sides,
-        (None, Origin::Same) => same(new.unwrap_or(old), path),
-        (None, Origin::Renamed(source) | Origin::Copied(source)) => match new {
+        (None, _) => match new {
             Some(new) => same(new, path),
             None => same(old, source),
         },
     })
+}
+
+/// Whether any side holds more than the render budget: the blobs named `<rev>:<path>`, sized
+/// in one `cat-file` without reading them, and the `worktree` file, by its stat. A side git
+/// cannot name is no side, so it is not over.
+fn over_budget(repo: &Path, blobs: &[String], worktree: Option<&str>) -> bool {
+    let over = |len: u64| crate::diff::over_byte_budget(usize::try_from(len).unwrap_or(usize::MAX));
+    if worktree.is_some_and(|at| std::fs::metadata(repo.join(at)).is_ok_and(|m| over(m.len()))) {
+        return true;
+    }
+    let input = blobs.join("\n") + "\n";
+    git_stdin(repo, &["cat-file", "--batch-check=%(objectsize)"], &input)
+        .is_ok_and(|out| out.lines().any(|line| line.parse().is_ok_and(over)))
 }
 
 /// A unified diff's hunk header, `@@ -l,s +l,s @@`: each side's (first line, line count),

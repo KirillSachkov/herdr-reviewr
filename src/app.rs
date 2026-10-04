@@ -1507,19 +1507,17 @@ impl App {
         let sides = if self.changed.get(&path).is_some_and(|a| a.binary) {
             git::DiffSides::Binary
         } else if self.worktree_over_budget(&path) {
-            // Too large to render, so read nothing: a full-context diff of the file would
-            // stream it whole through git on every poll only to be dropped.
-            self.diff = FileDiff::too_large_notice(path);
-            self.rendered.content = None;
-            self.rebuild_visible();
-            self.settle_read();
-            return;
+            git::DiffSides::TooLarge
         } else {
             self.content_sides(&path, previous_path.as_deref())
         };
         let (old, new) = match sides {
             git::DiffSides::Binary => {
                 self.diff = FileDiff::binary_notice(path, previous_path);
+                (String::new(), String::new())
+            }
+            git::DiffSides::TooLarge => {
+                self.diff = FileDiff::too_large_notice(path);
                 (String::new(), String::new())
             }
             git::DiffSides::Text { old, new } => {
@@ -1537,8 +1535,9 @@ impl App {
         self.settle_read();
     }
 
-    /// Whether `path`'s diff would read a worktree file past the render budget. Only the scopes
-    /// whose new end is the worktree read it; a run of commits reads committed trees.
+    /// Whether `path`'s diff would read a worktree file past the render budget, known by a stat
+    /// before any git runs. A fast path for the scopes whose new end is the worktree:
+    /// [`git::diff_sides`] sizes every other side itself, and never streams one past the budget.
     fn worktree_over_budget(&self, path: &str) -> bool {
         self.diff_ends.as_ref().is_some_and(|ends| ends.new.is_none())
             && std::fs::metadata(self.repo.join(path))

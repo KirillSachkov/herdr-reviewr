@@ -909,6 +909,33 @@ fn rename_is_reported_at_the_new_path() {
 }
 
 #[test]
+fn a_side_past_the_render_budget_is_never_read_in_any_scope() {
+    let r = Repo::init();
+    let big = "a line of a vendored bundle, padded out to size\n".repeat(50_000);
+    assert!(big.len() > 2_000_000);
+    r.write("big.txt", &big);
+    r.write("b.bin", "\0\u{1}binary\n");
+    r.commit_all("init");
+    r.write("big.txt", &big.replacen("a line", "A line", 1));
+    r.write("b.bin", "\0\u{2}binary\n");
+    r.commit_all("edit");
+
+    // Tree to tree, as `commits` and `last-turn` read: neither side is the worktree.
+    let sides = |old, new, path| diff_sides(r.path(), old, new, path, Origin::Same).unwrap();
+    assert_eq!(sides("HEAD~1", Some("HEAD"), "big.txt"), DiffSides::TooLarge);
+    // A binary change stays binary.
+    assert_eq!(sides("HEAD~1", Some("HEAD"), "b.bin"), DiffSides::Binary);
+    // Shrunk in the worktree, the old side is still past the budget.
+    r.write("big.txt", "small now\n");
+    assert_eq!(sides("HEAD", None, "big.txt"), DiffSides::TooLarge);
+    // A rename whose source is past the budget, with no line of its own to diff.
+    r.git(&["checkout", "--", "big.txt"]);
+    r.git(&["mv", "big.txt", "moved.txt"]);
+    let moved = diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("big.txt"));
+    assert_eq!(moved.unwrap(), DiffSides::TooLarge);
+}
+
+#[test]
 fn a_copy_is_reported_as_a_copy_and_reads_its_source() {
     let r = Repo::init();
     r.git(&["config", "diff.renames", "copies"]);
