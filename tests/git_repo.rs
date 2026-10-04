@@ -1428,3 +1428,36 @@ fn the_commit_scope_writes_nothing() {
     );
     assert_eq!(before, after, "no ref, index, worktree, or HEAD change");
 }
+
+/// Reading a changeset and a file's diff sides never writes the repository. A file touched
+/// without changing (an editor's save, a CRLF round trip) is stat-dirty, and a plain
+/// `git diff` would refresh its index entry, rewrite `.git/index`, and hold `index.lock`
+/// across the agent's own `git add`.
+#[test]
+fn reading_a_touched_file_never_rewrites_the_index() {
+    let r = Repo::init();
+    r.write("a.txt", "one\n");
+    r.write("run.sh", "x\n");
+    r.commit_all("init");
+    let index = r.path().join(".git/index");
+    let stamp = || std::fs::metadata(&index).unwrap().modified().unwrap();
+    // A later mtime on unchanged content, past the index's own stamp.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    r.write("a.txt", "one\n");
+    // A real mode change still lists, as an empty change.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = r.path().join("run.sh");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let before = stamp();
+
+    let changed = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let paths: Vec<&str> = changed.iter().map(|f| f.path.as_str()).collect();
+    let expected: &[&str] = if cfg!(unix) { &["run.sh"] } else { &[] };
+    assert_eq!(paths, expected, "a touched file with the same content is no change");
+    diff_sides(r.path(), "HEAD", None, "a.txt", None).unwrap();
+
+    assert_eq!(stamp(), before, ".git/index was rewritten");
+}

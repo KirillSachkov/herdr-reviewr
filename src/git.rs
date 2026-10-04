@@ -11,10 +11,31 @@ use anyhow::{Context, Result, bail};
 use crate::model::{ChangeKind, ChangedFile, Scope};
 
 /// Run `git -C <repo> <args>` and return stdout. Errors on non-zero exit.
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::proc::command("git")
-        .arg("-C")
+/// Every git process reviewr runs, in `repo`. Reads only, so nothing here may write the
+/// repository (the **No writes** invariant): `git diff` would otherwise refresh a stat-dirty
+/// index entry and take `index.lock` under the agent's own `git add`, and
+/// `GIT_OPTIONAL_LOCKS=0` turns off the same opportunistic write in `status`. `GIT_DIFF_OPTS`
+/// would override the full context the diff sides are read with.
+fn git_command(repo: &Path) -> std::process::Command {
+    #[cfg(test)]
+    GIT_COMMANDS.with(|n| n.set(n.get() + 1));
+    let mut cmd = crate::proc::command("git");
+    cmd.arg("-C")
         .arg(repo)
+        .args(["-c", "diff.autoRefreshIndex=false"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIFF_OPTS");
+    cmd
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Git processes this thread built, for tests that pin a build's spawn budget.
+    pub(crate) static GIT_COMMANDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let out = git_command(repo)
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
@@ -51,9 +72,7 @@ fn subcommand<'a>(args: &[&'a str]) -> &'a str {
 
 /// Like [`git`], but returns stdout even on non-zero exit (e.g. `diff --no-index`).
 fn git_lenient(repo: &Path, args: &[&str]) -> String {
-    crate::proc::command("git")
-        .arg("-C")
-        .arg(repo)
+    git_command(repo)
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
@@ -64,7 +83,7 @@ fn git_lenient(repo: &Path, args: &[&str]) -> String {
 /// Run `git -C <repo> <args>` and return its trimmed stdout, or `None` if the command fails to
 /// spawn, exits non-zero, or prints nothing. The one-line query workhorse for `rev-parse`/`merge-base`.
 fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = crate::proc::command("git").arg("-C").arg(repo).args(args).output().ok()?;
+    let out = git_command(repo).args(args).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -74,12 +93,7 @@ fn git_line(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// Whether `git -C <repo> <args>` spawns and exits zero. The predicate workhorse for existence checks.
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
-    crate::proc::command("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .is_ok_and(|o| o.status.success())
+    git_command(repo).args(args).output().is_ok_and(|o| o.status.success())
 }
 
 /// Whether `path` is inside a git work tree.
@@ -118,12 +132,7 @@ pub enum Worktree {
 
 /// Resolve `path` to its worktree, distinguishing the two ways resolution yields no root.
 pub fn worktree_of(path: &Path) -> Worktree {
-    match crate::proc::command("git")
-        .arg("-C")
-        .arg(path)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
+    match git_command(path).args(["rev-parse", "--show-toplevel"]).output() {
         Err(_) => Worktree::Unknown,
         Ok(out) if !out.status.success() => Worktree::Outside,
         Ok(out) => match String::from_utf8_lossy(&out.stdout).trim() {
@@ -489,9 +498,7 @@ pub struct GitFail(pub String);
 /// Spawn one PR-fetch git read. `LC_ALL=C` pins Git's messages to English — remote discovery
 /// classifies a missing remote by stderr text, which Git otherwise localizes.
 fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> {
-    crate::proc::command("git")
-        .arg("-C")
-        .arg(repo)
+    git_command(repo)
         .env("LC_ALL", "C")
         .args(args)
         .output()
@@ -1544,9 +1551,7 @@ pub fn delete_base_pick(repo: &Path) -> Result<(), GitFail> {
 fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = crate::proc::command("git")
-        .arg("-C")
-        .arg(repo)
+    let mut child = git_command(repo)
         .env("LC_ALL", "C")
         .args(args)
         .stdin(Stdio::piped())
@@ -1635,9 +1640,7 @@ impl Drop for TempIndex<'_> {
 /// Like [`git`], but runs against a throwaway index via `GIT_INDEX_FILE` so the snapshot
 /// never disturbs the repo's real index.
 fn git_with_index(repo: &Path, index: &Path, args: &[&str]) -> Result<String> {
-    let out = crate::proc::command("git")
-        .arg("-C")
-        .arg(repo)
+    let out = git_command(repo)
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .env("GIT_INDEX_FILE", index)
@@ -1983,9 +1986,16 @@ fn assemble(
         if !seen.insert(path.clone()) {
             continue;
         }
-        // A path missing from the numstat has no counts to contradict, so it reads as an
-        // ordinary empty change rather than as git's no-text-diff verdict.
-        let verdict = counts.get(&path).copied().unwrap_or(Some((0, 0)));
+        // A modified path missing from the numstat is only stat-dirty: touched, its content
+        // and mode unchanged. The diff runs without refreshing the index (see
+        // [`git_command`]), so git names it here but finds no change to count. A mode change
+        // still counts, as 0/0. Any other kind missing from the numstat reads as an ordinary
+        // empty change rather than as git's no-text-diff verdict.
+        let Some(verdict) =
+            counts.get(&path).copied().or((kind != ChangeKind::Modified).then_some(Some((0, 0))))
+        else {
+            continue;
+        };
         let (additions, deletions) = verdict.unwrap_or((0, 0));
         files.push(ChangedFile {
             path,

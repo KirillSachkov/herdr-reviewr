@@ -6471,7 +6471,7 @@ mod tests {
 
     /// Git commands the current thread has built so far.
     fn git_commands() -> usize {
-        crate::proc::GIT_COMMANDS.with(std::cell::Cell::get)
+        crate::git::GIT_COMMANDS.with(std::cell::Cell::get)
     }
 
     #[test]

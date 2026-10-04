@@ -49,12 +49,6 @@ fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
     which::which_in(name, Some(path), cwd).ok()
 }
 
-#[cfg(test)]
-thread_local! {
-    /// How many git commands this thread built, each run once: the spawn-budget seam.
-    pub(crate) static GIT_COMMANDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 /// Resolve `program` on the host PATH — the common host bins first, the inherited PATH after —
 /// and give the child that same PATH.
 ///
@@ -62,10 +56,6 @@ thread_local! {
 /// reviewer's own.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
-    #[cfg(test)]
-    if program == "git" {
-        GIT_COMMANDS.with(|n| n.set(n.get() + 1));
-    }
     let path = host_path();
     let mut cmd = resolve_on(&path, program).map_or_else(|| Command::new(program), Command::new);
     cmd.env("PATH", path);
