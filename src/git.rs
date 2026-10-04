@@ -1427,6 +1427,29 @@ pub fn diff_sides(
     })
 }
 
+/// A unified diff's hunk header, `@@ -l,s +l,s @@`: each side's (first line, line count),
+/// a count of one left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HunkHeader {
+    pub old: (usize, usize),
+    pub new: (usize, usize),
+}
+
+impl HunkHeader {
+    pub(crate) fn parse(line: &str) -> Option<Self> {
+        let range = |r: &str| -> Option<(usize, usize)> {
+            match r.split_once(',') {
+                Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+                None => Some((r.parse().ok()?, 1)),
+            }
+        };
+        let mut parts = line.strip_prefix("@@ ")?.split(' ');
+        let old = range(parts.next()?.strip_prefix('-')?)?;
+        let new = range(parts.next()?.strip_prefix('+')?)?;
+        Some(Self { old, new })
+    }
+}
+
 /// The sides a full-context `git diff` spells, `None` when it printed no hunk (the sides are
 /// equal). Each hunk header counts its lines, so a body line is never mistaken for a header:
 /// `--- x` inside a hunk is the deletion of `-- x`. `\ No newline at end of file` takes the
@@ -1465,13 +1488,9 @@ fn parse_sides(out: &str) -> Option<DiffSides> {
                 new.push_str(body);
                 new_left = new_left.saturating_sub(1);
             }
-        } else if let Some(range) = line.strip_prefix("@@ -") {
-            // `@@ -l,s +l,s @@`, a count of one left out.
-            let count = |r: &str| r.split_once(',').map_or(Some(1), |(_, n)| n.parse().ok());
-            let mut ranges = range.split(' ');
-            let old_range = ranges.next()?;
-            let new_range = ranges.next()?.strip_prefix('+')?;
-            (old_left, new_left) = (count(old_range)?, count(new_range)?);
+        } else if line.starts_with("@@ ") {
+            let hunk = HunkHeader::parse(line)?;
+            (old_left, new_left) = (hunk.old.1, hunk.new.1);
             hunks = true;
         } else if line.starts_with("Binary files ") {
             return Some(DiffSides::Binary);
@@ -2678,5 +2697,21 @@ mod tests {
         // No hunk: the sides are equal, and the caller reads the one blob.
         assert_eq!(parse_sides("diff --git a/f b/g\nsimilarity index 100%\n"), None);
         assert_eq!(parse_sides(""), None);
+    }
+
+    #[test]
+    fn a_hunk_header_reads_both_ranges_a_count_of_one_left_out() {
+        use super::HunkHeader;
+        let rows = [
+            ("@@ -105,11 +105,12 @@\n", Some(((105, 11), (105, 12)))),
+            ("@@ -0,0 +1 @@\n", Some(((0, 0), (1, 1)))),
+            ("@@ -7 +7,0 @@ fn main() {\n", Some(((7, 1), (7, 0)))),
+            ("@@ +1 -1 @@\n", None),
+            ("@@@ -1 -1 +1 @@@\n", None),
+        ];
+        for (line, want) in rows {
+            let got = HunkHeader::parse(line).map(|h| (h.old, h.new));
+            assert_eq!(got, want, "{line:?}");
+        }
     }
 }

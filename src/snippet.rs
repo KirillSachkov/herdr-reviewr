@@ -5,6 +5,7 @@
 //! to the finding's side and range, and highlights the kept rows.
 
 use crate::diff::{Row, Span, compute_emphasis, language_of, set_row_spans};
+use crate::git::HunkHeader;
 use crate::highlight::Highlighter;
 use crate::model::Side;
 
@@ -143,9 +144,10 @@ fn parse_hunk(hunk: &str) -> (Vec<Row>, bool) {
     let mut numbered = false;
     for raw in hunk.lines() {
         if raw.starts_with("@@ ") {
-            if let Some((o, n)) = parse_hunk_header(raw) {
-                old_no = o;
-                new_no = n;
+            if let Some(hunk) = HunkHeader::parse(raw)
+                && let (Ok(o), Ok(n)) = (u32::try_from(hunk.old.0), u32::try_from(hunk.new.0))
+            {
+                (old_no, new_no) = (o, n);
                 numbered = true;
             }
             continue;
@@ -187,19 +189,6 @@ fn parse_hunk(hunk: &str) -> (Vec<Row>, bool) {
         });
     }
     (rows, numbered)
-}
-
-fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
-    let rest = line.strip_prefix("@@ ")?;
-    let mut parts = rest.split_whitespace();
-    let old = parts.next()?;
-    let new = parts.next()?;
-    if !old.starts_with('-') || !new.starts_with('+') {
-        return None;
-    }
-    let old_no = old[1..].split(',').next()?.parse().ok()?;
-    let new_no = new[1..].split(',').next()?.parse().ok()?;
-    Some((old_no, new_no))
 }
 
 fn change_blocks(rows: &[Row]) -> Vec<std::ops::Range<usize>> {
