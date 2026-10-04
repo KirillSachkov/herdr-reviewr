@@ -911,8 +911,8 @@ fn rename_is_reported_at_the_new_path() {
 #[test]
 fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     let r = Repo::init();
-    // Windows forbids a newline in a file name.
-    let odd = if cfg!(unix) { "line\nbreak.txt" } else { "odd: name.txt" };
+    // Windows forbids a newline, and a colon, in a file name.
+    let odd = if cfg!(unix) { "line\nbreak: odd.txt" } else { "odd name.txt" };
     r.write("a.txt", "four\n");
     r.write(odd, "seven\n");
     r.commit_all("init");
