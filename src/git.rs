@@ -5,10 +5,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context, Result, bail};
 
-use crate::model::{ChangeKind, ChangedFile, Scope};
+use crate::model::{ChangeKind, ChangedFile};
 
 /// Every git process reviewr runs, in `repo`. Nothing here may write the real index (the
 /// **No writes** invariant): `git diff` would otherwise refresh a stat-dirty entry and take
@@ -34,7 +35,12 @@ thread_local! {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = git_command(repo)
+    run(git_command(repo), args)
+}
+
+/// Run `cmd` (a [`git_command`]) with `args` and return stdout. Errors on non-zero exit.
+fn run(mut cmd: std::process::Command, args: &[&str]) -> Result<String> {
+    let out = cmd
         .args(["-c", "core.quotepath=false"])
         .args(args)
         .output()
@@ -1625,67 +1631,169 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 /// and untracked content alike. Touches only the object database and the copy, never the
 /// real index or any ref.
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
-    let index = IndexCopy::of(repo)?;
-    index.git(repo, &["add", "-A"])?;
-    Ok(index.git(repo, &["write-tree"])?.trim().to_string())
+    IndexCopy::with(repo, Purpose::Snapshot, |index| {
+        index.git(repo, &["add", "-A"])?;
+        Ok(index.git(repo, &["write-tree"])?.trim().to_string())
+    })
 }
+
+/// What an [`IndexCopy`] is for. A snapshot's `add -A` stages untracked files into its copy,
+/// which a worktree diff would then take for tracked ones, so the two never share a copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Purpose {
+    Diff,
+    Snapshot,
+}
+
+/// The prefix of every index copy's directory in the OS temp dir.
+const COPY_PREFIX: &str = "reviewr-index-";
 
 /// A private copy of the worktree's index, in a private directory of the OS temp dir, named to
 /// git by `GIT_INDEX_FILE` for the runs that write an index: a snapshot's `add`, and the
 /// refresh a worktree diff needs to tell a touched file from a changed one. git writes only
-/// the copy (the **No writes** invariant). Each copy is its own, so two panes on one worktree
-/// never share one, and dropping it removes the directory with everything git left in it.
-struct IndexCopy(tempfile::TempDir);
+/// the copy (the **No writes** invariant).
+///
+/// A copy lives for the session, one per worktree and [`Purpose`], and is copied again only
+/// when the real index changes, so the refresh git writes into it holds: a file touched with
+/// the same content is hashed once, not on every poll. A run that finds its copy busy takes a
+/// fresh one for itself instead of waiting. The directory holds an OS-locked `lock` file for
+/// as long as the copy lives, so a later run can tell a killed process's leftover (unlocked)
+/// from a live copy and sweep it.
+struct IndexCopy {
+    dir: tempfile::TempDir,
+    /// The lock that marks this copy live, released on drop or with the process.
+    _live: std::fs::File,
+    /// The real index's (mtime, size) when it was last copied; `None` before the first copy,
+    /// or while the repository has no index.
+    seeded: Option<(std::time::SystemTime, u64)>,
+}
 
 impl IndexCopy {
-    fn of(repo: &Path) -> Result<Self> {
-        let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
-        let real = git_dir.join("index");
+    /// Run `f` on `repo`'s copy for `purpose`, brought up to date with the real index.
+    fn with<T>(repo: &Path, purpose: Purpose, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        type Slot = std::sync::Arc<std::sync::Mutex<Option<IndexCopy>>>;
+        static COPIES: OnceLock<Mutex<HashMap<(PathBuf, Purpose), Slot>>> = OnceLock::new();
+        let real = git_dir(repo)?.join("index");
+        let slot = COPIES
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry((real.clone(), purpose))
+            .or_default()
+            .clone();
+        let fresh;
+        let mut kept;
+        let copy = match slot.try_lock() {
+            Ok(guard) => {
+                kept = guard;
+                if kept.is_none() {
+                    *kept = Some(Self::new()?);
+                }
+                kept.as_mut().expect("filled above")
+            }
+            Err(std::sync::TryLockError::Poisoned(guard)) => {
+                kept = guard.into_inner();
+                *kept = Some(Self::new()?);
+                kept.as_mut().expect("filled above")
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                fresh = Self::new()?;
+                &mut { fresh }
+            }
+        };
+        copy.seed(&real)?;
+        f(copy)
+    }
+
+    /// A new, empty copy, after sweeping the copies killed processes left behind.
+    fn new() -> Result<Self> {
+        sweep_dead_copies();
         let dir = tempfile::Builder::new()
-            .prefix("reviewr-index-")
+            .prefix(COPY_PREFIX)
             .tempdir()
             .context("creating the index copy")?;
-        let copy = Self(dir);
+        // Locked under a temporary name, then renamed into place, so a sweep never finds a
+        // `lock` file that is not yet held.
+        let pending = dir.path().join("lock.new");
+        let live = std::fs::File::create(&pending).context("creating the copy's lock")?;
+        live.lock().context("locking the index copy")?;
+        std::fs::rename(&pending, dir.path().join("lock")).context("placing the copy's lock")?;
+        Ok(Self { dir, _live: live, seeded: None })
+    }
+
+    /// Copy the real index again if it changed since the last copy.
+    fn seed(&mut self, real: &Path) -> Result<()> {
         // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
         // older than its index gets its content compared, since a same-size edit in that tick
         // matches every stat field. A copy stamped now would pass that edit as clean. Read
         // before the copy: an index the agent swaps in meanwhile is newer, so the stamp errs
         // old, the safe side, never new.
-        let modified = match std::fs::metadata(&real).and_then(|m| m.modified()) {
-            Ok(modified) => modified,
+        let stamp = match std::fs::metadata(real) {
+            Ok(meta) => (meta.modified().context("reading the index's mtime")?, meta.len()),
             // A fresh repository has no index yet, and git reads a missing one as empty.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(copy),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let _ = std::fs::remove_file(self.path());
+                self.seeded = None;
+                return Ok(());
+            }
             // Any other failure is no answer: an empty index would list every file deleted.
             Err(e) => return Err(e).context("reading the index"),
         };
+        if self.seeded == Some(stamp) {
+            return Ok(());
+        }
         // Read through a handle that shares delete, so the agent's git can still rename a new
         // index over the real one while this copies it.
-        let mut from = std::fs::File::open(&real).context("opening the index")?;
-        let mut to = std::fs::File::create(copy.path()).context("creating the index copy")?;
+        let mut from = std::fs::File::open(real).context("opening the index")?;
+        let mut to = std::fs::File::create(self.path()).context("creating the index copy")?;
         std::io::copy(&mut from, &mut to).context("copying the index")?;
         // Best effort: an undated copy costs the racy-clean edge case, never the run.
-        let _ = to.set_modified(modified);
-        Ok(copy)
+        let _ = to.set_modified(stamp.0);
+        self.seeded = Some(stamp);
+        Ok(())
     }
 
     fn path(&self) -> PathBuf {
-        self.0.path().join("index")
+        self.dir.path().join("index")
     }
 
     /// Like [`git`], on the copy, with the diff refresh on: a stat-dirty entry whose content
     /// is unchanged drops out of the diff, as in the reviewer's own `git diff`.
     fn git(&self, repo: &Path, args: &[&str]) -> Result<String> {
-        let out = git_command(repo)
-            .args(["-c", "diff.autoRefreshIndex=true", "-c", "core.quotepath=false"])
-            .args(args)
-            .env("GIT_INDEX_FILE", self.path())
-            .output()
-            .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
-        if !out.status.success() {
-            bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        let mut cmd = git_command(repo);
+        cmd.args(["-c", "diff.autoRefreshIndex=true"]).env("GIT_INDEX_FILE", self.path());
+        run(cmd, args)
     }
+}
+
+/// Remove the index copies whose owner is gone: a copy's `lock` is held for as long as its
+/// process lives, so one this can take was left by a process that died without its cleanup.
+/// A directory with no `lock` yet is skipped, never taken for dead.
+fn sweep_dead_copies() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(COPY_PREFIX) {
+            continue;
+        }
+        let dir = entry.path();
+        let Ok(lock) = std::fs::File::open(dir.join("lock")) else { continue };
+        if lock.try_lock().is_ok() {
+            drop(lock);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// `repo`'s git dir, asked once per worktree: it is fixed for the session.
+fn git_dir(repo: &Path) -> Result<PathBuf> {
+    static DIRS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+    let dirs = DIRS.get_or_init(Mutex::default);
+    if let Some(dir) = dirs.lock().unwrap_or_else(PoisonError::into_inner).get(repo) {
+        return Ok(dir.clone());
+    }
+    let dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
+    dirs.lock().unwrap_or_else(PoisonError::into_inner).insert(repo.to_path_buf(), dir.clone());
+    Ok(dir)
 }
 
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
@@ -1713,45 +1821,24 @@ pub fn diff_base(repo: &Path) -> String {
 /// The changed files from the tree-ish `base` to the worktree, untracked files included,
 /// sorted by path: the changeset of the `uncommitted` and `branch` scopes.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
-    let index = IndexCopy::of(repo)?;
-    let numstat = index.git(repo, &["diff", base, "--numstat", "-z"])?;
-    let raw = index.git(repo, &["diff", base, "--raw", "--no-abbrev", "-z"])?;
-    assemble(repo, &numstat, &raw, true)
-}
-
-/// The changed files for `scope`, sorted by path. `branch_base` is the resolved base OID
-/// for the `branch` scope ([`resolve_base`]'s winner); with none the scope lists nothing.
-/// `last-turn` and `commits` diff through their own entry points, so they list nothing here.
-pub fn changed_files(
-    repo: &Path,
-    scope: Scope,
-    branch_base: Option<&str>,
-) -> Result<Vec<ChangedFile>> {
-    match scope {
-        Scope::Uncommitted => changed_from(repo, &diff_base(repo)),
-        Scope::Branch => match branch_base.and_then(|b| merge_base(repo, b)) {
-            Some(base) => changed_from(repo, &base),
-            None => Ok(Vec::new()),
-        },
-        Scope::LastTurn | Scope::Commits => Ok(Vec::new()),
-    }
-}
-
-/// The changed files between the turn baseline `tree` and the live worktree, for
-/// `last-turn`: the worktree snapshotted now, then diffed tree against tree. Staged,
-/// unstaged, untracked, and committed-this-turn changes all show, with no phantom deletion
-/// for a file untracked at both ends, which a tree-against-worktree diff would report.
-pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>> {
-    changed_between(repo, tree, &snapshot_worktree(repo)?)
+    let out = IndexCopy::with(repo, Purpose::Diff, |index| index.git(repo, &diff_args(&[base])))?;
+    assemble(repo, &out, true)
 }
 
 /// The changed files between two trees, `old` against `new`: the `commits` scope's run, and
 /// `last-turn`'s baseline against a worktree snapshot. Both sides are trees, so no untracked
 /// pass runs. `old` may be the empty tree for a root commit.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
-    let numstat = git(repo, &["diff", old, new, "--numstat", "-z"])?;
-    let raw = git(repo, &["diff", old, new, "--raw", "--no-abbrev", "-z"])?;
-    assemble(repo, &numstat, &raw, false)
+    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false)
+}
+
+/// The one `git diff` a changeset reads, between `ends`: each path's raw record (its status,
+/// rename source, and blobs), then its line counts, in one run.
+fn diff_args<'a>(ends: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["diff"];
+    args.extend(ends);
+    args.extend(["--raw", "--numstat", "--no-abbrev", "-z"]);
+    args
 }
 
 /// `sha`'s first parent, or the empty tree when `sha` is a root commit: the old side of a
@@ -1928,7 +2015,7 @@ pub struct WorktreeEntry {
 /// sorted; `-z` keeps paths with spaces or special characters verbatim.
 pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     // One spawn for tracked + untracked. `--others --exclude-standard` applies the same
-    // standard exclude rules as the `status` untracked pass `changed_files` runs, so the
+    // standard exclude rules as the untracked pass `changed_from` runs, so the
     // untracked sets match without a status walk.
     let listed = git(repo, &["ls-files", "--cached", "--others", "--exclude-standard", "-z"])?;
     let mut seen = HashSet::new();
@@ -1993,13 +2080,13 @@ pub fn list_ignored_dir(repo: &Path, dir: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// Build the sorted `ChangedFile` list from `git diff` numstat and raw output. A `worktree`
+/// Build the sorted `ChangedFile` list from one `git diff --raw --numstat` ([`diff_args`]). A `worktree`
 /// diff's new side is the worktree, sized when it is read, and it appends the untracked files
 /// a `git diff` never reports. Every blob is sized here, on the world worker, by object id: a
 /// file's diff then knows whether its sides fit the render budget before reading either.
-fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec<ChangedFile>> {
+fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> {
+    let (rows, numstat) = parse_raw(out);
     let counts = parse_numstat(numstat);
-    let rows = parse_raw(raw);
     let blobs: Vec<&str> = rows
         .iter()
         .flat_map(|row| [Some(row.old_oid.as_str()), (!worktree).then_some(row.new_oid.as_str())])
@@ -2037,7 +2124,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
             others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
         // A failed attribute read costs the verdict, never the whole changeset.
         let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
-        let threshold = if new_paths.is_empty() { 0 } else { big_file_threshold(repo) };
+        let mut buf = vec![0; 64 * 1024];
         for path in new_paths {
             let path = path.to_string();
             if !seen.insert(path.clone()) {
@@ -2048,7 +2135,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
             let additions = if undiffable.contains(path.as_str()) {
                 None
             } else {
-                untracked_additions(repo, &path, threshold)
+                untracked_additions(repo, &path, &mut buf)
             };
             let binary = additions.is_none();
             files.push(ChangedFile {
@@ -2102,43 +2189,37 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
     Ok(unset)
 }
 
-/// The repository's `core.bigFileThreshold` in bytes, its suffixes read by git: past it git
-/// takes a file for binary without reading it. git's own default where unset or unreadable.
-fn big_file_threshold(repo: &Path) -> u64 {
-    const DEFAULT: u64 = 512 * 1024 * 1024;
-    git_line(repo, &["config", "--type=int", "--default", "536870912", "core.bigFileThreshold"])
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT)
-}
+/// git's default `core.bigFileThreshold`: past it git takes a file for binary without reading
+/// it.
+const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
 /// Addition count of an untracked file: its line count, which is what `git diff` against
 /// nothing reports. `None` where git would report no countable diff — binary content, or a
-/// file past `threshold` ([`big_file_threshold`]) — matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
+/// file past git's default [`BIG_FILE_THRESHOLD`] — matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
 /// shelling `git diff --no-index` per file — with `--untracked-files=all` a large untracked
 /// tree would otherwise fork git once per file on every poll and freeze the UI.
 ///
 /// This is the content half of the untracked verdict only. An untracked path never reaches a
 /// `git diff`, so no numstat speaks for it; [`diff_unset`] asks git for the attribute half
 ///.
-fn untracked_additions(repo: &Path, path: &str, threshold: u64) -> Option<u32> {
+fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     use std::io::Read;
     let at = repo.join(path);
     // Only a regular file has lines: a link to a device would read without end.
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
         return Some(0);
     };
-    // git takes a file past `threshold` for binary without reading it, and so does this, so a
-    // huge log costs a build nothing. A `diff` attribute set on the path would make git read
-    // it anyway; here it still reads as binary.
-    if meta.len() > threshold {
+    // git takes a file past its default threshold for binary without reading it, and so does
+    // this, so a huge log costs a build nothing. A `diff` attribute set on the path, or a
+    // threshold the repository raised, would make git read it; here it still reads as binary.
+    if meta.len() > BIG_FILE_THRESHOLD {
         return None;
     }
     let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };
     // Counted a buffer at a time, so a large file never sits in memory whole.
-    let mut buf = vec![0; 64 * 1024];
     let (mut newlines, mut read, mut last) = (0usize, 0usize, None);
     loop {
-        let n = match file.read(&mut buf) {
+        let n = match file.read(buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -2218,55 +2299,73 @@ struct RawRow {
     new_oid: String,
 }
 
-/// The records of `git diff --raw --no-abbrev -z`. Each is `:MODE MODE OID OID STATUS\0PATH\0`,
-/// except a rename or copy, `:… R<score>\0OLD\0NEW\0`, which takes the new path and carries
-/// its old one; every other kind has `previous_path == None`.
-fn parse_raw(out: &str) -> Vec<RawRow> {
+/// The raw records that lead `git diff --raw --numstat --no-abbrev -z`, and the numstat
+/// records after them. Each raw record is `:MODE MODE OID OID STATUS\0PATH\0`, except a rename
+/// or copy, `:… R<score>\0OLD\0NEW\0`, which takes the new path and carries its old one; every
+/// other kind has `previous_path == None`. The first field not opening with `:` starts the
+/// numstat, which no raw path can be mistaken for: a path follows its record's meta field.
+fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
+    /// One NUL-terminated field off the front of `rest`.
+    fn field<'a>(rest: &mut &'a str) -> Option<&'a str> {
+        let (head, tail) = rest.split_once('\0')?;
+        *rest = tail;
+        Some(head)
+    }
     let mut rows = Vec::new();
-    let mut it = out.split('\0');
-    while let Some(meta) = it.next() {
-        let Some(meta) = meta.strip_prefix(':') else { continue };
-        let fields: Vec<&str> = meta.split(' ').collect();
-        let [_, _, old_oid, new_oid, status] = fields[..] else { continue };
+    let mut rest = out;
+    while rest.starts_with(':') {
+        let mut next = rest;
+        let Some(meta) = field(&mut next) else { break };
+        let fields: Vec<&str> = meta[1..].split(' ').collect();
+        let [_, _, old_oid, new_oid, status] = fields[..] else { break };
         let (kind, previous_path) = match status.chars().next() {
             Some('A') => (ChangeKind::Added, None),
             Some('D') => (ChangeKind::Deleted, None),
             Some(code @ ('R' | 'C')) => {
                 let kind = if code == 'R' { ChangeKind::Renamed } else { ChangeKind::Copied };
-                (kind, it.next().map(str::to_string))
+                let Some(source) = field(&mut next) else { break };
+                (kind, Some(source.to_string()))
             }
             // Modified, type-changed, etc.
             _ => (ChangeKind::Modified, None),
         };
-        if let Some(path) = it.next().filter(|path| !path.is_empty()) {
-            rows.push(RawRow {
-                kind,
-                path: path.to_string(),
-                previous_path,
-                old_oid: old_oid.to_string(),
-                new_oid: new_oid.to_string(),
-            });
-        }
+        let Some(path) = field(&mut next) else { break };
+        rest = next;
+        rows.push(RawRow {
+            kind,
+            path: path.to_string(),
+            previous_path,
+            old_oid: old_oid.to_string(),
+            new_oid: new_oid.to_string(),
+        });
     }
-    rows
+    (rows, rest)
 }
 
-/// The size of each blob in `oids`, in one `cat-file`, by object id: an id holds no
-/// whitespace, so any path is safe. An all-zeros id (no blob) is left out, and reads as none.
+/// The size of each blob in `oids`, by object id, which no path can garble. A blob's size is
+/// fixed for its id, so each is asked once per session, in one `cat-file` per build for the
+/// ids it has not seen. An all-zeros id (no blob) is left out, and reads as none.
 fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
-    let named: Vec<&str> =
-        oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0')).collect();
-    if named.is_empty() {
-        return Ok(HashMap::new());
+    static KNOWN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Mutex::default);
+    let named = oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0'));
+    let unknown: Vec<&str> = {
+        let known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        named.clone().filter(|oid| !known.contains_key(*oid)).collect()
+    };
+    if !unknown.is_empty() {
+        let input = unknown.join("\n") + "\n";
+        let args = ["cat-file", "--batch-check=%(objectname) %(objectsize)"];
+        let out = git_stdin(repo, &args, &input).map_err(|e| anyhow::anyhow!(e.0))?;
+        let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        for (oid, size) in out.lines().filter_map(|line| line.split_once(' ')) {
+            if let Ok(size) = size.parse() {
+                known.insert(oid.to_string(), size);
+            }
+        }
     }
-    let input = named.join("\n") + "\n";
-    let out = git_stdin(repo, &["cat-file", "--batch-check=%(objectname) %(objectsize)"], &input)
-        .map_err(|e| anyhow::anyhow!(e.0))?;
-    Ok(out
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .filter_map(|(oid, size)| Some((oid.to_string(), size.parse().ok()?)))
-        .collect())
+    let known = known.lock().unwrap_or_else(PoisonError::into_inner);
+    Ok(named.filter_map(|oid| Some((oid.to_string(), *known.get(oid)?))).collect())
 }
 
 #[cfg(test)]
@@ -2702,7 +2801,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_kinds_and_rename_target() {
+    fn a_raw_record_reads_its_kind_its_path_and_a_renames_source() {
         let meta =
             |status: &str| format!(":100644 100644 {} {} {status}", "a".repeat(40), "0".repeat(40));
         let raw = [
@@ -2717,11 +2816,17 @@ mod tests {
             "new.rs".into(),
             meta("M"),
             "with\nnewline".into(),
+            meta("M"),
+            ":colon-led".into(),
+            // The numstat records that follow the raw ones in the same run.
+            "1\t1\tsrc/a.rs".into(),
             String::new(),
         ]
         .join("\0");
-        let rows: Vec<_> =
-            parse_raw(&raw).into_iter().map(|r| (r.kind, r.path, r.previous_path)).collect();
+        let (rows, numstat) = parse_raw(&raw);
+        assert_eq!(numstat, "1\t1\tsrc/a.rs\0");
+        assert_eq!(rows[0].old_oid, "a".repeat(40));
+        let rows: Vec<_> = rows.into_iter().map(|r| (r.kind, r.path, r.previous_path)).collect();
         assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string(), None));
         assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string(), None));
         assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string(), None));
@@ -2730,15 +2835,15 @@ mod tests {
             (ChangeKind::Renamed, "new.rs".to_string(), Some("old.rs".to_string()))
         );
         assert_eq!(rows[4], (ChangeKind::Modified, "with\nnewline".to_string(), None));
-        assert_eq!(parse_raw(&raw)[0].old_oid, "a".repeat(40));
+        assert_eq!(rows[5], (ChangeKind::Modified, ":colon-led".to_string(), None));
     }
 
     #[test]
-    fn raw_copy_keeps_the_new_path() {
+    fn a_copy_keys_under_its_new_path() {
         // A copy carries old + new like a rename; it must key under the new path, not collapse
         // to a Modified entry on the source path.
         let raw = format!(":100644 100644 {0} {0} C75\0orig.rs\0copy.rs\0", "b".repeat(40));
-        let row = &parse_raw(&raw)[0];
+        let row = &parse_raw(&raw).0[0];
         assert_eq!(
             (row.kind, row.path.as_str(), row.previous_path.as_deref()),
             (ChangeKind::Copied, "copy.rs", Some("orig.rs"))

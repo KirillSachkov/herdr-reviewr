@@ -7,25 +7,43 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    DiffSides, Origin, ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
-    changed_between, changed_files as changed_files_oid, changed_from, checked_out_branch,
-    default_branch_name, delete_base_pick, diff_sides, file_content, list_branches,
-    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
-    snapshot_worktree, write_base_pick, write_baseline_ref,
+    DiffSides, Origin, ResolvedBase, abbreviate_oid, all_files, changed_between, changed_from,
+    checked_out_branch, default_branch_name, delete_base_pick, diff_sides, file_content,
+    list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
+    resolve_commit, snapshot_worktree, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
+use herdr_reviewr::world::{WorldInput, build_changed};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()
 }
 
+/// `scope`'s changeset as the world worker builds it, the `--base` flag `base`.
 fn changed_files(
     repo: &Path,
     scope: Scope,
     base: Option<&str>,
 ) -> anyhow::Result<Vec<ChangedFile>> {
-    let winner = resolve_base(repo, base).map_err(|e| anyhow::anyhow!("{}", e.0))?.status.winner;
-    changed_files_oid(repo, scope, winner.as_ref().map(herdr_reviewr::git::ResolvedBase::oid))
+    Ok(build_changed(&world_input(repo, scope, base, None))?.changed)
+}
+
+/// `last-turn`'s changeset against the baseline `tree`, as the world worker builds it.
+fn changed_against_tree(repo: &Path, tree: &str) -> anyhow::Result<Vec<ChangedFile>> {
+    Ok(build_changed(&world_input(repo, Scope::LastTurn, None, Some(tree)))?.changed)
+}
+
+fn world_input(repo: &Path, scope: Scope, base: Option<&str>, turn: Option<&str>) -> WorldInput {
+    WorldInput {
+        repo: repo.to_path_buf(),
+        tab: herdr_reviewr::app::Tab::Changes,
+        scope,
+        base: base.map(str::to_string),
+        base_epoch: 0,
+        turn_baseline: turn.map(str::to_string),
+        commit_pick: None,
+        toggled_dirs: std::collections::HashSet::default(),
+    }
 }
 
 fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
@@ -936,23 +954,39 @@ fn an_untracked_link_to_a_device_lists_without_reading_it() {
     assert!(files.iter().any(|f| f.path == "pipe" && f.additions == 0), "{files:?}");
 }
 
-/// An untracked file past `core.bigFileThreshold` is binary, as git takes it, and is never
-/// read to count its lines; one at the threshold counts.
+/// An untracked file past git's default big-file threshold is binary, never read to count
+/// its lines; one at the threshold counts. Sparse, so neither costs the disk.
+#[cfg(unix)]
 #[test]
 fn an_untracked_file_past_the_big_file_threshold_is_binary() {
     let r = Repo::init();
     r.write("a.txt", "a\n");
     r.commit_all("init");
-    r.git(&["config", "core.bigFileThreshold", "1k"]);
-    r.write("at.txt", &"a\n".repeat(512));
-    r.write("past.txt", &"a\n".repeat(513));
+    for (name, len) in [("at.txt", 512 << 20), ("past.txt", (512 << 20) + 1)] {
+        let file = std::fs::File::create(r.path().join(name)).unwrap();
+        std::io::Write::write_all(&mut &file, &b"a\n".repeat(4096)).unwrap();
+        file.set_len(len).unwrap();
+    }
     let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
     let verdict = |path: &str| {
         let f = files.iter().find(|f| f.path == path).unwrap();
         (f.binary, f.additions)
     };
-    assert_eq!(verdict("at.txt"), (false, 512));
+    assert_eq!(verdict("at.txt"), (false, 4097));
     assert_eq!(verdict("past.txt"), (true, 0));
+}
+
+/// A copy a killed process left behind holds no lock, and the next copy made sweeps it.
+#[test]
+fn a_dead_processs_index_copy_is_swept() {
+    let dead = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap().keep();
+    std::fs::write(dead.join("lock"), "").unwrap();
+    std::fs::write(dead.join("index"), "stale").unwrap();
+    let r = Repo::init();
+    r.write("a.txt", "a\n");
+    r.commit_all("init");
+    snapshot_worktree(r.path()).unwrap();
+    assert!(!dead.exists(), "{} survived", dead.display());
 }
 
 #[test]

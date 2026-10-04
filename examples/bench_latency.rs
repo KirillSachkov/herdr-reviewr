@@ -12,7 +12,6 @@ use std::time::Instant;
 use herdr_reviewr::diff::DiffCache;
 use herdr_reviewr::git;
 use herdr_reviewr::highlight::Highlighter;
-use herdr_reviewr::model::Scope;
 use herdr_reviewr::theme;
 
 fn ms(f: impl FnOnce()) -> f64 {
@@ -42,19 +41,20 @@ fn main() {
     println!("== {label} ==");
 
     // --- Components of reload() -------------------------------------------------
-    let changed = git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
+    let changed = git::changed_from(&repo, &git::diff_base(&repo)).unwrap();
     row(
-        "changed_files (uncommitted)",
+        "changed_from (uncommitted)",
         sample(5, || {
-            git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
+            git::changed_from(&repo, &git::diff_base(&repo)).unwrap();
         }),
     );
     row(
-        "changed_files (branch, incl. resolve)",
+        "changed_from (branch, incl. resolve)",
         sample(5, || {
             let base = git::resolve_base(&repo, None).ok().and_then(|r| r.status.winner);
-            git::changed_files(&repo, Scope::Branch, base.as_ref().map(git::ResolvedBase::oid))
-                .unwrap();
+            if let Some(base) = base.and_then(|b| git::merge_base(&repo, b.oid())) {
+                git::changed_from(&repo, &base).unwrap();
+            }
         }),
     );
     let all = git::all_files(&repo).unwrap();
@@ -157,11 +157,11 @@ fn main() {
     }
 
     // --- Composite: what one All-files reload costs ------------------------------
-    // (The Changes composite is the changed_files row above — one call, no reopen.)
+    // (The Changes composite is the changed_from row above — one call, no reopen.)
     row(
         "TAB SWITCH -> All files (reload, no reopen)",
         sample(3, || {
-            git::changed_files(&repo, Scope::Uncommitted, None).unwrap();
+            git::changed_from(&repo, &git::diff_base(&repo)).unwrap();
             git::all_files(&repo).unwrap();
         }),
     );
