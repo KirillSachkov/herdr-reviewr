@@ -650,6 +650,10 @@ struct LastClick {
 #[derive(Debug)]
 pub struct App {
     pub repo: PathBuf,
+    /// git's `core.editor` for this repo, read once on the first `e` that needs it: a
+    /// session-fixed value, so no later press spawns git on the frame loop
+    /// (`policies/ux-responsiveness.md`).
+    pub core_editor: std::cell::OnceCell<Option<String>>,
     pub base: Option<String>,
     /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
     /// header names its winner (or the skip) and the diff builds against the winner's OID
@@ -934,6 +938,7 @@ impl App {
         let theme = theme::resolve(None);
         Self {
             repo,
+            core_editor: std::cell::OnceCell::new(),
             base,
             branch_base: git::BaseStatus::default(),
             commit_pick: None,

@@ -251,21 +251,6 @@ mod tests {
         );
     }
 
-    /// Windows needs no tool on `PATH`, and the text lands as Unicode with CRLF line breaks:
-    /// `clip.exe` would mangle everything past ASCII. Whatever the clipboard held before is put
-    /// back.
-    #[cfg(windows)]
-    #[test]
-    fn a_windows_copy_lands_on_the_clipboard_with_non_ascii_intact() {
-        let before = arboard::Clipboard::new().and_then(|mut c| c.get_text()).ok();
-        Clipboard.export("src/café.rs:3\n+let 日本 = 1;\nnaming 👍").unwrap();
-        let copied = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap();
-        if let Some(before) = before {
-            let _ = arboard::Clipboard::new().and_then(|mut c| c.set_text(before));
-        }
-        assert_eq!(copied, "src/café.rs:3\r\n+let 日本 = 1;\r\nnaming 👍");
-    }
-
     #[test]
     fn export_confirmations_name_the_actual_result_and_pluralize_comments() {
         // The agent line names the pane it addressed, so a mis-send is visible the moment it

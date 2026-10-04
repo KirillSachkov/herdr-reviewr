@@ -199,6 +199,18 @@ mod tests {
         assert!(resolve_on(&path, OsStr::new("missing")).is_none());
     }
 
+    /// A program named by its path, as `core.editor` names one on Windows
+    /// (`"C:\\Program Files\\...\\Code.exe" --wait`), resolves as itself, PATH unread.
+    #[test]
+    fn a_program_named_by_its_path_resolves_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = program(dir.path(), "editor");
+        let elsewhere = env::join_paths([std::path::Path::new("nowhere")]).unwrap();
+        let found = resolve_on(&elsewhere, bin.as_os_str()).expect("the path resolves");
+        assert!(same_file(&found, &bin), "{found:?} is not {bin:?}");
+        assert!(resolve_on(&elsewhere, dir.path().join("missing").as_os_str()).is_none());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_without_the_executable_bit_is_not_a_program() {

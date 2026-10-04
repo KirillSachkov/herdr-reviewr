@@ -1381,7 +1381,8 @@ pub fn diff_sides(
     // budget renders its too-large notice, whatever part of it this reads.
     let context = format!("-U{}", crate::diff::MAX_BYTES);
     let mut args = vec![
-        // Under this setting git prints an empty context line as a bare newline.
+        // An empty context line prints as a lone space, the form unified diff defines, whatever
+        // the user set; the parser reads a bare newline too.
         "-c",
         "diff.suppressBlankEmpty=false",
         // A path is a path, never a glob: `a[1].txt` must not match `a1.txt`.

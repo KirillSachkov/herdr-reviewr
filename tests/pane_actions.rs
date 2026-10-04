@@ -563,14 +563,20 @@ fn manifest_builds_with_one_install_script_per_platform() {
 #[test]
 fn every_powershell_script_is_ascii() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Every script PowerShell 5.1 runs, the VM's first-logon setup included.
     let mut scripts = vec![root.join("herdr/install.ps1")];
-    for entry in fs::read_dir(root.join("scripts")).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().is_some_and(|ext| ext == "ps1") {
-            scripts.push(path);
+    let mut dirs = vec![root.join("scripts")];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "ps1") {
+                scripts.push(path);
+            }
         }
     }
-    assert!(scripts.len() > 1, "{scripts:?}");
+    assert!(scripts.iter().any(|s| s.ends_with("windows-vm/setup.ps1")), "{scripts:?}");
     for script in scripts {
         let bytes = fs::read(&script).unwrap();
         let offending: Vec<usize> = (0..bytes.len()).filter(|&at| !bytes[at].is_ascii()).collect();

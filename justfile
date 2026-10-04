@@ -58,6 +58,6 @@ smoke-edit:
     cargo build --release
     python3 scripts/smoke_edit_file.py --binary target/release/herdr-reviewr
 
-# everything CI runs, locally
+# everything the unix CI job runs, locally (the Windows jobs run on CI only)
 ci: fmt-check lint test
     cargo build --release

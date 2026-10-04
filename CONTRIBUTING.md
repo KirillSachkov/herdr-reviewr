@@ -15,8 +15,8 @@ just run           # run reviewr against this repo
 cargo run -- ~/some/repo   # or against any repo
 ```
 
-`just ci` runs exactly what CI runs: format check, clippy with warnings as errors, tests, and a
-release build. Green there means green in CI.
+`just ci` runs what CI's unix job runs: format check, clippy with warnings as errors, tests, and a
+release build. CI also runs the Windows build, tests, and plugin install, which run there only.
 
 `just smoke-edit` is the one check CI cannot run. It drives a real release binary through a pty
 to test the `e` key: unit tests stop at the editor's argv, and everything past it is terminal
