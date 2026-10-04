@@ -162,10 +162,10 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
-/// How long an explicit action waits for its workspace's lock: the slowest open, with room.
-const LOCK_BOUND: Duration = Duration::from_secs(15);
+/// How long an action waits for its workspace's lock: a holder's wedged call, then its open.
+const LOCK_BOUND: Duration = herdr::CALL_BOUND.saturating_mul(2).saturating_add(VISIBLE_BOUND);
 
-/// The pause between two lock attempts while an explicit action waits.
+/// The pause between two lock attempts.
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
 /// Workspace `ws`'s action lock, waited for up to [`LOCK_BOUND`].

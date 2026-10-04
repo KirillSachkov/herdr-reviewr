@@ -423,15 +423,31 @@ fn pair_homologs(
     inss: std::ops::Range<usize>,
     pairs: &mut Vec<(u32, u32)>,
 ) {
-    let mut next_ins = inss.start;
-    for d in dels {
+    let first = pairs.len();
+    let mut claimed = vec![false; inss.len()];
+    let mut twinned = vec![false; dels.len()];
+    // Exact twins first, anywhere in the block: a line whose ending alone changed is that line.
+    for (k, d) in dels.clone().enumerate() {
         let old = rows[d].text();
-        // An exact twin first: a line whose ending alone changed is that line, not a neighbor.
-        let twin = (next_ins..inss.end).find(|&p| rows[p].text() == old);
-        let mut p = twin.unwrap_or(next_ins);
-        while p < inss.end {
-            let new = rows[p].text();
-            let (ratio, old_e, new_e) = word_emphasis(&old, &new);
+        let twin = inss.clone().find(|&p| !claimed[p - inss.start] && rows[p].text() == old);
+        if let Some(p) = twin {
+            claimed[p - inss.start] = true;
+            twinned[k] = true;
+            pairs.extend(rows[d].old_no().zip(rows[p].new_no()));
+        }
+    }
+    // Then each remaining line's first similar unclaimed successor, in order.
+    let mut next_ins = inss.start;
+    for (k, d) in dels.enumerate() {
+        if twinned[k] {
+            continue;
+        }
+        let old = rows[d].text();
+        for p in next_ins..inss.end {
+            if claimed[p - inss.start] {
+                continue;
+            }
+            let (ratio, old_e, new_e) = word_emphasis(&old, &rows[p].text());
             if ratio >= MIN_SIMILARITY {
                 if let Row::Deletion { emphasis, .. } = &mut rows[d] {
                     *emphasis = old_e;
@@ -439,15 +455,14 @@ fn pair_homologs(
                 if let Row::Insertion { emphasis, .. } = &mut rows[p] {
                     *emphasis = new_e;
                 }
-                if let (Some(o), Some(n)) = (rows[d].old_no(), rows[p].new_no()) {
-                    pairs.push((o, n));
-                }
+                claimed[p - inss.start] = true;
+                pairs.extend(rows[d].old_no().zip(rows[p].new_no()));
                 next_ins = p + 1;
                 break;
             }
-            p += 1;
         }
     }
+    pairs[first..].sort_unstable();
 }
 
 /// Below this similarity two lines are different lines, never paired for emphasis.
@@ -741,6 +756,21 @@ mod tests {
         );
         // The emphasis pairs the same twin the marker does.
         assert_eq!(d.pairs, [(1, 2)]);
+    }
+
+    #[test]
+    fn swapped_lines_keep_their_ending_marks() {
+        let d = build("alpha one\r\nbeta two\r\n", "beta two\nalpha one\n");
+        let marked: Vec<(String, bool)> = d
+            .rows
+            .iter()
+            .filter(|r| r.marker() != ' ')
+            .map(|r| (r.marker_text(), r.cr_marker()))
+            .collect();
+        assert!(
+            marked.iter().filter(|(text, _)| text.starts_with('-')).all(|(_, cr)| *cr),
+            "{marked:?}"
+        );
     }
 
     #[test]

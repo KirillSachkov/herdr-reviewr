@@ -1250,10 +1250,6 @@ pub fn diff_sides(
     origin: Origin<'_>,
 ) -> Result<DiffSides> {
     // Context this wide makes the one hunk the whole file.
-    let source = match origin {
-        Origin::Same => path,
-        Origin::Renamed(source) | Origin::Copied(source) => source,
-    };
     let context = format!("-U{}", crate::diff::MAX_LINES);
     let mut args = vec![
         // An empty context line prints as a lone space, whatever the user set.
@@ -1285,10 +1281,11 @@ pub fn diff_sides(
             Origin::Renamed(source) | Origin::Copied(source),
         ) => DiffSides::Text { old: file_content(repo, old, source), new: text },
         (Some(sides), _) => sides,
-        (None, _) => match new {
-            Some(new) => same(new, path),
-            None => same(old, source),
-        },
+        // No hunk on a rename's target: it is empty now, against its source.
+        (None, Origin::Renamed(source) | Origin::Copied(source)) => {
+            DiffSides::Text { old: file_content(repo, old, source), new: String::new() }
+        }
+        (None, Origin::Same) => same(new.unwrap_or(old), path),
     })
 }
 
@@ -1461,8 +1458,8 @@ struct IndexCopy {
     dir: tempfile::TempDir,
     /// The lock that marks this copy live, released on drop or with the process.
     _live: std::fs::File,
-    /// The real index's (mtime, size) at the last copy.
-    seeded: Option<(std::time::SystemTime, u64)>,
+    /// The real index's stamp at the last copy.
+    seeded: Option<Stamp>,
 }
 
 impl IndexCopy {
@@ -1489,6 +1486,7 @@ impl IndexCopy {
                 kept.as_mut().expect("filled above")
             }
             Err(std::sync::TryLockError::Poisoned(guard)) => {
+                slot.clear_poison();
                 kept = guard.into_inner();
                 *kept = Some(Self::new()?);
                 kept.as_mut().expect("filled above")
@@ -1499,7 +1497,12 @@ impl IndexCopy {
             }
         };
         copy.seed(&real)?;
-        f(copy)
+        let out = f(copy);
+        // `add -A` never unstages, so a snapshot copy starts from the real index every time.
+        if purpose == Purpose::Snapshot {
+            copy.seeded = None;
+        }
+        out
     }
 
     /// A new, empty copy, after sweeping the copies killed processes left behind.
@@ -1519,9 +1522,9 @@ impl IndexCopy {
 
     /// Copy the real index again if it changed since the last copy.
     fn seed(&mut self, real: &Path) -> Result<()> {
-        // The copy keeps the index's mtime, which git's racy-clean check reads.
-        let stamp = match std::fs::metadata(real) {
-            Ok(meta) => (meta.modified().context("reading the index's mtime")?, meta.len()),
+        use std::io::{Read, Seek, SeekFrom};
+        let mut from = match std::fs::File::open(real) {
+            Ok(file) => file,
             // A fresh repository has no index yet, and git reads a missing one as empty.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let _ = std::fs::remove_file(self.path());
@@ -1531,15 +1534,20 @@ impl IndexCopy {
             // Any other failure is no answer: an empty index would list every file deleted.
             Err(e) => return Err(e).context("reading the index"),
         };
-        if self.seeded == Some(stamp) {
+        // The index's trailing checksum names its content even within one mtime tick.
+        let meta = from.metadata().context("reading the index")?;
+        let mut tail = vec![0; usize::try_from(meta.len().min(32)).unwrap_or(0)];
+        from.seek(SeekFrom::End(-(tail.len() as i64))).context("reading the index")?;
+        from.read_exact(&mut tail).context("reading the index")?;
+        let stamp = Stamp { modified: meta.modified().context("reading the index")?, tail };
+        if self.seeded.as_ref() == Some(&stamp) {
             return Ok(());
         }
-        // Shares delete, so the agent's git can still replace the real index meanwhile.
-        let mut from = std::fs::File::open(real).context("opening the index")?;
+        from.rewind().context("reading the index")?;
         let mut to = std::fs::File::create(self.path()).context("creating the index copy")?;
         std::io::copy(&mut from, &mut to).context("copying the index")?;
-        // Best effort: an undated copy costs the racy-clean edge case, never the run.
-        let _ = to.set_modified(stamp.0);
+        // The copy keeps the index's mtime, which git's racy-clean check reads.
+        let _ = to.set_modified(stamp.modified);
         self.seeded = Some(stamp);
         Ok(())
     }
@@ -1556,7 +1564,14 @@ impl IndexCopy {
     }
 }
 
-/// Remove copies whose `lock` is free: their process died without cleanup.
+/// What identifies one version of the real index: its mtime and its trailing checksum.
+#[derive(Debug, PartialEq, Eq)]
+struct Stamp {
+    modified: std::time::SystemTime,
+    tail: Vec<u8>,
+}
+
+/// Remove copies whose `lock` is free, or that never got one within an hour: their process died.
 fn sweep_dead_copies() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for entry in entries.flatten() {
@@ -1564,9 +1579,14 @@ fn sweep_dead_copies() {
             continue;
         }
         let dir = entry.path();
-        let Ok(lock) = std::fs::File::open(dir.join("lock")) else { continue };
-        if lock.try_lock().is_ok() {
-            drop(lock);
+        let dead = match std::fs::File::open(dir.join("lock")) {
+            Ok(lock) => lock.try_lock().is_ok(),
+            Err(_) => entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|at| at.elapsed().is_ok_and(|age| age.as_secs() > 3600)),
+        };
+        if dead {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

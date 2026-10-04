@@ -1534,6 +1534,36 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     assert!(ours.is_empty(), "reviewr left {ours:?} in .git");
 }
 
+/// A file ignored since the last snapshot leaves the next one: `add -A` never unstages.
+#[test]
+fn a_file_ignored_since_the_last_snapshot_leaves_the_next() {
+    let r = Repo::init();
+    r.write("a.txt", "a\n");
+    r.commit_all("init");
+    r.write("build.out", "x\n");
+    let listed = |tree: &str| r.git(&["ls-tree", "--name-only", tree]);
+    assert!(listed(&snapshot_worktree(r.path()).unwrap()).contains("build.out"));
+    r.write(".gitignore", "build.out\n");
+    assert!(!listed(&snapshot_worktree(r.path()).unwrap()).contains("build.out"));
+}
+
+/// An index rewritten in the same mtime tick, at the same size, is still a new index.
+#[test]
+fn an_index_rewritten_within_one_tick_is_read_again() {
+    let r = Repo::init();
+    r.write("a.txt", "one\ntwo\nthree\n");
+    r.commit_all("init");
+    r.git(&["mv", "a.txt", "y.txt"]);
+    let index = r.path().join(".git/index");
+    let stamp = std::fs::metadata(&index).unwrap().modified().unwrap();
+    let names = |files: Vec<ChangedFile>| files.into_iter().map(|f| f.path).collect::<Vec<_>>();
+    assert_eq!(names(changed_files(r.path(), Scope::Uncommitted, None).unwrap()), ["y.txt"]);
+    r.git(&["mv", "y.txt", "z.txt"]);
+    let file = std::fs::File::options().write(true).open(&index).unwrap();
+    file.set_modified(stamp).unwrap();
+    assert_eq!(names(changed_files(r.path(), Scope::Uncommitted, None).unwrap()), ["z.txt"]);
+}
+
 /// Concurrent snapshots of one worktree all land the same tree.
 #[test]
 fn concurrent_snapshots_of_one_worktree_all_land_the_same_tree() {

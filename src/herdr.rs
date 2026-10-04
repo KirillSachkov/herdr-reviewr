@@ -175,7 +175,7 @@ fn call(args: &[&str]) -> Result<String, HerdrError> {
 }
 
 /// How long one herdr CLI call may run, so a wedged herdr never holds an action's lock.
-const CALL_BOUND: Duration = Duration::from_secs(8);
+pub(crate) const CALL_BOUND: Duration = Duration::from_secs(8);
 
 /// The `error.code` of the envelope a failed call writes to stderr, read line by line.
 fn error_code(stderr: &str) -> Option<String> {
@@ -287,7 +287,6 @@ pub(crate) struct OpenedPane {
     pub(crate) tab_id: Option<String>,
 }
 
-/// Where and how `plugin pane open` opens a plugin's pane.
 /// Where `plugin pane open` puts a pane, with what that placement needs.
 #[derive(Debug)]
 pub(crate) enum Spot<'a> {
@@ -297,6 +296,7 @@ pub(crate) enum Spot<'a> {
     Overlay,
 }
 
+/// Where and how `plugin pane open` opens a plugin's pane.
 #[derive(Debug)]
 pub(crate) struct PaneOpen<'a> {
     pub(crate) plugin: &'a str,
