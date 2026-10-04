@@ -5712,12 +5712,12 @@ mod tests {
         crate::git::GIT_COMMANDS.with(std::cell::Cell::get)
     }
 
-    #[test]
-    fn an_over_budget_file_opens_as_its_notice_without_reading_in_any_scope() {
+    /// A fresh repository on `main` with an identity, and a runner for git in it.
+    fn test_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
+        let repo = dir.path().to_path_buf();
+        let git = move |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output();
             let out = out.unwrap();
             assert!(out.status.success(), "git {args:?}");
             String::from_utf8(out.stdout).unwrap().trim().to_string()
@@ -5725,6 +5725,13 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@t"]);
         git(&["config", "user.name", "t"]);
+        (dir, git)
+    }
+
+    #[test]
+    fn an_over_budget_file_opens_as_its_notice_without_reading_in_any_scope() {
+        let (dir, git) = test_repo();
+        let repo = dir.path();
         // A `diff` attribute forces text, which git's own size threshold would not override.
         std::fs::write(repo.join(".gitattributes"), "big.txt diff\n").unwrap();
         std::fs::write(repo.join("big.txt"), "x\n").unwrap();
@@ -5770,15 +5777,8 @@ mod tests {
     /// An over-budget rename's notice keeps its source and its Diff view.
     #[test]
     fn an_over_budget_rename_keeps_its_source_and_its_view() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, git) = test_repo();
         let repo = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
-            assert!(out.unwrap().status.success(), "git {args:?}");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
         std::fs::write(repo.join("big.txt"), "y\n".repeat(crate::diff::MAX_BYTES / 2 + 1)).unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "init"]);
@@ -5796,15 +5796,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_tracked_link_to_a_large_file_diffs_as_its_target_path() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, git) = test_repo();
         let repo = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
-            assert!(out.unwrap().status.success(), "git {args:?}");
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
         let elsewhere = tempfile::tempdir().unwrap();
         let big = elsewhere.path().join("big");
         std::fs::write(&big, "y\n".repeat(crate::diff::MAX_BYTES)).unwrap();
@@ -5823,17 +5816,8 @@ mod tests {
 
     #[test]
     fn a_file_build_spends_one_git_diff_in_every_scope() {
-        let dir = tempfile::tempdir().unwrap();
+        let (dir, git) = test_repo();
         let repo = dir.path();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
-            let out = out.unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
         git(&["config", "core.autocrlf", "true"]);
         std::fs::write(repo.join("a.txt"), "one\ntwo\n").unwrap();
         std::fs::write(repo.join("same.txt"), "same\n").unwrap();

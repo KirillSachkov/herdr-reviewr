@@ -1295,8 +1295,8 @@ pub fn diff_sides(
 /// A hunk header `@@ -l,s +l,s @@`: each side's (first line, count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HunkHeader {
-    pub old: (u32, u32),
-    pub new: (u32, u32),
+    pub(crate) old: (u32, u32),
+    pub(crate) new: (u32, u32),
 }
 
 impl HunkHeader {

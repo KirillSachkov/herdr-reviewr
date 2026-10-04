@@ -299,10 +299,10 @@ pub(crate) enum Spot<'a> {
 
 #[derive(Debug)]
 pub(crate) struct PaneOpen<'a> {
-    pub plugin: &'a str,
-    pub spot: Spot<'a>,
-    pub cwd: &'a str,
-    pub focus: bool,
+    pub(crate) plugin: &'a str,
+    pub(crate) spot: Spot<'a>,
+    pub(crate) cwd: &'a str,
+    pub(crate) focus: bool,
 }
 
 /// Open one of a plugin's panes.
