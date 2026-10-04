@@ -49,9 +49,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
-    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -147,30 +145,17 @@ pub fn run() -> Result<()> {
     result
 }
 
-/// Claim the input modes the event loop reads, on a screen something else already owns.
-///
-/// Bracketed paste so a multi-line paste arrives as one event, not raw keystrokes whose
-/// embedded newlines would submit the comment early. The kitty keyboard protocol reports
-/// modifiers on keys the legacy encoding drops, most notably Ctrl/Alt+arrows.
+/// Claim the input modes the event loop reads, on a screen something else already owns
+/// ([`input::claim`]).
 fn claim_input_modes(kbd: bool) {
-    let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, cursor::Hide);
-    if kbd {
-        let _ = execute!(
-            io::stdout(),
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        );
-    }
-    // Last, since on Windows the mouse capture above rewrites the console mode it builds on.
-    input::claim();
+    input::claim(kbd);
+    let _ = execute!(io::stdout(), cursor::Hide);
 }
 
 /// Release what [`claim_input_modes`] claimed.
 fn release_input_modes(kbd: bool) {
-    input::release();
-    if kbd {
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
-    }
-    let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture, cursor::Show);
+    input::release(kbd);
+    let _ = execute!(io::stdout(), cursor::Show);
 }
 
 /// Claim the screen as well as the input modes. The exact inverse of [`release_terminal`], for

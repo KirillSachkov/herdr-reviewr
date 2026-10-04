@@ -48,7 +48,7 @@ terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 # `WaitForSingleObject` on the console input handle, the one call no safe wrapper offers. The
 # features are already on in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 # The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
 # only: no image support, so no image codecs enter the tree.
 arboard = { version = "3.6.1", default-features = false }

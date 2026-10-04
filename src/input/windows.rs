@@ -26,7 +26,7 @@ use ratatui::crossterm::event::{
 
 use super::vt::VtInput;
 
-const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
 /// The open console and the parser state between reads. `None` while the terminal is released,
 /// so an editor's leftovers never parse as the review's input.
