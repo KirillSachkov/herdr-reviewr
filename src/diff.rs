@@ -267,11 +267,7 @@ impl FileDiff {
         let line = |spans: &[Vec<Span>], i: usize| spans.get(i).cloned().unwrap_or_default();
 
         let mut rows = Vec::new();
-        // Whether each row's line ended in a CR, which the highlighter leaves out of its text.
-        let mut crs = Vec::new();
         for change in TextDiff::from_slices(&old_lines, &new_lines).iter_all_changes() {
-            let raw = change.value();
-            crs.push(raw.strip_suffix('\n').unwrap_or(raw).ends_with('\r'));
             match change.tag() {
                 ChangeTag::Equal => {
                     let (oi, ni) = (change.old_index().unwrap(), change.new_index().unwrap());
@@ -304,7 +300,7 @@ impl FileDiff {
         // Pair on the text alone, then mark the endings: a line that changed only its ending
         // pairs with its twin, and the marker is the one thing emphasized.
         let pairs = compute_emphasis(&mut rows);
-        mark_crs(&mut rows, &crs, &pairs);
+        mark_crs(&mut rows, &old_lines, &new_lines, &pairs);
         Self {
             path,
             previous_path,
@@ -363,6 +359,16 @@ pub(crate) fn lines(text: &str) -> Vec<&str> {
     text.split_inclusive('\n').collect()
 }
 
+/// One of [`lines`]'s lines without its ending, and whether that ending carried a CR. The one
+/// reading of a line's ending, shared by the highlighter's text and the CR marking.
+pub(crate) fn line_body(line: &str) -> (&str, bool) {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    match line.strip_suffix('\r') {
+        Some(body) => (body, true),
+        None => (line, false),
+    }
+}
+
 pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
     match row {
         Row::Context { spans, .. } | Row::Deletion { spans, .. } | Row::Insertion { spans, .. } => {
@@ -375,30 +381,56 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
 /// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
 pub const CR_MARKER: &str = "^M";
 
-/// Mark the line-ending CR of each paired line whose ending changed, `crs` saying which rows'
-/// lines ended in a CR and `pairs` which deletion and insertion are one line edited. The
-/// sides keep only the CRs git keeps, and the highlighter leaves every one out of the row
-/// text, so a line that changed only its ending would otherwise paint as an identical −/+
-/// pair. The side that has the CR paints [`CR_MARKER`] after its text, emphasized; the text
-/// itself stays the file's, so a snippet, a find, or a copy never sees the marker. A pair that
-/// agrees on its ending changed none, and an unpaired line has no old ending to compare, so
-/// neither is marked: a file that is CRLF throughout reads like any other.
-fn mark_crs(rows: &mut [Row], crs: &[bool], pairs: &[(u32, u32)]) {
+/// Mark the line-ending CR of each edited line whose ending changed. The sides keep only the
+/// CRs git keeps, and the highlighter leaves every one out of the row text, so a line that
+/// changed only its ending would otherwise paint as an identical −/+ pair. The side that has
+/// the CR paints [`CR_MARKER`] after its text, emphasized; the text itself stays the file's, so
+/// a snippet, a find, or a copy never sees the marker.
+///
+/// A deletion's edited twin is, first, an insertion in its block with the very same text: a
+/// line whose ending alone changed, claimed before any merely similar line can take it. Else
+/// it is its word-similarity partner from `pairs`. A twin that agrees on its ending changed
+/// none, and an unpaired line has no old ending to compare, so neither is marked: a file that
+/// is CRLF throughout reads like any other. One pass per block, linear in its rows.
+fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) {
+    let ends_cr = |lines: &[&str], no: u32| line_body(lines[no as usize - 1]).1;
+    let partner: HashMap<u32, u32> = pairs.iter().copied().collect();
+    let mut marked = Vec::new();
     for (dels, inss) in change_blocks(rows) {
+        let mut by_text: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut by_no = HashMap::new();
+        for i in inss.clone().rev() {
+            by_text.entry(rows[i].text()).or_default().push(i);
+            by_no.extend(rows[i].new_no().map(|n| (n, i)));
+        }
+        let mut claimed = std::collections::HashSet::new();
         for d in dels {
-            let Some(&(_, new_no)) = pairs.iter().find(|(o, _)| Some(*o) == rows[d].old_no())
-            else {
-                continue;
-            };
-            let Some(i) = inss.clone().find(|&i| rows[i].new_no() == Some(new_no)) else {
-                continue;
-            };
-            if crs[d] != crs[i] {
-                let row = if crs[d] { d } else { i };
-                if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[row] {
-                    *cr = true;
+            let Some(o) = rows[d].old_no() else { continue };
+            let twin = by_text.get_mut(&rows[d].text()).and_then(|same| {
+                while let Some(i) = same.pop() {
+                    if !claimed.contains(&i) {
+                        return Some(i);
+                    }
                 }
+                None
+            });
+            let Some(i) = twin.or_else(|| {
+                partner.get(&o).and_then(|n| by_no.get(n)).copied().filter(|i| !claimed.contains(i))
+            }) else {
+                continue;
+            };
+            claimed.insert(i);
+            let Some(n) = rows[i].new_no() else { continue };
+            match (ends_cr(old, o), ends_cr(new, n)) {
+                (true, false) => marked.push(d),
+                (false, true) => marked.push(i),
+                _ => {}
             }
+        }
+    }
+    for i in marked {
+        if let Row::Deletion { cr, .. } | Row::Insertion { cr, .. } = &mut rows[i] {
+            *cr = true;
         }
     }
 }
@@ -800,6 +832,13 @@ mod tests {
         // An unpaired line has no old ending to compare: an added CRLF line is unmarked.
         let d = build("alpha\n", "alpha\nzzz\r\n");
         assert_eq!(changes(&d), [("+zzz".into(), false)]);
+        // A similar line inserted ahead of the edited one cannot take its twin: `a = 1;` gained
+        // its CR, and its own row carries the marker, not the merely similar `a = 2;`.
+        let d = build("a = 1;\n", "a = 2;\r\na = 1;\r\n");
+        assert_eq!(
+            changes(&d),
+            [("-a = 1;".into(), false), ("+a = 2;".into(), false), ("+a = 1;".into(), true)]
+        );
     }
 
     #[test]

@@ -91,7 +91,12 @@ impl Highlighter {
         let (Some(syntax), Some(theme)) = (syntax, self.theme.as_ref()) else {
             return lines
                 .iter()
-                .map(|l| vec![Span { text: body(l).to_string(), color: self.default_fg }])
+                .map(|l| {
+                    vec![Span {
+                        text: crate::diff::line_body(l).0.to_string(),
+                        color: self.default_fg,
+                    }]
+                })
                 .collect();
         };
         let mut h = HighlightLines::new(syntax, theme);
@@ -99,7 +104,7 @@ impl Highlighter {
         for &line in lines {
             // The newline syntaxes expect each line to end in `\n`, so a line that ended in a
             // CR highlights as its LF form.
-            let text = body(line);
+            let text = crate::diff::line_body(line).0;
             let line: Cow<'_, str> = if line[text.len()..].starts_with('\r') {
                 Cow::Owned(format!("{text}\n"))
             } else {
@@ -120,14 +125,6 @@ impl Highlighter {
         }
         out
     }
-}
-
-/// A line without its ending: `\n`, `\r\n`, or a final bare `\r`. A line-ending CR is never
-/// text, so it can't reach a snippet or the terminal raw. The diff shows one git keeps as a
-/// marker (`diff::CR_MARKER`).
-fn body(line: &str) -> &str {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    line.strip_suffix('\r').unwrap_or(line)
 }
 
 #[cfg(test)]
