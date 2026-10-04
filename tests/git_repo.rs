@@ -944,17 +944,18 @@ fn an_untracked_file_past_the_big_file_threshold_is_binary() {
     assert_eq!(verdict("past.txt"), (true, 0));
 }
 
-/// A copy a killed process left behind holds no lock, and the next copy made sweeps it.
+/// A copy a killed process left behind holds no lock, and the sweep removes it; a live one stays.
 #[test]
 fn a_dead_processs_index_copy_is_swept() {
     let dead = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap().keep();
     std::fs::write(dead.join("lock"), "").unwrap();
     std::fs::write(dead.join("index"), "stale").unwrap();
-    let r = Repo::init();
-    r.write("a.txt", "a\n");
-    r.commit_all("init");
-    snapshot_worktree(r.path()).unwrap();
+    let live = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap();
+    let held = std::fs::File::create(live.path().join("lock")).unwrap();
+    held.lock().unwrap();
+    herdr_reviewr::git::sweep_dead_copies();
     assert!(!dead.exists(), "{} survived", dead.display());
+    assert!(live.path().exists(), "a live copy was swept");
 }
 
 #[test]

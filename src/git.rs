@@ -1438,24 +1438,17 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 
 /// The worktree as a tree object, via `add -A` on a private [`IndexCopy`].
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
-    IndexCopy::with(repo, Purpose::Snapshot, |index| {
-        index.git(repo, &["add", "-A"])?;
-        Ok(index.git(repo, &["write-tree"])?.trim().to_string())
-    })
-}
-
-/// A snapshot stages untracked files, so it never shares the diff's copy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Purpose {
-    Diff,
-    Snapshot,
+    // A fresh copy each time: `add -A` stages into it, and a killed git leaves its lock behind.
+    let mut index = IndexCopy::new()?;
+    index.seed(&git_dir(repo)?.join("index"))?;
+    index.git(repo, &["add", "-A"])?;
+    Ok(index.git(repo, &["write-tree"])?.trim().to_string())
 }
 
 /// The prefix of every index copy's directory in the OS temp dir.
 const COPY_PREFIX: &str = "reviewr-index-";
 
-/// A session-long private index copy in the OS temp dir, refreshed by git, never the real index.
-/// Re-copied only when the real index changes; its `lock` marks it live for the sweep.
+/// A private index copy in the OS temp dir, never the real index; its `lock` marks it live.
 struct IndexCopy {
     dir: tempfile::TempDir,
     /// The lock that marks this copy live, released on drop or with the process.
@@ -1465,51 +1458,35 @@ struct IndexCopy {
 }
 
 impl IndexCopy {
-    /// Run `f` on `repo`'s copy for `purpose`, brought up to date with the real index.
-    fn with<T>(repo: &Path, purpose: Purpose, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+    /// Run `f` on `repo`'s session-long diff copy, re-copied only when the real index changed.
+    fn with<T>(repo: &Path, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         type Slot = std::sync::Arc<std::sync::Mutex<Option<IndexCopy>>>;
-        static COPIES: OnceLock<Mutex<HashMap<(PathBuf, Purpose), Slot>>> = OnceLock::new();
+        static COPIES: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
         let real = git_dir(repo)?.join("index");
         let slot = COPIES
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .entry((real.clone(), purpose))
+            .entry(real.clone())
             .or_default()
             .clone();
-        let fresh;
-        let mut kept;
-        let copy = match slot.try_lock() {
-            Ok(guard) => {
-                kept = guard;
-                if kept.is_none() {
-                    *kept = Some(Self::new()?);
-                }
-                kept.as_mut().expect("filled above")
-            }
-            Err(std::sync::TryLockError::Poisoned(guard)) => {
-                slot.clear_poison();
-                kept = guard.into_inner();
-                *kept = Some(Self::new()?);
-                kept.as_mut().expect("filled above")
-            }
-            Err(std::sync::TryLockError::WouldBlock) => {
-                fresh = Self::new()?;
-                &mut { fresh }
-            }
-        };
-        copy.seed(&real)?;
-        let out = f(copy);
-        // `add -A` never unstages, so a snapshot copy starts from the real index every time.
-        if purpose == Purpose::Snapshot {
-            copy.seeded = None;
+        // A panic mid-use leaves the copy suspect, so a poisoned slot starts over.
+        let mut kept = slot.lock().unwrap_or_else(|poisoned| {
+            slot.clear_poison();
+            let mut kept = poisoned.into_inner();
+            *kept = None;
+            kept
+        });
+        if kept.is_none() {
+            *kept = Some(Self::new()?);
         }
-        out
+        let copy = kept.as_mut().expect("filled above");
+        copy.seed(&real)?;
+        f(copy)
     }
 
-    /// A new, empty copy, after sweeping the copies killed processes left behind.
+    /// A new, empty copy.
     fn new() -> Result<Self> {
-        sweep_dead_copies();
         let dir = tempfile::Builder::new()
             .prefix(COPY_PREFIX)
             .tempdir()
@@ -1574,7 +1551,7 @@ struct Stamp {
 }
 
 /// Remove copies whose `lock` is free, or that never got one within an hour: their process died.
-fn sweep_dead_copies() {
+pub fn sweep_dead_copies() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().starts_with(COPY_PREFIX) {
@@ -1627,7 +1604,7 @@ pub fn diff_base(repo: &Path) -> String {
 
 /// The changeset from `base` to the worktree, untracked files included.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
-    let out = IndexCopy::with(repo, Purpose::Diff, |index| index.git(repo, &diff_args(&[base])))?;
+    let out = IndexCopy::with(repo, |index| index.git(repo, &diff_args(&[base])))?;
     assemble(repo, &out, true)
 }
 

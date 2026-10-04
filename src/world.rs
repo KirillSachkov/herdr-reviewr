@@ -399,6 +399,7 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("world".into())
         .spawn(move || {
+            git::sweep_dead_copies();
             while let Ok(mut job) = rx.recv() {
                 while let Ok(next) = rx.try_recv() {
                     job = WorldJob {
