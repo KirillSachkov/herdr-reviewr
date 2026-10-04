@@ -31,8 +31,7 @@ pub enum Row {
         new_no: u32,
         spans: Vec<Span>,
     },
-    /// `cr`: the line ends in a CR that git keeps and its change block disagrees on, which the
-    /// paint shows as [`CR_MARKER`] after the text ([`mark_crs`]). Never part of the text.
+    /// `cr`: the line's kept CR changed, painted as [`CR_MARKER`], never part of the text.
     Deletion {
         old_no: u32,
         spans: Vec<Span>,
@@ -297,8 +296,7 @@ impl FileDiff {
                 }
             }
         }
-        // Pair on the text alone, then mark the endings: a line that changed only its ending
-        // pairs with its twin, and the marker is the one thing emphasized.
+        // Pair on text alone, then mark endings, so an ending-only change pairs with its twin.
         let pairs = compute_emphasis(&mut rows);
         mark_crs(&mut rows, &old_lines, &new_lines, &pairs);
         Self {
@@ -338,8 +336,7 @@ impl FileDiff {
         Self { rows, ..Self::rowless(path, None, FileState::Normal, View::File) }
     }
 
-    /// A notice in `state` for a file the caller declines to read: a change git already
-    /// reported as having no text diff, or one past the render budget.
+    /// A notice in `state` for a file the caller declines to read.
     pub fn notice(
         path: String,
         previous_path: Option<String>,
@@ -350,15 +347,12 @@ impl FileDiff {
     }
 }
 
-/// `text`'s lines, each with its ending: split after each `\n` alone, the way git counts
-/// lines. A bare CR is text, never a break (`similar`'s own line split takes it for one), so
-/// the diff and the highlighter, both fed these, number every line as git and an editor do.
+/// `text`'s lines with their endings, split on `\n` alone, as git counts them.
 pub(crate) fn lines(text: &str) -> Vec<&str> {
     text.split_inclusive('\n').collect()
 }
 
-/// One of [`lines`]'s lines without its ending, and whether that ending carried a CR. The one
-/// reading of a line's ending, shared by the highlighter's text and the CR marking.
+/// A line without its ending, and whether that ending carried a CR.
 pub(crate) fn line_body(line: &str) -> (&str, bool) {
     let line = line.strip_suffix('\n').unwrap_or(line);
     match line.strip_suffix('\r') {
@@ -379,17 +373,7 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
 /// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
 pub const CR_MARKER: &str = "^M";
 
-/// Mark the line-ending CR of each edited line whose ending changed. The sides keep only the
-/// CRs git keeps, and the highlighter leaves every one out of the row text, so a line that
-/// changed only its ending would otherwise paint as an identical −/+ pair. The side that has
-/// the CR paints [`CR_MARKER`] after its text, emphasized; the text itself stays the file's, so
-/// a snippet, a find, or a copy never sees the marker.
-///
-/// A deletion's edited twin is, first, an insertion in its block with the very same text: a
-/// line whose ending alone changed, claimed before any merely similar line can take it. Else
-/// it is its word-similarity partner from `pairs`. A twin that agrees on its ending changed
-/// none, and an unpaired line has no old ending to compare, so neither is marked: a file that
-/// is CRLF throughout reads like any other. One pass per block, linear in its rows.
+/// Mark the CR of each edited line whose ending changed: on its exact twin first, else its pair.
 fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) {
     let ends_cr = |lines: &[&str], no: u32| line_body(lines[no as usize - 1]).1;
     let partner: HashMap<u32, u32> = pairs.iter().copied().collect();
@@ -433,14 +417,7 @@ fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) 
     }
 }
 
-/// Fill word-level `emphasis` on the related deletion/insertion lines of each change block
-/// (a run of deletions immediately followed by a run of insertions). Rather than pairing by
-/// position — which mis-pairs unrelated lines when a block rewrites several lines at once —
-/// each deletion greedily searches forward for its *homolog*: the first not-yet-claimed
-/// insertion similar enough to be the same line edited (see [`pair_homologs`], after
-/// git-delta's `infer_edits`). Lines with no homolog stay unemphasized, carrying only their
-/// red/green; emphasis then points at a real edit instead of flooding a wholesale rewrite.
-/// Returns the `(old, new)` line numbers of the pairs it found, in diff order.
+/// Word emphasis on each change block's homolog pairs; returns the pairs' line numbers.
 pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(u32, u32)> {
     let mut pairs = Vec::new();
     for (dels, inss) in change_blocks(rows) {
@@ -449,9 +426,7 @@ pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(u32, u32)> {
     pairs
 }
 
-/// Each change block of `rows` in order — a run of deletions followed by a run of
-/// insertions, either possibly empty but not both — as its deletions' and its insertions'
-/// index ranges.
+/// Each change block's deletion and insertion index ranges, in order.
 pub(crate) fn change_blocks<R: std::borrow::Borrow<Row>>(
     rows: &[R],
 ) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
@@ -823,15 +798,13 @@ mod tests {
                 ("+beta".into(), true),
             ]
         );
-        // A block whose pairs each keep their ending marks nothing, though the block mixes
-        // endings: `x` → `X` stays CRLF, `y` → `y2` stays LF.
+        // Pairs that each keep their ending mark nothing.
         let d = build("x\r\ny\n", "X\r\ny2\n");
         assert!(changes(&d).iter().all(|&(_, cr)| !cr), "{:?}", changes(&d));
         // An unpaired line has no old ending to compare: an added CRLF line is unmarked.
         let d = build("alpha\n", "alpha\nzzz\r\n");
         assert_eq!(changes(&d), [("+zzz".into(), false)]);
-        // A similar line inserted ahead of the edited one cannot take its twin: `a = 1;` gained
-        // its CR, and its own row carries the marker, not the merely similar `a = 2;`.
+        // A similar line inserted ahead cannot take the edited line's twin.
         let d = build("a = 1;\n", "a = 2;\r\na = 1;\r\n");
         assert_eq!(
             changes(&d),
@@ -864,8 +837,7 @@ mod tests {
         }
         let new = old.replace("line 20", "LINE 20");
         let d = build(&old, &new);
-        // The middle is one change with 3 context lines each side; the long head and tail
-        // unchanged runs each collapse to a fold.
+        // The long unchanged head and tail each fold.
         let folds = d.rows.iter().filter(|r| matches!(r, Row::Fold { .. })).count();
         assert_eq!(folds, 2, "leading and trailing runs fold");
         let change = d.rows.iter().find(|r| matches!(r, Row::Insertion { .. })).unwrap();
@@ -877,8 +849,7 @@ mod tests {
         let d = build("let x = foo(a);\n", "let x = bar(a, b);\n");
         let del = d.rows.iter().find(|r| matches!(r, Row::Deletion { .. })).unwrap();
         let ins = d.rows.iter().find(|r| matches!(r, Row::Insertion { .. })).unwrap();
-        // Both lines share the `let x = ` and `(a` prefix; `foo`→`bar` and the `, b` are
-        // the only emphasized spans, never the whole line.
+        // Only `foo`→`bar` and `, b` are emphasized.
         assert!(!del.emphasis().is_empty() && !ins.emphasis().is_empty());
         let covers = |row: &Row, needle: &str| {
             let text = row.text();

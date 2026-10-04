@@ -2444,12 +2444,7 @@ struct Cell {
     src: usize,
 }
 
-/// Expand a row's spans into display cells: tabs become spaces to the next tab stop, and each
-/// char carries its column width, color, its word-emphasis flag (when `emph_on`), and whether it
-/// falls in an in-file find match (`hl_ranges`, char indices). Width comes from `unicode-width`
-/// so wide glyphs measure as the two columns they paint. A row whose line ending changed ends
-/// in [`CR_MARKER`](crate::diff::CR_MARKER) in `marker_fg`, emphasized with the changed words:
-/// paint only, its cells point past the text, so a selection never copies it.
+/// A row's display cells: tab-expanded, width-measured, emphasis and find flags, plus any CR marker.
 fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], marker_fg: Color) -> Vec<Cell> {
     let emphasis = if emph_on { row.emphasis() } else { &[] };
     let in_emph = |i: u32| emphasis.iter().any(|&(a, b)| i >= a && i < b);
@@ -2499,8 +2494,7 @@ fn plain_cells(row: &Row) -> Vec<Cell> {
     code_cells(row, false, &[], Color::Reset)
 }
 
-/// Build spans from display cells, merging runs of equal color, emphasis, and find-highlight; a
-/// highlighted run takes `hl_bg` (the find match), else an emphasized run takes `emph_bg`.
+/// Spans from cells, merging equal runs; a find match takes `hl_bg`, emphasis `emph_bg`.
 fn cells_to_spans(cells: &[Cell], emph_bg: Color, hl: HlStyle) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut buf = String::new();

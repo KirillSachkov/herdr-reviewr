@@ -279,8 +279,7 @@ impl PluginConfig {
         &self.keymap
     }
 
-    /// The normalized config as `--resolve-plugin-config` prints it, for a reviewer checking
-    /// what reviewr resolved.
+    /// The normalized config as `--resolve-plugin-config` prints it.
     pub fn to_json(&self) -> serde_json::Value {
         let keybindings: serde_json::Map<String, serde_json::Value> = self
             .keymap
@@ -730,19 +729,14 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Print the normalized configuration (`--resolve-plugin-config`). Its exit status is a check
-/// from outside the binary, and `scripts/qa-install.sh` runs it on every install. It is its own
-/// entrypoint, so it resolves the config directory itself, and initializes the log itself, or
-/// the herdr-side diagnostics of a failed lookup would be dropped on the one path that
-/// exercises the CLI fallback from a plain shell.
+/// Print the normalized config; its own entry point, so it resolves the dir and log itself.
 pub fn print_plugin_config() -> Result<(), PluginConfigError> {
     crate::log::init();
     println!("{}", plugin_config_from_herdr()?.to_json());
     Ok(())
 }
 
-/// The plugin config a non-UI run reads: the directory from the environment, else from herdr,
-/// then the file in it. The one read both flag entry points share.
+/// The plugin config a non-UI run reads: the env's dir, else herdr's.
 pub(crate) fn plugin_config_from_herdr() -> Result<PluginConfig, PluginConfigError> {
     plugin_config(resolve_config_dir(crate::herdr::plugin_config_dir).as_deref())
 }

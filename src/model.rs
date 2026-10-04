@@ -105,18 +105,13 @@ pub struct ChangedFile {
     pub kind: ChangeKind,
     pub additions: u32,
     pub deletions: u32,
-    /// The source path of a renamed or copied file; `None` for every other kind. Its old
-    /// content lives at this path, so a rename diffs real content instead of reading as
-    /// all-insertion.
+    /// The source path of a renamed or copied file, whose old content lives there.
     pub previous_path: Option<String>,
-    /// Git's own no-text-diff verdict for this change: binary content, or a path whose
-    /// `diff` attribute `.gitattributes` unsets. The pane reads it as the `binary` notice
-    /// without reading either side.
+    /// git's no-text-diff verdict, read as the binary notice.
     pub binary: bool,
     /// The bytes git stores on the old side, 0 where there is none.
     pub old_size: u64,
-    /// The bytes git stores on the new side, 0 where there is none or where the new side is
-    /// the worktree file, which is sized when it is read.
+    /// The bytes git stores on the new side; 0 for none or for the worktree.
     pub new_size: u64,
 }
 

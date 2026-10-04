@@ -7,24 +7,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-/// Usual host bin dirs a stripped pane PATH may omit. Unix only: on Windows these names
-/// resolve to directories like `C:\\usr\\bin` on the current drive, which any user can create.
+/// Host bin dirs a stripped PATH may omit; none on Windows, where `\\usr\\bin` is plantable.
 #[cfg(unix)]
 const COMMON_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 #[cfg(not(unix))]
 const COMMON_BINS: &[&str] = &[];
 
-/// The host PATH: the common bins, then the inherited PATH. Built once: the process's PATH is
-/// fixed for its life.
+/// The host PATH: the common bins, then the inherited PATH, built once.
 fn host_path() -> &'static OsString {
     static PATH: OnceLock<OsString> = OnceLock::new();
     PATH.get_or_init(|| prepended_path(env::var_os("PATH").as_deref()))
 }
 
-/// `name` resolved on the host PATH, a bare name's hit kept while it is still there. Every
-/// spawn, a file build's git on the frame loop included, would otherwise search the PATH again,
-/// and on Windows each directory once per PATHEXT extension; a kept hit costs one stat. A miss,
-/// or a hit since moved, is asked again, so a tool installed or moved meanwhile is found.
+/// `name` on the host PATH, a bare name's hit kept while it still exists.
 fn resolve_on_host(name: &OsStr) -> Option<PathBuf> {
     static FOUND: OnceLock<Mutex<HashMap<OsString, PathBuf>>> = OnceLock::new();
     let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
@@ -46,15 +41,12 @@ fn common_bins() -> impl Iterator<Item = PathBuf> {
     COMMON_BINS.iter().map(PathBuf::from)
 }
 
-/// The inherited PATH's entries. A set-but-empty PATH is the same as none: split, its one
-/// empty entry would put the reviewed repository's own working directory ahead of every real
-/// bin dir.
+/// The inherited PATH's entries; set-but-empty is none, never the cwd.
 fn inherited_dirs(inherited: Option<&OsStr>) -> Vec<PathBuf> {
     inherited.filter(|p| !p.is_empty()).map(|p| env::split_paths(p).collect()).unwrap_or_default()
 }
 
-/// Join PATH entries with the platform's separator. Every entry came out of `split_paths` or
-/// `COMMON_BINS`, so none holds a separator and the join cannot fail.
+/// Join PATH entries; none holds a separator, so this cannot fail.
 fn joined(dirs: impl Iterator<Item = PathBuf>) -> OsString {
     env::join_paths(dirs).expect("entries split from a PATH join back into one")
 }
@@ -67,18 +59,13 @@ fn appended_path(inherited: Option<&OsStr>) -> OsString {
     joined(inherited_dirs(inherited).into_iter().chain(common_bins()))
 }
 
-/// Resolve `name` against `path` the way a shell would: an executable file, with PATHEXT on
-/// Windows, and the current directory only for a name that is itself a path.
+/// Resolve `name` as a shell would: PATHEXT on Windows, the cwd only for a path.
 fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
     let cwd = env::current_dir().unwrap_or_default();
     which::which_in(name, Some(path), cwd).ok()
 }
 
-/// Resolve `program` on the host PATH — the common host bins first, the inherited PATH after —
-/// and give the child that same PATH.
-///
-/// For the tools reviewr runs for itself. [`user_command`] is the other way round, for the
-/// reviewer's own.
+/// Resolve one of reviewr's own tools: the common host bins first, then the inherited PATH.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
     let mut cmd = resolve_on_host(program).map_or_else(|| Command::new(program), Command::new);
@@ -86,15 +73,7 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     cmd
 }
 
-/// Resolve `program` the way the reviewer's own shell would: their `PATH` first, the common
-/// host bins only as a fallback. The child is given that same PATH. `None` when the name
-/// resolves to nothing, so a caller can say so before it acts.
-///
-/// The opposite order from [`command`], and deliberately. `git` and the forge CLIs are the
-/// host's tools, so a stripped pane PATH must not hide them. The editor is the reviewer's own,
-/// so a version-managed shim on their `PATH` has to win over a stale copy in a common bin, and
-/// so must every tool the editor goes on to launch — its language servers, its formatters, its
-/// runtime.
+/// Resolve the reviewer's own program as their shell would: their PATH first, the bins last.
 pub(crate) fn user_command(program: impl AsRef<OsStr>) -> Option<Command> {
     let program = program.as_ref();
     let path = appended_path(env::var_os("PATH").as_deref());
@@ -103,10 +82,7 @@ pub(crate) fn user_command(program: impl AsRef<OsStr>) -> Option<Command> {
     Some(cmd)
 }
 
-/// A program's name from its path: the base name after the last `/` or `\`, a trailing Windows
-/// program extension (`.exe`, `.cmd`, `.bat`) dropped in any case. Both separators end a
-/// directory on every OS: a Windows path may spell either, and no program has a backslash in its
-/// name. The case stays as spelled, for each caller to compare as it needs.
+/// A program's name: the base name after `/` or `\\`, a Windows extension dropped.
 pub(crate) fn program_name(path: &str) -> &str {
     let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
     match base.rsplit_once('.') {
@@ -117,8 +93,7 @@ pub(crate) fn program_name(path: &str) -> &str {
     }
 }
 
-/// Whether `name` resolves to an executable on the host PATH. Shared by the clipboard probe
-/// (`export.rs`) and the URL-opener probe (`browser.rs`).
+/// Whether `name` resolves to an executable on the host PATH.
 #[must_use]
 pub fn on_path(name: &str) -> bool {
     resolve_on_host(OsStr::new(name)).is_some()
@@ -158,16 +133,14 @@ mod tests {
 
     #[test]
     fn appended_path_leaves_the_reviewers_own_entries_in_front() {
-        // The editor's own tools have to resolve the way its shell would resolve them, so a
-        // version-managed shim wins and the common bins only backstop a stripped PATH.
+        // The reviewer's shim wins; the common bins only backstop.
         let got = appended_path(Some(&path_of(&["mise-shims", "system-bin"])));
         let parts: Vec<PathBuf> = env::split_paths(&got).collect();
         let mut expected = vec![PathBuf::from("mise-shims"), PathBuf::from("system-bin")];
         expected.extend(common());
         assert_eq!(parts, expected);
 
-        // A set-but-empty PATH is the same as none. Joined instead, its empty entry would put
-        // the reviewed repository's own working directory ahead of every real bin dir.
+        // An empty entry would put the reviewed repo's cwd first.
         assert_eq!(appended_path(Some(OsStr::new(""))), appended_path(None));
     }
 
@@ -223,8 +196,7 @@ mod tests {
         assert!(resolve_on(&path, OsStr::new("missing")).is_none());
     }
 
-    /// A program named by its path, as `core.editor` names one on Windows
-    /// (`"C:\\Program Files\\...\\Code.exe" --wait`), resolves as itself, PATH unread.
+    /// A program named by its path resolves as itself, PATH unread.
     #[test]
     fn a_program_named_by_its_path_resolves_as_itself() {
         let dir = tempfile::tempdir().unwrap();
@@ -244,8 +216,7 @@ mod tests {
         assert!(resolve_on(&path, OsStr::new("notes")).is_none());
     }
 
-    /// `az` and `code` ship as batch shims on Windows: a bare name must reach them through
-    /// PATHEXT, which `std::process::Command` alone never tries.
+    /// A bare name reaches a batch shim through PATHEXT.
     #[cfg(windows)]
     #[test]
     fn a_batch_shim_resolves_through_pathext() {

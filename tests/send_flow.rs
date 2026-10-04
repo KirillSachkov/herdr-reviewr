@@ -1,8 +1,4 @@
-//! End-to-end send dispatch through a fake herdr: the fake CLI (`examples/fake_herdr.rs`) answers
-//! `agent list`, `tab list`, and `agent focus`, and a fake socket server here takes the
-//! `pane.send_text` requests. This file is its own test process, and each test re-runs itself in
-//! a child with the HERDR_* environment applied at spawn, so that environment can never leak into
-//! another test binary, and no real herdr pane is ever addressed.
+//! Send dispatch end to end: a fake herdr CLI and socket, each test re-run in its own child.
 
 mod common;
 
@@ -35,8 +31,7 @@ const ONE_AGENT: &str = r#"{"result":{"agents":[
   {"agent":"claude","agent_status":"idle","pane_id":"w8:p1","tab_id":"w8:t1","workspace_id":"w8","cwd":"/w/one"}
 ]}}"#;
 
-/// A line break as the request's JSON spells it. The paste carries CRLF on Windows, as herdr's
-/// own paste does.
+/// A line break as the request's JSON spells it, CRLF on Windows.
 const NL: &str = if cfg!(windows) { r"\r\n" } else { r"\n" };
 
 /// What the fake socket does with each request it reads.
@@ -54,9 +49,7 @@ enum Reply {
     Hang,
 }
 
-/// A fake herdr socket at `HERDR_SOCKET_PATH`. Like herdr's server it reads one request line per
-/// connection and answers it with one line, echoing the request's id. It records every request
-/// it reads, so a test asserts what reached herdr.
+/// A fake herdr socket: one request line per connection, answered and recorded.
 #[derive(Clone)]
 struct FakeSocket {
     requests: Arc<Mutex<Vec<String>>>,
@@ -95,9 +88,7 @@ fn listen(path: &Path, socket: FakeSocket) {
     thread::spawn(move || answer_each(listener.incoming(), &socket));
 }
 
-/// Bind the named pipe herdr binds for a socket path on Windows: the path itself, verbatim, as a
-/// namespaced name under `\\.\pipe\` (herdr's `bind_local_listener` in `src/ipc.rs`). Serve it on
-/// its own thread.
+/// Bind the named pipe herdr binds for a socket path on Windows.
 #[cfg(windows)]
 fn listen(path: &Path, socket: FakeSocket) {
     use interprocess::local_socket::{GenericNamespaced, ListenerOptions, prelude::*};
@@ -136,11 +127,7 @@ fn answer_each<S: Read + Write>(
     }
 }
 
-/// Re-run test `name` in a child process against the fake herdr, with a fresh fixture dir and,
-/// when `socket` holds, the fake socket's path in `HERDR_SOCKET_PATH`. The crate forbids
-/// `unsafe`, which rules out in-process `env::set_var`, so the environment is applied at spawn
-/// and the child alone runs the body. Returns the fixture dir, whose `herdr.log` is the parent's
-/// proof the body ran: libtest exits 0 when `--exact` matches nothing.
+/// Re-run test `name` in a child with the herdr env applied at spawn; returns its fixture dir.
 fn run_in_child(name: &str, socket: bool) -> TempDir {
     let dir = TempDir::new().unwrap();
     let mut child = Command::new(env::current_exe().unwrap());
@@ -245,14 +232,12 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.picker_rows[0].tab, "Grip", "the tab label joins on tab_id");
     assert_eq!(app.picker_cursor, 0, "nothing sent this session arms the first row");
 
-    // A chosen pane that closed while the picker was open fails the send, and every comment
-    // stays. Nothing arms, since nothing was delivered.
+    // A pane closed while the picker was open fails the send; comments stay.
     socket.reply(Reply::PaneGone);
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "the picker closes whatever the outcome");
     assert_eq!(app.store.len(), 1, "a failed send keeps every comment");
-    // One short sentence a reviewer can read. herdr's own wording is a JSON envelope around a
-    // pane id, and would fill a 40-column footer without naming anything.
+    // One short sentence, never herdr's JSON envelope.
     assert_eq!(app.status, "claude closed");
     assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
     socket.reply(Reply::Result);
@@ -266,9 +251,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "sent 1 comment to claude");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p1"));
 
-    // An agent at a prompt takes no send: the prompt owns the screen, so the paste would land in
-    // it. The state is read at the send, so a picker row that went stale is caught too, and every
-    // comment stays.
+    // An agent at a prompt takes no send, read at the send itself.
     agents(&fake_dir, TWO_AGENTS);
     write_comment(&mut app, "two");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
@@ -291,8 +274,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert!(app.store.is_empty(), "a successful send consumes the whole set");
     assert_eq!(app.status, "sent 1 comment to codex");
     assert_eq!(app.last_sent_pane.as_deref(), Some("w8:p2"));
-    // The whole request herdr received: one `pane.send_text` line, the review framed as one
-    // bracketed paste (`pasted()` owns the rationale) with the platform's line breaks.
+    // The whole request herdr received.
     assert_eq!(
         socket.requests().last().unwrap(),
         &format!(
@@ -301,8 +283,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     );
     assert!(herdr_calls(&fake_dir).contains("agent focus w8:p2"), "a send focuses its pane");
 
-    // Several again: the last-sent agent outranks the first row, and a first click on that
-    // armed row sends immediately.
+    // The last-sent agent outranks the first row and sends on one click.
     write_comment(&mut app, "three");
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Picker);
@@ -346,12 +327,10 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "a failed enumeration opens no picker");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
-    // A failed enumeration says so rather than claiming a count. The argv and herdr's stderr go
-    // to the log, so the sentence still fits a 40-column footer.
+    // A failed enumeration says so, never a count.
     assert_eq!(app.status, "herdr didn't answer, press y to copy");
 
-    // The sole agent is refused the same way at a prompt: `send_target` and the send each read
-    // the list, and the send's read decides.
+    // The sole agent at a prompt is refused the same way.
     agent_list_fails(&fake_dir, false);
     agents(&fake_dir, &ONE_AGENT.replace("\"idle\"", "\"blocked\""));
     press(&mut app, KeyCode::Char('s'), area, &keymap);
@@ -378,8 +357,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.status, "herdr didn't answer, press y to copy");
     agent_list_fails(&fake_dir, false);
 
-    // The quit question hands `s` to the send itself, on any tab: the comments go out and the
-    // pane stays open.
+    // The quit question's `s` sends, and the pane stays open.
     agents(&fake_dir, ONE_AGENT);
     for tab in ['1', '3'] {
         press(&mut app, KeyCode::Char(tab), area, &keymap);
@@ -397,9 +375,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     }
 }
 
-/// Comments leave only on herdr's `result` reply. Every other outcome keeps them: an error
-/// reply, a connection herdr drops, and one it never answers. The paste may still have landed
-/// in the last two, which the reviewer sees in the agent's input before sending again.
+/// Comments leave only on a `result` reply.
 #[test]
 fn a_send_consumes_the_comments_only_on_a_result_reply() {
     if !in_child() {
@@ -440,8 +416,7 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
     assert_eq!(app.status, "sent 1 comment to claude");
 }
 
-/// A review well past Windows' 32,767-character command line goes as one paste, and one over
-/// the quarter-MiB send cap refuses before reaching herdr, keeping every comment.
+/// A review past Windows' command-line cap sends; one past the send cap refuses.
 #[test]
 fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     if !in_child() {
@@ -468,8 +443,7 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
         )
     );
 
-    // The cap counts the request herdr reads, escaping included: 150 KiB of quotes is under a
-    // quarter MiB as text and over it as JSON, where each `"` is two bytes.
+    // The cap counts JSON escaping: each `"` is two bytes.
     for review in ["x".repeat(300 * 1024), "\"".repeat(150 * 1024)] {
         write_comment(&mut app, &review);
         let sent = socket.requests().len();
@@ -481,8 +455,7 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     }
 }
 
-/// A pane without `HERDR_SOCKET_PATH` has no herdr to send to, the same refusal as a missing
-/// herdr binary.
+/// No `HERDR_SOCKET_PATH` is no herdr to send to.
 #[test]
 fn a_send_without_a_socket_refuses_as_herdr_not_answering() {
     if !in_child() {

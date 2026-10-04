@@ -1,27 +1,11 @@
-//! The console's VT input stream, parsed into the events crossterm's unix reader produces.
-//!
-//! In VT input mode the Windows console hands over the terminal's own byte stream as key
-//! records, one UTF-16 unit each: plain text, escape sequences, SGR mouse reports, and a paste
-//! between its bracketed-paste markers. `terminput` parses those bytes with crossterm's unix
-//! parser, and its crossterm adapter maps the result onto crossterm's `Event`, so the event loop
-//! sees a Windows key, click, or paste exactly as it sees one on unix. This module is the byte
-//! driver around that parser, which crossterm keeps private: it joins the UTF-16 units, feeds
-//! the bytes one at a time, and decides when an incomplete sequence stops waiting.
-//!
-//! Pure, so the tests run on every OS. Only `windows.rs` calls it in a build.
+//! The console's VT byte stream parsed into crossterm's unix events, via `terminput`.
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use ratatui::crossterm::event::Event;
 
-/// How long an open paste may wait for a byte before it is taken as complete. Only time spent
-/// waiting on the console counts: a frame reviewr spends drawing is no gap in the input.
-///
-/// herdr writes a paste as one write, end marker included, so the bytes arrive back to back.
-/// The bound is only for a paste whose end marker never comes: without it every later key
-/// would join the paste and input would hang. Half a second is far above any gap inside one
-/// write and still short enough to read as a stall.
+/// How long an open paste may wait for a byte before it closes as a paste of what arrived.
 pub(super) const PASTE_IDLE: Duration = Duration::from_millis(500);
 
 const PASTE_START: &[u8] = crate::herdr::PASTE_START.as_bytes();
@@ -35,8 +19,7 @@ pub(super) struct VtInput {
     surrogate: Option<u16>,
     /// Parsed events, oldest first.
     events: VecDeque<Event>,
-    /// The time spent waiting on the console since the last batch of input arrived, which an
-    /// open paste's bound counts.
+    /// Console wait since the last input, which an open paste's bound counts.
     waited: Duration,
 }
 
@@ -64,10 +47,7 @@ impl VtInput {
         }
     }
 
-    /// Mark the end of one console read: nothing more is queued behind it.
-    ///
-    /// A lone ESC waits while more input is queued, since it may open a sequence. With nothing
-    /// queued it is the Esc key, the same call crossterm's unix reader makes.
+    /// End of one console read: a lone ESC with nothing queued is the Esc key.
     pub(super) fn settle(&mut self) {
         self.parse(false);
         self.waited = Duration::ZERO;
@@ -83,9 +63,7 @@ impl VtInput {
         self.pending.starts_with(PASTE_START).then(|| PASTE_IDLE.saturating_sub(self.waited))
     }
 
-    /// Close an open paste that has waited out its bound, as a paste of what arrived.
-    ///
-    /// Never as keys: a lost end marker must not turn pasted text into commands.
+    /// Close a paste past its bound as a paste, never as keys.
     pub(super) fn expire(&mut self) {
         if self.paste_left() == Some(Duration::ZERO) {
             let text = String::from_utf8_lossy(&self.pending[PASTE_START.len()..]).into_owned();
@@ -109,15 +87,13 @@ impl VtInput {
 
     /// Try the pending bytes as one event, the step crossterm's unix reader runs per byte.
     fn parse(&mut self, more: bool) {
-        // `parse_from` takes no "more is queued" hint and reads a lone ESC as the Esc key, so the
-        // hint is applied here.
+        // `parse_from` would read a lone ESC as Esc, so wait while more is queued.
         if more && self.pending == b"\x1b" {
             return;
         }
         match terminput::Event::parse_from(&self.pending) {
             Ok(Some(event)) => {
-                // Only what crossterm has no type for fails to map, such as an unknown mouse
-                // button, and crossterm's own parser drops those too.
+                // crossterm drops what it has no type for, and so does this.
                 if let Ok(event) = terminput_crossterm::to_crossterm(event) {
                     self.events.push_back(event);
                 }
@@ -166,8 +142,7 @@ mod tests {
 
     #[test]
     fn keys_map_to_the_events_crossterm_reads_on_unix() {
-        // The bytes herdr's ConPTY delivered for each key in the Windows VM, legacy encoding
-        // first, then with the kitty protocol's disambiguate flag pushed.
+        // The bytes herdr's ConPTY delivered per key: legacy, then disambiguated.
         let rows: &[(&str, Event)] = &[
             ("a", key(KeyCode::Char('a'), NONE)),
             ("A", key(KeyCode::Char('A'), SHIFT)),

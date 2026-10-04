@@ -49,8 +49,7 @@ pub(crate) fn counted_comments(count: usize) -> String {
     format!("{count} {noun}")
 }
 
-/// The system clipboard: the first clipboard tool on `PATH`, or on Windows the Win32 clipboard
-/// itself.
+/// The system clipboard: the first tool on `PATH`, or the Win32 clipboard on Windows.
 #[derive(Debug)]
 pub struct Clipboard;
 
@@ -83,9 +82,7 @@ mod clipboard {
 
     use anyhow::{Context, Result, bail};
 
-    /// A clipboard tool and the args that make it read stdin into the system clipboard. Tried
-    /// in order — the first one present on `PATH` wins. macOS ships `pbcopy`; Linux needs one
-    /// of these installed (Wayland `wl-copy`, or X11 `xclip`/`xsel`). OSC 52 is roadmap.
+    /// Clipboard tools that read stdin, first one on `PATH` wins.
     pub(super) const TOOLS: &[(&str, &[&str])] = &[
         ("pbcopy", &[]),
         ("wl-copy", &[]),
@@ -93,8 +90,7 @@ mod clipboard {
         ("xsel", &["--clipboard", "--input"]),
     ];
 
-    /// No clipboard tool on `PATH`: the one copy failure the reviewer can fix, so its line says
-    /// how.
+    /// No clipboard tool on `PATH`, the one copy failure the reviewer can fix.
     #[derive(Debug)]
     pub(super) struct NoTool;
 
@@ -139,8 +135,7 @@ mod clipboard {
     }
 }
 
-/// Windows writes the Win32 clipboard directly, as Unicode text. No tool is needed, and
-/// `clip.exe` would read the text in the console's code page and mangle anything outside ASCII.
+/// The Win32 clipboard as Unicode text; `clip.exe` would mangle non-ASCII.
 #[cfg(windows)]
 mod clipboard {
     use anyhow::{Context, Result};
@@ -150,9 +145,7 @@ mod clipboard {
         None
     }
 
-    /// The text outlives the handle: Windows keeps clipboard data after its writer lets go.
-    /// Line breaks go in as CRLF, the clipboard's own convention, so an edit control that
-    /// splits only on CRLF still shows the review's lines.
+    /// Line breaks as CRLF, the clipboard's own convention.
     pub(super) fn write(text: &str) -> Result<()> {
         let text = crate::herdr::crlf_line_breaks(text);
         arboard::Clipboard::new()
@@ -161,12 +154,7 @@ mod clipboard {
     }
 }
 
-/// One chosen agent pane: fill its input with one `pane.send_text` request over herdr's socket,
-/// then focus it.
-///
-/// The pane is decided before the export runs, by the sole-agent path or by the picker, and
-/// nothing re-resolves it here. A pane that closed in between fails the send and keeps every
-/// comment.
+/// One chosen agent pane: fill its input in one socket request, then focus it.
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub pane: String,
@@ -184,11 +172,7 @@ impl ExportTarget for Agent {
         format!("sent {} to {}", counted_comments(count), self.name)
     }
 
-    /// herdr ran and refused the paste. A pane that closed after it was resolved says so; any
-    /// other refusal says herdr refused, never that a pane still there closed. herdr's own
-    /// wording is a JSON envelope, so the reviewer gets a sentence and the payload goes to the
-    /// log. A [`herdr::Refusal`], a herdr that never answered included, never reaches here: the
-    /// app words it.
+    /// A pane that closed says so; any other refusal says herdr refused.
     fn failure_message(&self, error: &anyhow::Error) -> String {
         if error.downcast_ref::<herdr::HerdrError>().is_some_and(herdr::HerdrError::pane_gone) {
             format!("{} closed", self.name)
@@ -197,12 +181,10 @@ impl ExportTarget for Agent {
         }
     }
 
-    /// An agent at a prompt refuses the send ([`herdr::send_text`] reads its state at the moment
-    /// of sending), because the picker's rows can be minutes old.
+    /// An agent at a prompt refuses: the picker's rows can be minutes old.
     fn export(&self, text: &str) -> Result<()> {
         herdr::send_text(&self.pane, text)?;
-        // Focus is a convenience once the text is delivered; a focus failure must NOT fail the
-        // export, or the comments stay unconsumed and the next Send duplicates the whole review.
+        // A focus failure must not fail a delivered export.
         let _ = herdr::focus(&self.pane);
         Ok(())
     }
@@ -247,8 +229,7 @@ mod tests {
 
     #[test]
     fn export_confirmations_name_the_actual_result_and_pluralize_comments() {
-        // The agent line names the pane it addressed, so a mis-send is visible the moment it
-        // lands.
+        // The agent line names the pane it addressed.
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
         assert_eq!(agent.success_message(1), "sent 1 comment to release-bot");
         assert_eq!(agent.success_message(2), "sent 2 comments to release-bot");
@@ -262,8 +243,7 @@ mod tests {
         let gone =
             anyhow::Error::from(crate::herdr::HerdrError::Refused(Some("pane_not_found".into())));
         assert_eq!(agent.failure_message(&gone), "release-bot closed");
-        // Any other refusal leaves the agent in place: saying it closed would send the
-        // reviewer looking for a pane that is still there.
+        // Any other refusal never claims the agent closed.
         for other in [
             crate::herdr::HerdrError::Refused(Some("internal".into())),
             crate::herdr::HerdrError::Refused(None),

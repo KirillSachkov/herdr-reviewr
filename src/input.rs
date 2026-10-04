@@ -1,11 +1,4 @@
-//! Where the event loop's input comes from.
-//!
-//! On macOS and Linux it is crossterm's own `poll` and `read`, untouched. On Windows crossterm
-//! reads the classic console API, where `ConPTY` drops the bracketed-paste markers: a multi-line
-//! paste arrives as keystrokes, its first newline submits the comment, and the rest runs as
-//! normal-mode keys. There the console is read in VT input mode instead (`windows.rs`), and the
-//! bytes parse into the same crossterm events (`vt.rs`). Both go once crossterm reads Windows
-//! input that way itself (crossterm PR #1030).
+//! The event loop's input: crossterm's own on unix, the console in VT mode on Windows.
 
 #[cfg(any(windows, test))]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -26,11 +19,7 @@ pub(crate) use ratatui::crossterm::event::{poll, read};
 #[cfg(windows)]
 pub(crate) use windows::{poll, read};
 
-/// Claim the input modes the reader reads. Mouse capture and bracketed paste on every OS, so a
-/// multi-line paste arrives as one event, not raw keystrokes whose embedded newlines would
-/// submit the comment early. The kitty keyboard protocol where the terminal reports it
-/// (`kbd`), for the modifiers the legacy encoding drops, most notably Ctrl/Alt+arrows. Then
-/// what the Windows reader needs beyond those.
+/// Mouse capture, bracketed paste, and the kitty protocol where the terminal has it.
 pub(crate) fn claim(kbd: bool) {
     let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
     if kbd {

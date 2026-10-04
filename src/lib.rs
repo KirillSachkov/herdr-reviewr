@@ -145,8 +145,7 @@ pub fn run() -> Result<()> {
     result
 }
 
-/// Claim the input modes the event loop reads, on a screen something else already owns
-/// ([`input::claim`]).
+/// Claim the input modes on a screen something else owns.
 fn claim_input_modes(kbd: bool) {
     input::claim(kbd);
     let _ = execute!(io::stdout(), cursor::Hide);
@@ -227,8 +226,7 @@ fn run_editor(
         configured,
         std::env::var("VISUAL").ok().as_deref(),
         std::env::var("EDITOR").ok().as_deref(),
-        // Read on every press that reaches it, so a reviewer who fixes their git config between
-        // two presses is heard. One `git config` on a keypress the reviewer makes by hand.
+        // Read per press, so a fixed git config is heard.
         || git::core_editor(&app.repo),
         &path,
         target.line,

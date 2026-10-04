@@ -1,7 +1,4 @@
-//! The plugin actions end to end: the real binary run as `--action <name>` against a fake
-//! herdr (`examples/fake_herdr.rs`, which documents its fixture files). This file is its own
-//! test process, and every run gets its herdr environment set explicitly, so no test reaches
-//! a live herdr.
+//! The plugin actions end to end: the real binary against a fake herdr, no live herdr reached.
 
 mod common;
 
@@ -17,14 +14,12 @@ fn reviewr_bin() -> &'static str {
     env!("CARGO_BIN_EXE_herdr-reviewr")
 }
 
-/// The fixture file for `pane`, spelled the way the fake reads it: `:` becomes `_`, since
-/// Windows forbids `:` in a file name.
+/// The fixture file for `pane`, `:` spelled `_` as Windows requires.
 fn fixture(dir: &Path, kind: &str, pane: &str, suffix: &str) -> PathBuf {
     dir.join(format!("{kind}-{}{suffix}", pane.replace(':', "_")))
 }
 
-/// One `pane process-info` answer for `pane`: a foreground holding `processes`, in the live
-/// envelope shape (docs/herdr-api-notes.md).
+/// One `pane process-info` answer for `pane` holding `processes`.
 fn procinfo(dir: &Path, pane: &str, processes: &Value) {
     let answer = json!({"result": {"process_info": {
         "foreground_process_group_id": 7,
@@ -65,8 +60,7 @@ fn herdr_called(dir: &Path) -> bool {
     dir.join("herdr.log").exists()
 }
 
-/// A fresh git repo at `dir/name`, for tests that need a real second repo beside the
-/// crate's own.
+/// A fresh git repo at `dir/name`.
 fn init_repo(dir: &Path, name: &str) -> PathBuf {
     let repo = dir.join(name);
     fs::create_dir(&repo).unwrap();
@@ -90,9 +84,7 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// The action `mode`, run the way herdr runs it from workspace `workspace-1`, with `dir` as
-/// the plugin config dir, the plugin state dir, and the fake's fixture dir. Every other herdr
-/// variable is cleared, so the run sees exactly what the test sets.
+/// Action `mode` as herdr runs it in `workspace-1`, every other herdr variable cleared.
 fn action(mode: &str, dir: &Path) -> Command {
     let mut command = Command::new(reviewr_bin());
     command
@@ -118,8 +110,7 @@ fn run(mode: &str, dir: &Path) -> Output {
     action(mode, dir).output().unwrap()
 }
 
-/// An `open` with the workspace context a focused pane provides, so the run reaches the
-/// placement and `plugin pane open` stages.
+/// An `open` with a focused pane's context.
 fn run_open(dir: &Path) -> Output {
     run_with_context("open", dir, &repo_context())
 }
@@ -345,8 +336,7 @@ fn auto_open_birth_events_follow_shared_policy() {
 #[test]
 fn auto_open_without_its_payload_refuses_silently_before_any_herdr_call() {
     let dir = tempfile::tempdir().unwrap();
-    // A focused workspace and pane are in reach, and opening there would stack a pane into
-    // whatever workspace the user is looking at.
+    // Opening here would stack a pane into whatever the user is looking at.
     for payload in [None, Some("")] {
         let mut command = with_context("auto-open", dir.path(), &repo_context());
         match payload {
@@ -375,8 +365,7 @@ fn auto_open_reads_each_payload_field_on_its_own() {
         data.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         json!({"event": "worktree_opened", "data": data}).to_string()
     };
-    // A field of an unexpected type reads as absent and leaves the rest of the payload alone.
-    // Only a boolean `true` marks the workspace as already open.
+    // A mistyped field reads as absent; only boolean `true` marks a workspace open.
     let payloads = [
         data(json!({"worktree": {"path": 42, "open_workspace_id": ["w"]}})),
         data(json!({"already_open": "true"})),
@@ -400,8 +389,7 @@ fn auto_open_reads_each_payload_field_on_its_own() {
 #[test]
 fn auto_open_falls_back_to_the_worktree_fields_of_the_payload() {
     let dir = tempfile::tempdir().unwrap();
-    // A payload without `data.workspace`: the hook targets `data.worktree`'s workspace and
-    // checkout instead (docs/herdr-api-notes.md).
+    // Without `data.workspace` the hook targets `data.worktree`'s.
     let event = json!({"event": "worktree_created", "data": {
         "type": "worktree_created",
         "worktree": {"path": env!("CARGO_MANIFEST_DIR"), "open_workspace_id": "workspace-7"},
@@ -442,8 +430,7 @@ fn manifest_runs_the_binary_directly_for_every_pane_action_and_event() {
             .unwrap()
             .parse()
             .unwrap();
-    // herdr 0.9.0 is the first to resolve a relative pane `command[0]` against the plugin
-    // root, which the pane command below relies on.
+    // 0.9.0 first resolves a relative pane `command[0]` against the plugin root.
     assert_eq!(manifest["min_herdr_version"].as_str(), Some("0.9.0"));
     let commands = |section: &str| -> Vec<(toml::Table, Vec<String>)> {
         manifest[section]
@@ -467,8 +454,7 @@ fn manifest_runs_the_binary_directly_for_every_pane_action_and_event() {
     assert_eq!(panes.len(), 1);
     assert_eq!(panes[0].1, ["bin/herdr-reviewr"]);
 
-    // Each action runs itself by its own id, so `persiyanov.reviewr.toggle` is one binding on
-    // every OS.
+    // Each action runs itself by its own id, one binding on every OS.
     let mut ids = Vec::new();
     for (table, command) in commands("actions") {
         let id = table["id"].as_str().unwrap();
@@ -534,9 +520,7 @@ fn manifest_builds_with_one_install_script_per_platform() {
         assert_eq!(platforms, want_platforms);
         assert_eq!(command, want_command);
     }
-    // herdr runs every build entry whose platforms match, so overlapping sets would run two
-    // installers. A `bash` entry matching Windows could reach the WSL launcher and fetch the
-    // Linux binary.
+    // Overlapping platform sets would run two installers.
     for platform in ["macos", "linux", "windows"] {
         let matching: Vec<_> = builds
             .iter()
@@ -547,9 +531,7 @@ fn manifest_builds_with_one_install_script_per_platform() {
     }
 }
 
-/// PowerShell 5.1 reads a script without a BOM in the ANSI code page, so one non-ASCII byte (an
-/// em dash in a comment) can turn into a quote that ends a string early. The install step runs
-/// under 5.1, and so can the Windows CI scripts.
+/// PowerShell 5.1 reads a BOM-less script as ANSI, so the scripts stay ASCII.
 #[test]
 fn every_powershell_script_is_ascii() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -579,9 +561,7 @@ fn every_powershell_script_is_ascii() {
 #[test]
 fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
     let dir = tempfile::tempdir().unwrap();
-    // A wrapped launch: `cargo run` holds the group, its child is the review UI, and the
-    // pane carries no `reviewr` label at all. The child's title (`name`) is rewritten, so
-    // only the executable identifies it.
+    // A wrapped launch: `cargo run`'s child is the review UI, identified by its executable.
     procinfo(
         dir.path(),
         "w1:p1",
@@ -610,9 +590,7 @@ fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
 #[test]
 fn a_windows_pane_counts_through_its_one_reported_process() {
     let dir = tempfile::tempdir().unwrap();
-    // herdr on Windows reports exactly one process per pane, with a backslashed path and the
-    // `.exe` suffix. The suffix arrives in either case: herdr's pty layer resolves the manifest's
-    // extension-less command through PATHEXT, whose entries are uppercase.
+    // herdr on Windows reports one process per pane, `.exe` in either case.
     for exe in [
         r"C:\Users\me\.config\herdr\plugins\github\persiyanov.reviewr-1a2b\bin\herdr-reviewr.exe",
         r"C:\Users\me\.config\herdr\plugins\github\persiyanov.reviewr-1a2b\bin\herdr-reviewr.EXE",
@@ -644,8 +622,7 @@ fn a_review_ui_started_with_ui_flags_still_counts() {
 #[test]
 fn a_flag_run_never_counts_as_the_review_ui() {
     let dir = tempfile::tempdir().unwrap();
-    // The review binary run for a non-UI flag is not the review UI, so `open` opens a fresh
-    // pane over it: the config flag, and an action that is itself still running.
+    // A non-UI flag run is not the review UI, so `open` opens over it.
     let flag_runs: [&[&str]; 2] =
         [&["herdr-reviewr", "--resolve-plugin-config"], &["herdr-reviewr", "--action", "toggle"]];
     for argv in flag_runs {
@@ -665,9 +642,7 @@ fn a_flag_run_never_counts_as_the_review_ui() {
 
 #[test]
 fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
-    // The other half of the flag-run contract, pinned in the binary itself: the actions
-    // exclude a non-UI flag wherever it sits in argv, so the binary must dispatch it there too,
-    // or a flag run would start the review UI while the actions refuse to count it.
+    // The binary dispatches a non-UI flag wherever it sits, as the actions exclude it.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
 
@@ -701,16 +676,14 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
 #[test]
 fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converges() {
     let dir = tempfile::tempdir().unwrap();
-    // w1:p2 is a plain shell wearing a stale `reviewr` label — a crashed binary's leftover.
-    // The label is display only and never read, so the sweep below must not touch it.
+    // A plain shell with a stale `reviewr` label: the label is never read.
     panes(
         dir.path(),
         &json!([{"pane_id": "w1:p1"}, {"pane_id": "w1:p2", "label": "reviewr"}, {"pane_id": "w1:p3"}]),
     );
     procinfo(dir.path(), "w1:p1", &json!([review_ui()]));
     procinfo(dir.path(), "w1:p3", &json!([review_ui()]));
-    // w1:p3's close fails with the pane gone: it exited between the read and the close.
-    // The sweep still exits 0 — the end state is the same.
+    // A pane gone before its close still converges.
     fs::write(fixture(dir.path(), "closefail", "w1:p3", ""), herdr_error("pane_not_found"))
         .unwrap();
 
@@ -719,8 +692,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: closed w1:p1 w1:p3 in workspace-1\n");
     let calls = herdr_calls(dir.path());
-    // Whole log lines, so a `plugin pane close` could not satisfy the plain-`pane close`
-    // contract these assert.
+    // Whole log lines, so `plugin pane close` cannot pass for `pane close`.
     assert!(calls.lines().any(|l| l == "pane close w1:p1"), "{calls}");
     assert!(calls.lines().any(|l| l == "pane close w1:p3"), "{calls}");
     assert!(
@@ -766,15 +738,13 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
 fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let procfail = fixture(dir.path(), "procfail", "w1:p1", ".json");
-    // The read reports the pane gone: it exited between the list and the read, so the
-    // action converges — this close has nothing to sweep and exits 0.
+    // A pane gone before its read converges.
     fs::write(&procfail, herdr_error("pane_not_found")).unwrap();
     let output = run("close", dir.path());
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
 
-    // Any other read failure refuses, never reads as "no reviewr pane": an open would
-    // stack a duplicate and a close would false-succeed.
+    // Any other read failure refuses.
     fs::write(&procfail, herdr_error("internal")).unwrap();
     for mode in ["open", "close", "toggle"] {
         let output = run(mode, dir.path());
@@ -790,8 +760,7 @@ fn a_gone_pane_skips_and_an_unreadable_read_refuses() {
 #[test]
 fn a_process_info_answer_missing_its_shape_refuses() {
     let dir = tempfile::tempdir().unwrap();
-    // Exit 0 with an error envelope — no `.result.process_info`. A shape failure must refuse
-    // like a failed pane list, never read as "no reviewr pane".
+    // An error envelope with exit 0 refuses like a failed pane list.
     fs::write(fixture(dir.path(), "procinfo", "w1:p1", ".json"), herdr_error("internal")).unwrap();
     for mode in ["open", "close", "toggle"] {
         let output = run(mode, dir.path());
@@ -803,9 +772,7 @@ fn a_process_info_answer_missing_its_shape_refuses() {
 #[test]
 fn a_failed_pane_list_refuses_rather_than_reading_as_no_pane() {
     let dir = tempfile::tempdir().unwrap();
-    // `pane list` answering an error envelope (exit 0, no `.result.panes`) must refuse:
-    // read as "no reviewr pane", an open would stack a duplicate and a close would
-    // false-succeed with panes still running.
+    // An error envelope for `pane list` refuses, never reads as "no reviewr pane".
     fs::write(dir.path().join("panes.json"), herdr_error("internal")).unwrap();
 
     let output = run("close", dir.path());
@@ -820,9 +787,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = tempfile::tempdir().unwrap();
-    // The install's build step runs in a staging checkout herdr renames afterwards, so the
-    // actions own the stable links: every valid invocation re-points them at the runtime
-    // root. `~/.local/bin` only when it exists.
+    // Every valid run re-points the stable links at the runtime root.
     let home = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     fs::create_dir_all(root.path().join("bin")).unwrap();
@@ -846,8 +811,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     let bin_link = home.path().join(".local/bin/herdr-reviewr");
     assert!(!bin_link.exists(), "~/.local/bin must not be created for the link");
 
-    // With `~/.local/bin` present, the second link lands too — and an existing symlink
-    // re-points rather than blocks.
+    // With `~/.local/bin` present the second link lands, re-pointing a symlink.
     fs::create_dir_all(home.path().join(".local/bin")).unwrap();
     std::os::unix::fs::symlink("/nonexistent/old", &bin_link).unwrap();
     let output = run_close();
@@ -862,8 +826,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(inode(&bin_link), before, "a current link was replaced");
 
-    // A re-point swaps the link in one step: a launch through it never finds the path
-    // missing, and the swap leaves nothing else beside it.
+    // A re-point swaps the link in one step and leaves nothing beside it.
     let other = tempfile::tempdir().unwrap();
     fs::create_dir_all(other.path().join("bin")).unwrap();
     fs::copy(root.path().join("bin/herdr-reviewr"), other.path().join("bin/herdr-reviewr"))
@@ -911,10 +874,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
 
 #[test]
 fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
-    // The launcher-blind half of config resolution: with no `HERDR_PLUGIN_CONFIG_DIR`, the
-    // binary asks `herdr plugin config-dir` and reads the directory it names. This is the one
-    // test that exercises the real herdr-CLI path — the unit tests drive the resolver with an
-    // injected closure.
+    // With no `HERDR_PLUGIN_CONFIG_DIR`, the binary asks herdr for the directory.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
 
@@ -932,9 +892,7 @@ fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
 
 #[test]
 fn a_wedged_config_dir_lookup_degrades_to_the_defaults_inside_the_bound() {
-    // A herdr that does not answer resolves no directory, the missing-file outcome. The fake
-    // hangs 5s, well past the binary's bound, so a success here can only come from giving the
-    // lookup up.
+    // A herdr that hangs past the bound resolves no directory.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
     fs::write(dir.path().join("configdir-hang"), "").unwrap();
@@ -1115,8 +1073,7 @@ fn an_open_waits_until_its_pane_reads_as_reviewr() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
-    // Two empty reads (few enough to fit the bound on a slow runner), then the read that
-    // sees reviewr, and no read after it.
+    // Two empty reads, then the one that sees reviewr, and none after.
     assert_eq!(opened_pane_reads(dir.path()), 3, "{}", herdr_calls(dir.path()));
 }
 
@@ -1247,8 +1204,7 @@ fn auto_open_yields_silently_to_a_held_lock() {
 
 #[test]
 fn a_held_lock_holds_back_only_its_own_workspace() {
-    // The race is per workspace, and so is the lock: an action in another workspace, or a new
-    // worktree's auto-open, never waits on this one.
+    // An action in another workspace never waits on this lock.
     let dir = tempfile::tempdir().unwrap();
     let _lock = hold_lock(dir.path(), "workspace-2");
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
@@ -1268,8 +1224,7 @@ fn a_held_lock_holds_back_only_its_own_workspace() {
 
 #[test]
 fn auto_open_over_an_open_reviewr_pane_does_nothing_and_says_nothing() {
-    // The workspace already shows reviewr, whoever opened it: the birth event neither stacks a
-    // second pane nor closes the first, and stays silent.
+    // The birth event neither stacks a second pane nor closes the first.
     let dir = tempfile::tempdir().unwrap();
     procinfo(dir.path(), "w1:p1", &json!([review_ui()]));
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
@@ -1322,11 +1277,7 @@ fn an_action_without_a_plugin_state_dir_refuses_before_any_herdr_call() {
 #[test]
 fn open_prefers_the_focused_panes_live_foreground_cwd() {
     let dir = tempfile::tempdir().unwrap();
-    // The launch cwd is not a git repo: an open that trusted it would refuse. The pane's
-    // live foreground cwd is the reviewed repo — the `claude -w <worktree>` shape, where
-    // the agent chdirs into the worktree only inside its own process after launching
-    // from the main checkout. The live cwd comes from the pane-list snapshot, so the
-    // open pays no extra herdr call.
+    // The launch cwd is no repo; the pane's live cwd is (the `claude -w` shape).
     let context = json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": dir.path()}).to_string();
     pane_with_cwd(dir.path(), "w1:p1", Path::new(env!("CARGO_MANIFEST_DIR")));
 
@@ -1338,8 +1289,7 @@ fn open_prefers_the_focused_panes_live_foreground_cwd() {
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "the open must use the live foreground cwd: {calls}"
     );
-    // The live cwd comes from the run's one snapshot; a second listing would put a herdr
-    // round-trip back on the keypress path.
+    // The live cwd comes from the run's one listing.
     assert_eq!(
         calls.matches("pane list --workspace").count(),
         1,
@@ -1350,9 +1300,7 @@ fn open_prefers_the_focused_panes_live_foreground_cwd() {
 #[test]
 fn open_prefers_the_live_cwd_when_the_launch_cwd_is_also_a_repo() {
     let dir = tempfile::tempdir().unwrap();
-    // The motivating shape exactly: the launch cwd is itself a valid repo (the main
-    // checkout `claude -w <worktree>` was launched from), so a fallback-only read would
-    // pass every other test and still review the wrong repo. The live cwd must win.
+    // The launch cwd is a repo too, so only a live-cwd read picks the right one.
     let launch_repo = init_repo(dir.path(), "main-checkout");
     let context = json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": launch_repo}).to_string();
     pane_with_cwd(dir.path(), "w1:p1", Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -1370,8 +1318,7 @@ fn open_prefers_the_live_cwd_when_the_launch_cwd_is_also_a_repo() {
 #[test]
 fn open_keeps_the_context_cwd_without_a_live_foreground_cwd() {
     let dir = tempfile::tempdir().unwrap();
-    // The fake's default pane-list entry carries no foreground cwd — a pane whose live
-    // read has nothing to add keeps the context cwd instead of losing it.
+    // No live cwd keeps the context cwd.
     let context =
         json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": env!("CARGO_MANIFEST_DIR")})
             .to_string();
@@ -1405,10 +1352,7 @@ fn open_falls_back_to_the_workspace_cwd_without_a_focused_pane_cwd() {
 #[test]
 fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
     let dir = tempfile::tempdir().unwrap();
-    // The live foreground cwd sits outside any git repo — a shell that wandered off. The
-    // live cwd wins only inside a repo; here it yields to the context cwd rather than
-    // refusing an open the context alone could place. Run as a toggle, so the opening toggle
-    // exercises the same path.
+    // A live cwd outside any repo yields to the context cwd.
     let context =
         json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": env!("CARGO_MANIFEST_DIR")})
             .to_string();
@@ -1427,9 +1371,7 @@ fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
 #[test]
 fn open_takes_the_focused_panes_cwd_not_another_panes() {
     let dir = tempfile::tempdir().unwrap();
-    // Two panes, both in repos: a decoy listed first and the focused pane after it. The
-    // lookup must key on the focused pane's id — a first-entry read would review the
-    // decoy's repo.
+    // The lookup keys on the focused pane's id, not the first entry.
     let decoy_repo = init_repo(dir.path(), "decoy-repo");
     panes(
         dir.path(),
@@ -1453,9 +1395,7 @@ fn open_takes_the_focused_panes_cwd_not_another_panes() {
 #[test]
 fn a_refusal_names_the_rejected_live_cwd_too() {
     let dir = tempfile::tempdir().unwrap();
-    // No context cwd and a non-repo live cwd: the open refuses, and the one stderr line
-    // names the live directory it inspected and rejected — a refusal that hid it would
-    // read as if no directory was ever tried.
+    // The refusal names the live directory it rejected.
     let context = json!({"focused_pane_id": "w1:p1"}).to_string();
     pane_with_cwd(dir.path(), "w1:p1", dir.path());
 

@@ -156,8 +156,7 @@ fn main() {
         );
     }
 
-    // --- Composite: what one All-files reload costs ------------------------------
-    // (The Changes composite is the changed_from row above — one call, no reopen.)
+    // --- Composite: one All-files reload.
     row(
         "TAB SWITCH -> All files (reload, no reopen)",
         sample(3, || {

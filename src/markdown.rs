@@ -1694,8 +1694,7 @@ mod tests {
 
     #[test]
     fn crlf_source_renders_as_its_lf_twin() {
-        // A CRLF ending is a line ending, never text the sanitizer would show as `�`. A PR
-        // body arrives this way, and so does a file whose CRs git keeps.
+        // A CRLF ending is a line ending, never a shown `�`.
         let (hl, p) = setup();
         let md =
             "# T\r\n\r\nA paragraph\r\nthat wraps.\r\n\r\n| a | b |\r\n|---|---|\r\n| 1 | 2 |\r\n";

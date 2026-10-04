@@ -877,19 +877,11 @@ pub struct App {
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
-    /// The worker-owned turn baseline, mirrored from completions so the next build's input
-    /// carries it and the `last-turn` empty state reads it without a round-trip. A file's diff
-    /// reads [`Self::diff_ends`] instead.
+    /// The worker's turn baseline, mirrored for the next build and the empty state.
     turn_baseline: Option<String>,
-    /// The two ends the landed changeset was diffed between, so a file's diff reads the same
-    /// trees its counts came from ([`crate::world::DiffEnds`]).
+    /// The ends the landed changeset was diffed between; a file's diff reads these.
     diff_ends: Option<crate::world::DiffEnds>,
-    /// Whether any agent is in this worktree — the one home for the answer, held here
-    /// because this is what paints it. `None` until a sample observes it, so a frame that
-    /// has seen nothing waits instead of asserting an emptiness nobody looked for: stale is
-    /// allowed, wrong is not (Continuity). Only a sample that observed the
-    /// whole worktree moves it — herdr answered and git resolved every member's directory — so
-    /// `Some(false)` always means someone looked and found no member.
+    /// Whether any agent is in this worktree; `None` until a sample has looked.
     agents_present: Option<bool>,
 }
 
@@ -1390,13 +1382,7 @@ impl App {
             .or_else(|| self.first_file_row())
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
-        // A poll preserves the file-list wheel scroll — it does not reveal the cursor.
-        // Explicit actions (navigation, a scope switch) request their own reveal.
-        // While a modal is open the diff below it is frozen, so a poll can't shift the anchor
-        // beneath the writer, reset the scroll and selection under the overlay, or move the
-        // reviewer's place while they choose an agent (`Mode::is_modal`, Continuity).
-        // A view-anchored drag holds it the same way, catching up when the gesture ends.
-        // The file list still updates above.
+        // A modal or a view-anchored drag freezes the diff; the file list still updates.
         if self.view_anchored_gesture() {
             self.view_reload_held = true;
         } else if !self.view_frozen() {
@@ -1495,8 +1481,7 @@ impl App {
             self.open_fresh();
         }
         self.diff_path = Some(path.clone());
-        // The rename source comes from the landed build, the same record the sides are read
-        // by; the painted row's is only a fallback for a path the build no longer lists.
+        // The rename source from the landed build, the painted row's only as a fallback.
         let previous_path =
             self.changed.get(&path).map_or(previous_path, |a| a.previous_path.clone());
         let (old, new) = match self.content_sides(&path) {
@@ -1509,22 +1494,16 @@ impl App {
                 (String::new(), String::new())
             }
         };
-        // Hold the new side as the render input, the content git compares (the worktree's,
-        // cleaned, or the scope's newer tree), and the old side the marks read deletions
-        // against. A non-markdown file, a
-        // notice, or a deleted file (empty new side) holds nothing, so it shows its source and
-        // its toggle stays inert.
+        // The new side is the render input, the old side the marks' base; a notice holds none.
         let renders = self.markdown_file() && self.diff.state == crate::diff::FileState::Normal;
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
         self.rebuild_visible();
         self.settle_read();
     }
 
-    /// Build the File view for `path`: its current worktree content as `Context` rows, no
-    /// folds. The `All files` read pane. Content is scope-independent.
+    /// The `All files` File view for `path`: its worktree content, no folds.
     fn set_file_view(&mut self, path: &str) {
-        // Opening a different file starts rendered when it is markdown; a same-file refresh
-        // keeps the rendered/source choice.
+        // A different file opens rendered when markdown; a refresh keeps the choice.
         if self.diff_path.as_deref() != Some(path) {
             self.open_fresh();
         }
@@ -1540,13 +1519,7 @@ impl App {
         self.settle_read();
     }
 
-    /// Build the read pane's File view for `path`: an over-budget blob (a model weight, a
-    /// vendored bundle) previews as the too-large notice without a read — reading it whole
-    /// would spike the UI thread before `build_file`'s budget could discard it — else the
-    /// worktree content, as the file has it, is highlighted through the shared content-hash
-    /// cache. The highlighter drops each line's ending CR, so no row carries one. Returns the
-    /// diff and the content read (empty for the notice), for a caller that also keeps the
-    /// content. The one build the source view and the search preview share.
+    /// The File view for `path`: the too-large notice unread, else the highlighted worktree content.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
         let oversize = std::fs::metadata(self.repo.join(path))
             .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
@@ -1560,9 +1533,7 @@ impl App {
         }
     }
 
-    /// Clamp the cursor, scroll, and selection to the rebuilt `visible`, keeping the reader's
-    /// position. A shrunk view that forced the cursor to move reveals it; a poll that left it
-    /// in range does not, so a wheel scroll survives.
+    /// Clamp cursor, scroll and selection to `visible`; reveal only a forced move.
     fn settle_read(&mut self) {
         if self.visible.is_empty() {
             self.reset_diff_view();
@@ -1936,39 +1907,22 @@ impl App {
         // bottom half: leave diff_scroll — the content above the fold stays put, grow downward
     }
 
-    /// The old and new content of `path` for the current scope, from one `git diff` of the
-    /// scope's two ends ([`git::diff_sides`]), so the sides are exactly what `git diff`
-    /// compares: the worktree against `HEAD` or the branch's merge-base, the turn baseline
-    /// against the snapshot its changeset came from, `A^` against `B` for a commit run. A
-    /// rename reads its old side from its source, so the diff shows real edits, not a
-    /// wholesale delete-and-add. An untracked file is in no `git diff`: it reads raw, all
-    /// additions. A git that can't answer shows no sides.
-    ///
-    /// Everything comes from the landed build's record for `path`. A change git reported as
-    /// having no text diff (binary content, an unset `diff` attribute) is its notice, which
-    /// would otherwise paint a `-diff` lockfile as text. Sides past the render budget are
-    /// their notice before anything reads them: git's sides by the sizes the build took, the
-    /// worktree's by a stat of the file as it is read. The stat sees the raw file, before any
-    /// clean filter: a large file git-lfs stores as a pointer shows its notice, though git
-    /// would diff the pointer.
+    /// `path`'s sides from the landed build's record: a notice, or one `git diff` of the scope's ends.
     fn content_sides(&self, path: &str) -> Sides {
         use crate::diff::FileState;
         let empty = || Sides::Text { old: String::new(), new: String::new() };
-        // A path outside the landed changeset is a row painted from an older build, which the
-        // landed ends cannot diff: it shows empty until the next reconcile repaints the list.
+        // A path outside the landed changeset is a stale row: empty until the next reconcile.
         let Some(annotation) = self.changed.get(path) else { return empty() };
         if annotation.binary {
             return Sides::Notice(FileState::Binary);
         }
-        // The ends the changeset came from, whatever moved since: a commit, a new merge base,
-        // a promoted turn baseline. No ends means the scope lists nothing.
+        // No ends means the scope lists nothing.
         let Some(ends) = &self.diff_ends else { return empty() };
         let untracked = annotation.change == ChangeKind::Untracked;
         let new_size = if ends.new.is_some() {
             annotation.new_size
         } else {
-            // git diffs a tracked symlink as its target's path; an untracked file reads raw,
-            // through the link.
+            // git diffs a tracked symlink as its target path; an untracked file reads through it.
             let at = self.repo.join(path);
             let stat =
                 if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
@@ -1989,21 +1943,17 @@ impl App {
         }
     }
 
-    /// Whether the `commits` scope is active over a pruned pick: the empty state both panes
-    /// paint as [`Self::commits_gone_message`].
+    /// The `commits` scope over a pruned pick.
     pub fn commits_gone(&self) -> bool {
         self.scope == Scope::Commits && self.pick_gone()
     }
 
-    /// Whether the last build found the pick pruned, whatever scope is showing now: the
-    /// verdict is adopted only in `commits` and kept across a switch away, so `g` from
-    /// another scope knows the pick has nothing to show.
+    /// Whether the last build found the pick pruned, kept across a scope switch.
     pub(crate) fn pick_gone(&self) -> bool {
         matches!(self.pick_status, Some(PickStatus { verdict: PickVerdict::Gone(_), .. }))
     }
 
-    /// The one message both panes paint for a [`Self::commits_gone`] frame, naming the first
-    /// missing commit.
+    /// The message for a [`Self::commits_gone`] frame, naming the first missing commit.
     pub fn commits_gone_message(&self) -> String {
         match &self.pick_status {
             Some(PickStatus { verdict: PickVerdict::Gone(sha), .. }) => {
@@ -2013,8 +1963,7 @@ impl App {
         }
     }
 
-    /// Where the open diff's new side was read: the picked run's
-    /// newest commit in `commits`, the worktree everywhere else.
+    /// Where the open diff's new side was read.
     fn current_rev(&self) -> Rev {
         match (self.scope, &self.commit_pick) {
             (Scope::Commits, Some(pick)) => Rev::Commit(pick.clone()),
@@ -2022,17 +1971,12 @@ impl App {
         }
     }
 
-    /// Whether the `last-turn` scope is active but no baseline has been captured yet — the
-    /// cold-start state the UI paints as [`Self::turn_wait_message`].
+    /// `last-turn` with no baseline captured yet.
     pub fn awaiting_turn(&self) -> bool {
         self.scope == Scope::LastTurn && self.turn_baseline.is_none()
     }
 
-    /// The one message both panes paint for an [`Self::awaiting_turn`] frame, chosen here
-    /// so the file list and the diff view cannot disagree. An empty
-    /// worktree will never produce a turn, so saying so beats waiting — but only a sample
-    /// that found no member says it, since the pre-poll frame may only wait: stale is
-    /// allowed, wrong is not (Continuity).
+    /// The message for an [`Self::awaiting_turn`] frame; "no agent" only once a sample looked.
     pub fn turn_wait_message(&self) -> &'static str {
         match self.agents_present {
             Some(false) => "no agent works here",
@@ -3002,9 +2946,7 @@ impl App {
             clamp_scroll(self.pr_read_scroll, delta, self.pr_read_max_scroll.get());
     }
 
-    /// Open the pull request in the browser. The forge's `url` passes the same gate a
-    /// clicked link does: the OS opener runs whatever a non-http(s) target names
-    /// (`ShellExecuteW` on Windows), so anything else is refused.
+    /// Open the pull request through the same http(s) gate a clicked link passes.
     pub fn pr_open(&mut self) {
         let Some(url) = self.pr_snapshot().map(|s| s.url.clone()) else {
             return;
@@ -3189,8 +3131,7 @@ impl App {
             if entry.annotation.as_ref().is_some_and(|a| a.additions + a.deletions == 0) {
                 continue;
             }
-            // An over-budget file reads as its notice, sized before anything is read, so it
-            // holds no hunk either.
+            // A notice holds no hunk.
             let Sides::Text { old, new } = self.content_sides(&entry.path) else { continue };
             let diff =
                 self.cache.get(entry.path, entry.previous_path, &old, &new, &self.highlighter);
@@ -3224,10 +3165,7 @@ impl App {
         self.keys_expanded = !self.keys_expanded;
     }
 
-    /// The `esc` ladder in `Normal` mode: peel exactly one layer per press — a live selection, then
-    /// an armed crossing, then the footer expansion. The selection and crossing
-    /// are file-tab place state, frozen in place while `PR` is active, so `esc` on `PR` closes only
-    /// the expansion and never disturbs the file tab the reviewer will return to (Continuity).
+    /// `esc` peels one layer per press: selection, crossing, then footer expansion.
     pub fn escape(&mut self) {
         if self.tab != Tab::Pr {
             if self.select_anchor.is_some() {
@@ -5700,16 +5638,13 @@ fn is_markdown_path(path: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
-/// What reading a changed file's two sides found: their text, or the notice that stands in
-/// for them.
+/// What reading a changed file's sides found: their text, or the notice for them.
 enum Sides {
     Text { old: String, new: String },
     Notice(crate::diff::FileState),
 }
 
-/// `path`'s worktree bytes as text, lossily, as the file has them: line endings included.
-/// Empty when the file is absent (a deletion), unreadable, or no regular file (a link to a
-/// device never ends). The read stops past the render budget, which the callers check first.
+/// `path`'s worktree text, regular files only, capped past the render budget.
 fn worktree_content(repo: &std::path::Path, path: &str) -> String {
     use std::io::Read;
     let at = repo.join(path);
@@ -5748,9 +5683,7 @@ fn source_row_of(rows: &[Row], src: u32) -> usize {
         .unwrap_or(rows.len().saturating_sub(1))
 }
 
-/// Old → new source line numbers across one edit of a file's content: an unchanged line maps
-/// to where it moved, and a line inside a changed region to the nearest surviving line — its
-/// counterpart in a rewrite, the line after it in a deletion.
+/// Old → new line numbers across one edit; a changed line maps to its nearest survivor.
 struct LineMap {
     ops: Vec<similar::DiffOp>,
     new_len: usize,
@@ -6520,8 +6453,7 @@ mod tests {
         git(&["commit", "-q", "-am", "grow"]);
         std::fs::write(repo.join("big.txt"), "small\n").unwrap();
         open(&mut app);
-        // Both sides committed, in a run of commits: the big side old, then new, the worktree
-        // small throughout.
+        // A run of commits: the big side old, then new.
         git(&["commit", "-q", "-am", "shrink"]);
         app.commit_pick = Some(CommitPick::single(&git(&["rev-parse", "HEAD"])));
         app.scope = Scope::Commits;
@@ -6534,16 +6466,14 @@ mod tests {
         app.sync_turn_baseline(Some(baseline));
         app.set_scope(Scope::LastTurn).unwrap();
         open(&mut app);
-        // A row painted from an older build names a path the landed changeset lacks: it has
-        // no diff at the landed ends, so nothing reads it.
+        // A stale row's path has no diff at the landed ends.
         app.reload().unwrap();
         let before = git_commands();
         app.set_diff("gone.txt".to_string(), None);
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
     }
 
-    /// An over-budget rename is still the diff of a rename: its notice keeps the source the
-    /// title reads `old → new` from, and the view its diff comments render in.
+    /// An over-budget rename's notice keeps its source and its Diff view.
     #[test]
     fn an_over_budget_rename_keeps_its_source_and_its_view() {
         let dir = tempfile::tempdir().unwrap();
@@ -6568,8 +6498,7 @@ mod tests {
         assert_eq!(app.diff.view, crate::diff::View::Diff);
     }
 
-    /// git diffs a tracked symlink as the path it names, so a link to a large file is a
-    /// one-line diff, never the too-large notice.
+    /// A tracked link diffs as its target path, never the too-large notice.
     #[cfg(unix)]
     #[test]
     fn a_tracked_link_to_a_large_file_diffs_as_its_target_path() {
@@ -6645,9 +6574,7 @@ mod tests {
         app.scope = Scope::Commits;
         app.reload().unwrap();
         let commits = cost(&mut app, "a.txt", None);
-        // One `git diff` per tracked file, and a rename's source blob read beside it; an
-        // untracked file reads raw. The sides were sized by the build, and every scope's base
-        // rides the build it was named in, so neither is asked again.
+        // One `git diff` per tracked file, plus a rename's source blob.
         assert_eq!(uncommitted, (1, 0, 2), "a CRLF edit, an untracked file, a pure rename");
         assert_eq!((branch, last_turn, commits), (1, 1, 1));
         let rows: Vec<String> = app

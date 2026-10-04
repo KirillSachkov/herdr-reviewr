@@ -1,19 +1,4 @@
-//! The plugin's pane actions and event hook, run as `herdr-reviewr --action <name>`:
-//!
-//! - `toggle` opens a reviewr pane, or closes every one if any is open.
-//! - `open` opens a reviewr pane, and is a no-op if one is open.
-//! - `close` closes every reviewr pane, and is a no-op if none is.
-//! - `auto-open` is the worktree workspace-birth hook, gated by `auto_open` and placement.
-//!
-//! A reviewr pane is any pane whose foreground runs the review UI, read live per pane. The
-//! `reviewr` label is display only and never read. An action refuses loudly (exit 1, one
-//! `reviewr:` line on stderr) and reports a success on stdout. A refused event stays silent,
-//! except for a config error, which goes to stderr for herdr's plugin log.
-//!
-//! herdr runs plugin actions concurrently, so every action that reaches a workspace holds that
-//! workspace's exclusive OS lock, `$HERDR_PLUGIN_STATE_DIR/action-<workspace id in hex>.lock`, from its
-//! pane listing to its end (see [`action_lock`]). The file holds no state: it is never written
-//! or deleted, and the OS releases the lock when a run exits or crashes.
+//! The plugin actions and the `auto-open` hook, run as `--action <name>`, one workspace lock each.
 
 use std::env;
 use std::ffi::OsStr;
@@ -29,11 +14,7 @@ use crate::herdr::{self, HerdrError, PaneList, Process, ProcessInfo};
 use crate::logln;
 use crate::proc::program_name;
 
-/// A run of the binary that is not the review UI, read from its arguments after argv\[0\].
-///
-/// `main` dispatches on this, and [`is_review_ui`] reads every observed process through it.
-/// That makes "a flag run never counts as the review UI, so it never runs the review UI
-/// either" one rule: a non-UI flag added here is dispatched and excluded at once.
+/// A run that is not the review UI: dispatched by `main`, and never counted as a reviewr pane.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NonUiRun {
     /// `--resolve-plugin-config`: print the normalized plugin config.
@@ -43,8 +24,7 @@ pub enum NonUiRun {
 }
 
 impl NonUiRun {
-    /// The non-UI run `args` asks for, recognized anywhere in argv, or `None` for the review
-    /// UI. UI flags such as `--base` and a repo path never make a run non-UI.
+    /// The non-UI run `args` asks for, anywhere in argv, or `None` for the review UI.
     pub fn from_args<S: AsRef<OsStr>>(args: &[S]) -> Option<Self> {
         let args: Vec<&OsStr> = args.iter().map(AsRef::as_ref).collect();
         if args.contains(&OsStr::new("--resolve-plugin-config")) {
@@ -79,8 +59,7 @@ impl Action {
 /// Why an action stopped short.
 #[derive(Debug)]
 enum Stop {
-    /// The plugin config is invalid. Loud on every action, the event included, so the error
-    /// reaches herdr's plugin log.
+    /// The plugin config is invalid; loud everywhere, so it reaches herdr's plugin log.
     Config(PluginConfigError),
     /// The action cannot proceed. Loud for an explicit action, silent for the event.
     Refused(String),
@@ -128,30 +107,25 @@ pub fn run(name: Option<&str>) -> i32 {
 
 /// One action, step by step. `Ok` holds the success line, if the action reports one.
 fn act(action: Action) -> Result<Option<String>, Stop> {
-    // The whole plugin config validates before any workspace read or pane write, so every
-    // plugin entry point shares exactly one contract.
+    // The whole config validates before any workspace read or pane write.
     let config = crate::config::plugin_config_from_herdr().map_err(Stop::Config)?;
 
     #[cfg(unix)]
     repoint_launch_links();
 
-    // Event policy gates the event alone: explicit actions ignore it. This sits after
-    // validation but before any workspace or pane read, so a disabled event does no work.
+    // Event policy gates only the event, before any read.
     let event = if action == Action::AutoOpen {
         if !config.auto_open()
             || !matches!(config.toggle_placement(), TogglePlacement::Split | TogglePlacement::Tab)
         {
             return Ok(None);
         }
-        // The payload names the event's workspace. Without it, the only workspace in reach is
-        // the focused one, whatever the user is looking at, so the event refuses.
+        // Without a payload the only workspace in reach is the focused one, so the event refuses.
         let Some(json) = var("HERDR_PLUGIN_EVENT_JSON") else {
             return Err(refused("no event payload"));
         };
         let event: Value = serde_json::from_str(&json).unwrap_or_default();
-        // `worktree.opened` also fires when its workspace is already live. That is a
-        // focus/open request, not a workspace birth: never resurrect a reviewr pane the user
-        // closed there.
+        // `worktree.opened` on a live workspace is no birth: never resurrect a closed pane.
         if event.pointer("/data/already_open") == Some(&Value::Bool(true)) {
             return Ok(None);
         }
@@ -162,15 +136,12 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 
     let target = Target::read(event)?;
     let ws = target.ws.as_str();
-    // Held from the listing through the close or the open, so a concurrent action on this
-    // workspace reads it only after this one's effect is visible.
+    // Held through the close or open, so a concurrent action sees this one's effect.
     let Some(_lock) = action_lock(action, ws)? else {
         return Ok(None);
     };
 
-    // One pane-list snapshot serves the whole run. A failed or unreadable listing must not
-    // read as "no reviewr pane": that would stack a duplicate on toggle and false-succeed a
-    // close.
+    // One listing serves the run; a failed one never reads as "no reviewr pane".
     let panes =
         PaneList::of(ws).map_err(|_| refused(format!("herdr pane list failed for {ws}")))?;
     let existing = reviewr_panes(&panes)
@@ -190,42 +161,22 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     open(action, &config, &target, &panes).map(Some)
 }
 
-/// How long an explicit action waits for another action on its workspace to release the lock.
-/// One action holds it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]:
-/// under a second warm, and up to 5.5 s for a cold first open on a Windows VM. This waits out
-/// the slowest holder with room to spare. The wait runs on herdr's action thread and blocks
-/// nothing, so the bound only ends a wait on a wedged holder.
+/// How long an explicit action waits for its workspace's lock: the slowest open, with room.
 const LOCK_BOUND: Duration = Duration::from_secs(15);
 
 /// The pause between two lock attempts while an explicit action waits.
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Take workspace `ws`'s action lock, or `None` when the event finds it held and yields.
-///
-/// herdr spawns every action and event hook on its own thread with no per-plugin queue, so two
-/// quick toggles, or a toggle and an auto-open, would both read "no reviewr pane" and both
-/// open. An explicit action waits, bounded, so a double press opens and then closes. Past
-/// [`LOCK_BOUND`] it refuses rather than act unguarded. The event tries once and yields:
-/// whoever holds this workspace's lock is already acting on its reviewr panes, and a second
-/// open is exactly what the lock exists to stop. The lock is per workspace, since the race is:
-/// an action in one workspace never holds back another's. This is the pattern of
-/// herdr-sidebar's launcher lock.
-///
-/// The wait polls `try_lock` against a deadline instead of blocking in `lock`, because Windows
-/// can take a moment to release a crashed holder's lock. Without a usable state dir the action
-/// refuses: herdr sets and creates the dir for every action, so a run without it is not a herdr
-/// action, and an unguarded run is the race this lock closes.
+/// Workspace `ws`'s action lock: an action waits up to [`LOCK_BOUND`], the event yields.
 fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
     let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
-    // A workspace id names the file in hex, one-to-one even where file names ignore case
-    // (herdr's ids mix it), so two workspaces never share a lock.
+    // Hex, so ids that differ only in case never share a lock file.
     let name = hex::encode(ws);
     let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
-    // Read and write without truncation: Windows locks need a handle with access, and the
-    // file's (empty) content is never touched.
+    // Windows locks need a handle with access; the content is never touched.
     let file = File::options()
         .read(true)
         .write(true)
@@ -257,9 +208,7 @@ fn var(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// The non-empty string at JSON `pointer` in `value`. Each field of herdr's action context
-/// (`HERDR_PLUGIN_CONTEXT_JSON`) and event payload (`HERDR_PLUGIN_EVENT_JSON`) reads on its own:
-/// one missing or of another type reads as absent and leaves the rest of the payload usable.
+/// The non-empty string at `pointer`; a missing or mistyped field reads as absent.
 fn text(value: &Value, pointer: &str) -> Option<String> {
     value.pointer(pointer).and_then(Value::as_str).filter(|text| !text.is_empty()).map(Into::into)
 }
@@ -277,13 +226,10 @@ struct Target {
 }
 
 impl Target {
-    /// The target of the event with payload `event`, else of an explicit action. Refused
-    /// without a workspace to act in.
+    /// The event's target from its payload, else the explicit action's.
     fn read(event: Option<Value>) -> Result<Self, Stop> {
         let no_workspace = || refused("no workspace context (invoke from inside herdr)");
-        // The events fire without a focused pane: target the fresh workspace from their
-        // payload, never a focused pane's cwd. The `worktree` fields are compatible fallbacks
-        // (`docs/herdr-api-notes.md`).
+        // Target the event's fresh workspace, never a focused pane's cwd.
         if let Some(event) = event {
             return Ok(Self {
                 ws: text(&event, "/data/workspace/workspace_id")
@@ -307,10 +253,7 @@ impl Target {
     }
 }
 
-/// The workspace's reviewr panes, in listing order: any tab, any placement, however they were
-/// launched. The per-pane reads run concurrently, so the sweep costs one process-info round
-/// trip of wall clock, not one per pane. `None` when any read failed, which the caller refuses
-/// like a failed pane list.
+/// The workspace's reviewr panes, read concurrently; `None` when any read failed.
 fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
     thread::scope(|scope| {
         let probes: Vec<_> = panes
@@ -334,9 +277,7 @@ fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
     })
 }
 
-/// Whether pane `pane` runs the review UI. A pane the read reports gone exited between the
-/// list and this read, and converges like any observed-then-exited pane. Any other failed read
-/// is an error.
+/// Whether pane `pane` runs the review UI; a pane gone since the list counts as closed.
 fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
     match ProcessInfo::of(pane) {
         Ok(info) => Ok(info.foreground_processes.iter().any(is_review_ui)),
@@ -345,10 +286,7 @@ fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
     }
 }
 
-/// Whether `process` is the review UI: its executable is `herdr-reviewr`, and its argv asks for
-/// no [`NonUiRun`]. A wrapped launch (`cargo run`) counts through its child. The executable
-/// name in `argv0` or `argv[0]` decides, never `name`, which is a rewritable process title
-/// (`docs/herdr-api-notes.md`).
+/// Whether `process` is the review UI, by its executable name and a UI argv.
 fn is_review_ui(process: &Process) -> bool {
     let argv = process.argv.as_slice();
     // Windows names ignore case, so `HERDR-REVIEWR.EXE` is the same program.
@@ -360,12 +298,7 @@ fn is_review_ui(process: &Process) -> bool {
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 
-/// Close every pane in `existing`, with plain `pane close` (see [`herdr::close_pane`]).
-///
-/// A close refused because the pane is gone lost a benign race: the pane exited between the read
-/// and the close, the same end state, so the sweep still converges. A close failing any other
-/// way names a pane that may still be running, so the sweep finishes the rest and then refuses
-/// rather than reporting that pane closed.
+/// Close every pane in `existing`; a pane already gone counts as closed.
 fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
     let mut closed = Vec::new();
     let mut failed = Vec::new();
@@ -382,11 +315,7 @@ fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
     Ok(format!("closed {} in {ws}", closed.join(" ")))
 }
 
-/// How long an open waits for its new pane to read as reviewr. herdr caches its Windows process
-/// snapshot for 250 ms, so a just-opened pane can read empty, and a toggle that returned then
-/// would let the next toggle open a second pane instead of closing this one. A cold first open
-/// on a Windows VM took up to 5.5 s to read as reviewr, so the bound waits that out. Past it
-/// the open reports success anyway: the pane is open, only its read lags.
+/// How long an open waits for its pane to read as reviewr: a cold Windows open, with room.
 const VISIBLE_BOUND: Duration = Duration::from_secs(6);
 
 /// The pause between two reads of the new pane while an open waits.
@@ -400,9 +329,7 @@ fn open(
     panes: &PaneList,
 ) -> Result<String, Stop> {
     let ws = target.ws.as_str();
-    // Prefer the focused pane's live `foreground_cwd`, read from the pane-list snapshot already
-    // in hand, over the context's launch cwd (the launch-vs-live split is in
-    // docs/herdr-api-notes.md). The live cwd wins only inside a repo.
+    // The focused pane's live cwd wins over the launch cwd, when it is inside a repo.
     let live = target
         .focused
         .as_deref()
@@ -411,8 +338,7 @@ fn open(
     let cwd = match (&live, &target.cwd) {
         (Some(live), _) if has_worktree(live) => live,
         (_, Some(cwd)) if has_worktree(cwd) => cwd,
-        // Name every candidate the check rejected, or a refusal over an inspected but unusable
-        // live cwd would read as if no directory was ever tried.
+        // Name every rejected candidate.
         _ => {
             let live = live.map(|live| format!(" (live cwd '{live}')")).unwrap_or_default();
             let cwd = target.cwd.as_deref().unwrap_or("<no cwd>");
@@ -454,9 +380,7 @@ fn open(
     let opened =
         herdr::open_plugin_pane(&spot).map_err(|_| refused("herdr plugin pane open failed"))?;
 
-    // A tab open lands in a fresh tab that herdr labels with a bare index: name it after the
-    // plugin so the tab bar reads "reviewr". Cosmetic, so a failed rename never fails an open
-    // that already succeeded.
+    // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
     if placement == TogglePlacement::Tab
         && let Some(tab) = opened.tab_id.as_deref()
     {
@@ -467,14 +391,12 @@ fn open(
     Ok(format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str()))
 }
 
-/// Whether `dir` sits in a worktree: git names its top level. Unlike `git::is_repo`, a `.git`
-/// dir or a bare repository does not count, since reviewr reviews a worktree.
+/// Whether `dir` sits in a worktree; a `.git` dir or bare repository does not.
 fn has_worktree(dir: &str) -> bool {
     crate::git::toplevel(Path::new(dir)).is_some()
 }
 
-/// Return once pane `pane` reads as a reviewr pane, or once [`VISIBLE_BOUND`] has passed. A
-/// sequential toggle after this one then always sees the pane it opened.
+/// Return once pane `pane` reads as reviewr, or past [`VISIBLE_BOUND`].
 fn wait_until_visible(pane: &str) {
     let deadline = Instant::now() + VISIBLE_BOUND;
     loop {
@@ -489,13 +411,7 @@ fn wait_until_visible(pane: &str) {
     }
 }
 
-/// Re-point the stable launch paths at the live plugin root.
-///
-/// They track the root from here, not from the install step: the build step runs in a staging
-/// checkout that herdr renames afterwards, so only a runtime invocation knows the real root.
-/// Best effort, so this never fails an action, and it never replaces anything but a symlink: a
-/// user's own binary at the path (`cargo install --root ~/.local`) survives. Unix only, since
-/// symlinks on Windows need Developer Mode or admin rights.
+/// Re-point the stable launch links at the live plugin root; best effort, symlinks only.
 #[cfg(unix)]
 fn repoint_launch_links() {
     use std::os::unix::fs::PermissionsExt;
@@ -530,8 +446,7 @@ fn repoint_launch_links() {
             Ok(_) => continue,
             Err(_) => {}
         }
-        // A layout may launch through the link at any moment, so the swap never leaves the
-        // path missing: a fresh link beside it renames over the old one in one step.
+        // A fresh link renamed over the old one, so the path is never missing.
         let fresh = dir.join(format!(".herdr-reviewr.{}", std::process::id()));
         let _ = std::fs::remove_file(&fresh);
         if std::os::unix::fs::symlink(&binary, &fresh).is_ok()

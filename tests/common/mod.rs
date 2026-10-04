@@ -1,9 +1,4 @@
-//! A real on-disk git repo for integration tests, and the fake herdr CLI. Every repo helper
-//! shells out to the actual `git` binary, so tests exercise the same surface the app does at
-//! runtime.
-//!
-//! `dead_code`/`unreachable_pub` are allowed because each test binary includes this
-//! module and uses only the subset of helpers it needs.
+//! A real git repo for integration tests, and the fake herdr; each binary uses a subset.
 #![allow(dead_code, unreachable_pub)]
 
 use std::path::{Path, PathBuf};
@@ -14,10 +9,7 @@ use herdr_reviewr::app::App;
 use herdr_reviewr::model::Scope;
 use tempfile::TempDir;
 
-/// The fake herdr (`examples/fake_herdr.rs`, which documents its fixture files), built here
-/// rather than located: `cargo test --test <name>` builds no examples, so a located binary
-/// could be missing or stale. Once per test process, and a no-op when `cargo test` already
-/// built it.
+/// The fake herdr, built here once per test process: `cargo test --test` builds no examples.
 pub fn fake_herdr() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {

@@ -1,17 +1,4 @@
-//! The Windows console reader: VT input mode, read as UTF-16 key records.
-//!
-//! With `ENABLE_VIRTUAL_TERMINAL_INPUT` set, the console passes the terminal's input through as
-//! the bytes it sent, bracketed-paste markers included, which the classic console API strips.
-//! Measured in herdr 0.9.3's `ConPTY` on Windows 11: a paste arrives whole between `ESC[200~` and
-//! `ESC[201~`, and non-ASCII text arrives as correct UTF-16 (surrogate pairs for an emoji), so
-//! `ReadConsoleInputW` needs no code page change.
-//!
-//! Two inputs go beyond crossterm's own claims, and both are written as escape sequences because
-//! crossterm uses the console API for them on Windows. Mouse tracking: crossterm's mouse capture
-//! only sets a console mode, and VT input needs the terminal to report the mouse in SGR form,
-//! the way it does on unix. The kitty keyboard protocol's disambiguate flag: VT input encodes
-//! Shift+Enter as a bare CR, the same byte as Enter, and the flag keeps the two apart, so
-//! Shift+Enter still inserts a newline. A terminal without the protocol ignores the push.
+//! The Windows console reader: VT input mode, so `ConPTY` passes bracketed pastes through.
 
 use std::io::{self, Write};
 use std::sync::{Mutex, PoisonError};
@@ -28,8 +15,7 @@ use super::vt::VtInput;
 
 use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
-/// The open console and the parser state between reads. `None` while the terminal is released,
-/// so an editor's leftovers never parse as the review's input.
+/// The console and parser state; `None` while released, so an editor's leftovers never parse.
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
 
 struct Reader {
@@ -38,11 +24,7 @@ struct Reader {
     vt: VtInput,
 }
 
-/// Switch the console to VT input and ask the terminal for SGR mouse reports and disambiguated
-/// keys.
-///
-/// Runs after crossterm's mouse capture, which overwrites the whole console input mode, so the
-/// VT flag lands on top of it. `claim_terminal` reruns it after an editor hands the pane back.
+/// VT input, plus SGR mouse reports and disambiguated keys, after crossterm's own claims.
 pub(crate) fn claim() {
     set_vt_input(true);
     let mut sequence = String::new();
@@ -90,14 +72,10 @@ fn with_reader<T>(f: impl FnOnce(&mut Reader) -> io::Result<T>) -> io::Result<T>
 }
 
 impl Reader {
-    /// Read the console until an event is parsed or `deadline` passes.
-    ///
-    /// The console is checked at least once, so a zero timeout still sees input already queued.
+    /// Read the console until an event parses or `deadline` passes.
     fn poll(&mut self, deadline: Option<Instant>) -> io::Result<bool> {
         loop {
-            // Input already queued is read before an open paste's bound can close it: a frame
-            // that ran past the bound must not cut a paste whose rest is waiting, or that rest
-            // would run as keys.
+            // Queued input is read before an open paste's bound can close it.
             while wait_for_input(&self.handle, Some(Duration::ZERO))? {
                 self.read_records()?;
             }
@@ -105,8 +83,7 @@ impl Reader {
             if self.vt.has_events() {
                 return Ok(true);
             }
-            // An open paste's bound wakes the wait too, so it closes on time. Only the wait
-            // counts toward it: the time a frame took to draw is no gap in the input.
+            // Only the wait counts toward an open paste's bound, never a frame's draw.
             let started = Instant::now();
             let left = deadline.map(|deadline| deadline.saturating_duration_since(started));
             let input =
@@ -142,10 +119,7 @@ impl Reader {
     }
 }
 
-/// Wait until the console has input or `timeout` passes. `None` waits indefinitely.
-///
-/// The one call no safe wrapper offers: crossterm keeps its own wait private, and a reader
-/// thread blocked in `ReadConsoleInputW` would steal the keys of an editor given the pane.
+/// Wait until the console has input or `timeout` passes; crossterm keeps its own wait private.
 #[allow(unsafe_code)]
 fn wait_for_input(handle: &Handle, timeout: Option<Duration>) -> io::Result<bool> {
     use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
@@ -155,8 +129,7 @@ fn wait_for_input(handle: &Handle, timeout: Option<Duration>) -> io::Result<bool
     let millis = timeout.map_or(INFINITE, |timeout| {
         u32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(INFINITE - 1)
     });
-    // SAFETY: the handle is the open console input handle `Handle` owns and keeps open for this
-    // call, and the call takes no pointers.
+    // SAFETY: `Handle` owns the open console handle for this call, which takes no pointers.
     match unsafe { WaitForSingleObject((**handle).cast(), millis) } {
         WAIT_OBJECT_0 => Ok(true),
         WAIT_TIMEOUT => Ok(false),

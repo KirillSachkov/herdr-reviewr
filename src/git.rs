@@ -11,11 +11,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::model::{ChangeKind, ChangedFile};
 
-/// Every git process reviewr runs, in `repo`. Nothing here may write the real index (the
-/// **No writes** invariant): `git diff` would otherwise refresh a stat-dirty entry and take
-/// `index.lock` under the agent's own `git add`, and `GIT_OPTIONAL_LOCKS=0` turns off the same
-/// opportunistic write in `status`. A run that needs the refresh runs on an [`IndexCopy`].
-/// `GIT_DIFF_OPTS` would override the full context the diff sides are read with.
+/// Every git process reviewr runs, read-only on the real index (**No writes**).
 fn git_command(repo: &Path) -> std::process::Command {
     #[cfg(test)]
     GIT_COMMANDS.with(|n| n.set(n.get() + 1));
@@ -106,17 +102,12 @@ pub fn is_repo(path: &Path) -> bool {
     git_ok(path, &["rev-parse", "--is-inside-work-tree"])
 }
 
-/// `core.editor` for `repo` from any config level, or `None` when no level sets it. Git for
-/// Windows' installer writes it, and `$EDITOR` is rarely set there, so it is the editor most
-/// Windows users picked. reviewr reads it last, after the `editor` key, `$VISUAL`, and `$EDITOR`
-/// (`editor::resolve`). git's own order differs: `$GIT_EDITOR`, then `core.editor`, then
-/// `$VISUAL`, then `$EDITOR`.
+/// `core.editor` from any config level: the editor most Windows users set.
 pub fn core_editor(repo: &Path) -> Option<String> {
     git_line(repo, &["config", "--get", "core.editor"])
 }
 
-/// The git top-level of `path`, or `None` if it is not a repo. Collapses "git ran and said no"
-/// and "git could not run" — use [`worktree_of`] when that difference matters.
+/// `path`'s git top level, `None` for no repo or no git ([`worktree_of`] tells them apart).
 pub fn toplevel(path: &Path) -> Option<PathBuf> {
     match worktree_of(path) {
         Worktree::Root(root) => Some(root),
@@ -510,8 +501,7 @@ fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> 
         .map_err(|e| GitFail(git_error(args, "could not run", e)))
 }
 
-/// Run git where exit 0 is a value, exit 1 is a designated clean absence (`--verify
-/// --quiet`, `symbolic-ref --quiet`, `cat-file -e`), and anything else is a failure.
+/// Run git where exit 1 is a designated clean absence and anything else past 0 a failure.
 fn git_tristate(repo: &Path, args: &[&str]) -> Result<Option<String>, GitFail> {
     let out = run_git(repo, args)?;
     if out.status.success() {
@@ -1347,13 +1337,7 @@ pub fn file_content(repo: &Path, rev: &str, path: &str) -> String {
     git_lenient(repo, &["show", &format!("{rev}:{path}")])
 }
 
-// --- diff sides ----------------------------------------------------------------
-//
-// A tracked file's two sides come from git: one full-context `git diff`, whose context and
-// `-` lines are the old side and whose context and `+` lines are the new side. git cleans the
-// worktree side the way every `git diff` does (line endings under `core.autocrlf` and the
-// `text`/`eol` attributes, `ident`, filter drivers, working-tree encoding), so the sides
-// compare exactly what `git diff` compares. reviewr never replays that step itself.
+// --- diff sides: both read from one full-context `git diff`, so they match what git compares.
 
 /// One file's diff sides, or git's verdict that the change has no text diff.
 #[derive(Debug, PartialEq, Eq)]
@@ -1378,8 +1362,7 @@ pub enum Origin<'a> {
 }
 
 impl<'a> Origin<'a> {
-    /// The origin of a changeset entry of `kind` with `previous_path`. Only a rename or a
-    /// copy has a source, so any other kind reads at its own path.
+    /// Only a rename or copy has a source; any other kind reads at its own path.
     pub fn of(kind: ChangeKind, previous_path: Option<&'a str>) -> Self {
         match (kind, previous_path) {
             (ChangeKind::Renamed, Some(source)) => Self::Renamed(source),
@@ -1389,12 +1372,7 @@ impl<'a> Origin<'a> {
     }
 }
 
-/// `path`'s diff sides from the tree-ish `old` to the tree-ish `new`, or to the worktree when
-/// `new` is `None`, its old side read where `origin` says.
-///
-/// One `git diff`. A second, a `git show`, only where that diff spells no side: a rename's or
-/// copy's source, and a file git reports no line of (a mode change), whose two sides are the
-/// one blob. An error is a git that could not answer: a missing revision, an unborn `HEAD`.
+/// `path`'s sides from `old` to `new` (the worktree when `None`), the old side read per `origin`.
 pub fn diff_sides(
     repo: &Path,
     old: &str,
@@ -1402,17 +1380,14 @@ pub fn diff_sides(
     path: &str,
     origin: Origin<'_>,
 ) -> Result<DiffSides> {
-    // Context as wide as the byte budget holds every line of a file the diff can render
-    // (each line is at least a byte), so the one hunk is the whole file. A file past the
-    // budget renders its too-large notice, whatever part of it this reads.
+    // Context this wide makes the one hunk the whole file.
     let source = match origin {
         Origin::Same => path,
         Origin::Renamed(source) | Origin::Copied(source) => source,
     };
     let context = format!("-U{}", crate::diff::MAX_BYTES);
     let mut args = vec![
-        // An empty context line prints as a lone space, the form unified diff defines, whatever
-        // the user set; the parser reads a bare newline too.
+        // An empty context line prints as a lone space, whatever the user set.
         "-c",
         "diff.suppressBlankEmpty=false",
         // A path is a path, never a glob: `a[1].txt` must not match `a1.txt`.
@@ -1422,8 +1397,7 @@ pub fn diff_sides(
         "--no-ext-diff",
         "--no-textconv",
         "--ignore-submodules",
-        // A rename spells its source as a deleted file and its target as an added one, so
-        // even a pure rename prints both sides in full.
+        // So even a pure rename prints both sides in full.
         "--no-renames",
         &context,
         old,
@@ -1436,9 +1410,7 @@ pub fn diff_sides(
         DiffSides::Text { old: text.clone(), new: text }
     };
     Ok(match (parse_sides(&out), origin) {
-        // A rename's or copy's target diffs as a new file, and its old side is the source's
-        // blob, read rather than diffed: whatever stands at the source path now (a copy's
-        // source, a re-created file) is another file's change.
+        // A rename's or copy's old side is its source blob, never what stands at that path now.
         (
             Some(DiffSides::Text { new: text, .. }),
             Origin::Renamed(source) | Origin::Copied(source),
@@ -1451,8 +1423,7 @@ pub fn diff_sides(
     })
 }
 
-/// A unified diff's hunk header, `@@ -l,s +l,s @@`: each side's (first line, line count),
-/// a count of one left out.
+/// A hunk header `@@ -l,s +l,s @@`: each side's (first line, count).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HunkHeader {
     pub old: (usize, usize),
@@ -1474,11 +1445,7 @@ impl HunkHeader {
     }
 }
 
-/// The sides a full-context `git diff` spells, `None` when it printed no hunk (the sides are
-/// equal). Each hunk header counts its lines, so a body line is never mistaken for a header:
-/// `--- x` inside a hunk is the deletion of `-- x`. `\ No newline at end of file` takes the
-/// newline off the line before it, on the side or sides that line belongs to. A CR git keeps
-/// (under `-text`) stays in the line's text.
+/// The sides a full-context `git diff` spells, `None` when it printed no hunk.
 fn parse_sides(out: &str) -> Option<DiffSides> {
     let (mut old, mut new) = (String::new(), String::new());
     let mut hunks = false;
@@ -1523,18 +1490,12 @@ fn parse_sides(out: &str) -> Option<DiffSides> {
     hunks.then_some(DiffSides::Text { old, new })
 }
 
-// --- base pick (branch scope) --------------------------------------------------
-//
-// One revision spelling per worktree: a blob under `refs/worktree/reviewr/base-pick`.
-// Git isolates that namespace, so sibling worktrees do not share a pick.
+// --- base pick: one spelling per worktree, a blob under a worktree-private ref.
 
 const BASE_PICK_REF: &str = "refs/worktree/reviewr/base-pick";
 const TURN_BASE_REF: &str = "refs/worktree/reviewr/turn-base";
 
-/// The recorded pick's spelling, or `None` when no pick is recorded. One git call, so a
-/// concurrent write from another pane of this worktree can never split the read the way
-/// an exists-then-read pair would; a failed read is no pick, matching the chain's
-/// skip-never-error contract.
+/// The recorded pick's spelling in one git call, `None` when none is recorded or readable.
 pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     let out = run_git(repo, &["cat-file", "blob", BASE_PICK_REF])?;
     if !out.status.success() {
@@ -1545,16 +1506,14 @@ pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     Ok(pick_spelling_shaped(name).then(|| name.to_string()))
 }
 
-/// One printable line, not a git option. `HEAD~1` and a tag are
-/// picks. Control bytes are not.
+/// One printable line, not a git option.
 fn pick_spelling_shaped(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')
         && value.bytes().all(|byte| byte > b' ' && byte != 0x7f)
 }
 
-/// Shape of a branch name the origin-then-local walk will accept. `HEAD` and rev-walk
-/// spellings (`HEAD~1`) are not: git would parse them through `origin/HEAD`.
+/// A branch name the origin-then-local walk accepts; never `HEAD` or a rev-walk spelling.
 fn branch_name_shaped(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('-')
@@ -1626,10 +1585,7 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 // a temporary index, never touching the real index, the worktree, or any branch, and
 // persists the baseline at `refs/worktree/reviewr/turn-base`.
 
-/// A non-disruptive snapshot of the worktree as a tree object: `add -A` and `write-tree` on
-/// an [`IndexCopy`], so unchanged files keep their cached hash. Captures staged, unstaged,
-/// and untracked content alike. Touches only the object database and the copy, never the
-/// real index or any ref.
+/// The worktree as a tree object, via `add -A` on a private [`IndexCopy`].
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     IndexCopy::with(repo, Purpose::Snapshot, |index| {
         index.git(repo, &["add", "-A"])?;
@@ -1637,8 +1593,7 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     })
 }
 
-/// What an [`IndexCopy`] is for. A snapshot's `add -A` stages untracked files into its copy,
-/// which a worktree diff would then take for tracked ones, so the two never share a copy.
+/// A snapshot stages untracked files, so it never shares the diff's copy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Purpose {
     Diff,
@@ -1648,23 +1603,13 @@ enum Purpose {
 /// The prefix of every index copy's directory in the OS temp dir.
 const COPY_PREFIX: &str = "reviewr-index-";
 
-/// A private copy of the worktree's index, in a private directory of the OS temp dir, named to
-/// git by `GIT_INDEX_FILE` for the runs that write an index: a snapshot's `add`, and the
-/// refresh a worktree diff needs to tell a touched file from a changed one. git writes only
-/// the copy (the **No writes** invariant).
-///
-/// A copy lives for the session, one per worktree and [`Purpose`], and is copied again only
-/// when the real index changes, so the refresh git writes into it holds: a file touched with
-/// the same content is hashed once, not on every poll. A run that finds its copy busy takes a
-/// fresh one for itself instead of waiting. The directory holds an OS-locked `lock` file for
-/// as long as the copy lives, so a later run can tell a killed process's leftover (unlocked)
-/// from a live copy and sweep it.
+/// A session-long private index copy in the OS temp dir, refreshed by git, never the real index.
+/// Re-copied only when the real index changes; its `lock` marks it live for the sweep.
 struct IndexCopy {
     dir: tempfile::TempDir,
     /// The lock that marks this copy live, released on drop or with the process.
     _live: std::fs::File,
-    /// The real index's (mtime, size) when it was last copied; `None` before the first copy,
-    /// or while the repository has no index.
+    /// The real index's (mtime, size) at the last copy.
     seeded: Option<(std::time::SystemTime, u64)>,
 }
 
@@ -1712,8 +1657,7 @@ impl IndexCopy {
             .prefix(COPY_PREFIX)
             .tempdir()
             .context("creating the index copy")?;
-        // Locked under a temporary name, then renamed into place, so a sweep never finds a
-        // `lock` file that is not yet held.
+        // Locked before it is named `lock`, so a sweep never takes a live copy.
         let pending = dir.path().join("lock.new");
         let live = std::fs::File::create(&pending).context("creating the copy's lock")?;
         live.lock().context("locking the index copy")?;
@@ -1723,11 +1667,7 @@ impl IndexCopy {
 
     /// Copy the real index again if it changed since the last copy.
     fn seed(&mut self, real: &Path) -> Result<()> {
-        // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
-        // older than its index gets its content compared, since a same-size edit in that tick
-        // matches every stat field. A copy stamped now would pass that edit as clean. Read
-        // before the copy: an index the agent swaps in meanwhile is newer, so the stamp errs
-        // old, the safe side, never new.
+        // The copy keeps the index's mtime, which git's racy-clean check reads.
         let stamp = match std::fs::metadata(real) {
             Ok(meta) => (meta.modified().context("reading the index's mtime")?, meta.len()),
             // A fresh repository has no index yet, and git reads a missing one as empty.
@@ -1742,8 +1682,7 @@ impl IndexCopy {
         if self.seeded == Some(stamp) {
             return Ok(());
         }
-        // Read through a handle that shares delete, so the agent's git can still rename a new
-        // index over the real one while this copies it.
+        // Shares delete, so the agent's git can still replace the real index meanwhile.
         let mut from = std::fs::File::open(real).context("opening the index")?;
         let mut to = std::fs::File::create(self.path()).context("creating the index copy")?;
         std::io::copy(&mut from, &mut to).context("copying the index")?;
@@ -1757,8 +1696,7 @@ impl IndexCopy {
         self.dir.path().join("index")
     }
 
-    /// Like [`git`], on the copy, with the diff refresh on: a stat-dirty entry whose content
-    /// is unchanged drops out of the diff, as in the reviewer's own `git diff`.
+    /// Like [`git`], on the copy, with the diff refresh on.
     fn git(&self, repo: &Path, args: &[&str]) -> Result<String> {
         let mut cmd = git_command(repo);
         cmd.args(["-c", "diff.autoRefreshIndex=true"]).env("GIT_INDEX_FILE", self.path());
@@ -1766,9 +1704,7 @@ impl IndexCopy {
     }
 }
 
-/// Remove the index copies whose owner is gone: a copy's `lock` is held for as long as its
-/// process lives, so one this can take was left by a process that died without its cleanup.
-/// A directory with no `lock` yet is skipped, never taken for dead.
+/// Remove copies whose `lock` is free: their process died without cleanup.
 fn sweep_dead_copies() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
     for entry in entries.flatten() {
@@ -1801,8 +1737,7 @@ pub fn read_baseline_ref(repo: &Path) -> Option<String> {
     git_line(repo, &["rev-parse", "--verify", "--quiet", TURN_BASE_REF])
 }
 
-/// Persist the turn baseline tree under this worktree's private ref. `update-ref` is
-/// atomic, so the baseline is never half-written.
+/// Persist the turn baseline atomically under this worktree's private ref.
 pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
     git(repo, &["update-ref", TURN_BASE_REF, sha])?;
     Ok(())
@@ -1811,29 +1746,23 @@ pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
 /// git's well-known empty-tree object, used as the diff base when a repo has no commits.
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// The commit `HEAD` names, else the empty tree in a repository with no commits: the old end
-/// of the `uncommitted` scope. An oid, never the name `HEAD`, so a file's diff reads the same
-/// tree its counts came from even after `HEAD` moves.
+/// `HEAD`'s oid, else the empty tree: the old end of `uncommitted`.
 pub fn diff_base(repo: &Path) -> String {
     head_oid(repo).unwrap_or_else(|| EMPTY_TREE.to_string())
 }
 
-/// The changed files from the tree-ish `base` to the worktree, untracked files included,
-/// sorted by path: the changeset of the `uncommitted` and `branch` scopes.
+/// The changeset from `base` to the worktree, untracked files included.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
     let out = IndexCopy::with(repo, Purpose::Diff, |index| index.git(repo, &diff_args(&[base])))?;
     assemble(repo, &out, true)
 }
 
-/// The changed files between two trees, `old` against `new`: the `commits` scope's run, and
-/// `last-turn`'s baseline against a worktree snapshot. Both sides are trees, so no untracked
-/// pass runs. `old` may be the empty tree for a root commit.
+/// The changeset between two trees: `commits`, and `last-turn` against its snapshot.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
     assemble(repo, &git(repo, &diff_args(&[old, new]))?, false)
 }
 
-/// The one `git diff` a changeset reads, between `ends`: each path's raw record (its status,
-/// rename source, and blobs), then its line counts, in one run.
+/// One `git diff` per changeset: raw records, then line counts.
 fn diff_args<'a>(ends: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec!["diff"];
     args.extend(ends);
@@ -1841,11 +1770,7 @@ fn diff_args<'a>(ends: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
-/// `sha`'s first parent, or the empty tree when `sha` is a root commit: the old side of a
-/// run whose oldest commit is `sha`. `None` when the
-/// commit itself is missing. The parent is read from the raw commit object, so a parent the
-/// repository lacks (a shallow clone's cut) is named, not mistaken for a root: the caller's
-/// existence check then reports it `gone`.
+/// `sha`'s first parent, or the empty tree for a root; a missing parent is named, not taken for a root.
 pub fn parent_or_empty(repo: &Path, sha: &str) -> Option<String> {
     let object = git(repo, &["cat-file", "-p", &format!("{sha}^{{commit}}")]).ok()?;
     let parent = object
@@ -1856,8 +1781,7 @@ pub fn parent_or_empty(repo: &Path, sha: &str) -> Option<String> {
     Some(parent.to_string())
 }
 
-/// The commit `HEAD` names, or `None` in an unborn repository. The commit picker's universe
-/// is keyed by it, so a poll re-lists only when it moved.
+/// `HEAD`'s commit, `None` while unborn.
 pub fn head_oid(repo: &Path) -> Option<String> {
     git_line(repo, &["rev-parse", "--verify", "-q", "HEAD"])
 }
@@ -1872,21 +1796,18 @@ pub fn commit_exists(repo: &Path, sha: &str) -> bool {
     git_ok(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")])
 }
 
-/// Whether `sha` is reachable from `HEAD` (`off branch`). A missing
-/// commit is unreachable.
+/// Whether `sha` is reachable from `HEAD`; a missing commit is not.
 pub fn is_reachable(repo: &Path, sha: &str) -> bool {
     git_ok(repo, &["merge-base", "--is-ancestor", sha, "HEAD"])
 }
 
-/// How many commits `oldest..=newest` spans along the first-parent walk from `newest`
-/// `None` when either end is missing, or `oldest` is not behind `newest`.
+/// Commits in `oldest..=newest` along `newest`'s first parents, `None` when not a run.
 pub fn run_length(repo: &Path, oldest: &str, newest: &str) -> Option<usize> {
     let old = parent_or_empty(repo, oldest)?;
     run_length_from(repo, &old, oldest, newest)
 }
 
-/// [`run_length`] with `oldest`'s parent already resolved, so a build that has it spawns
-/// nothing twice.
+/// [`run_length`] with `oldest`'s parent already resolved.
 pub fn run_length_from(repo: &Path, old: &str, oldest: &str, newest: &str) -> Option<usize> {
     if oldest == newest {
         return Some(1);
@@ -1903,9 +1824,7 @@ pub fn run_length_from(repo: &Path, old: &str, oldest: &str, newest: &str) -> Op
     git_line(repo, &args)?.parse().ok()
 }
 
-/// One row of the commit picker: the full id, the subject,
-/// the committer time as unix seconds, the author, the refs pointing at it, and whether it
-/// is a merge.
+/// One commit picker row.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CommitRow {
     pub sha: String,
@@ -1917,8 +1836,7 @@ pub struct CommitRow {
     pub merge: bool,
 }
 
-/// A ref a picker row can show, by kind, so the row's one ref ranks by what it is rather
-/// than by how it is spelled.
+/// A ref a picker row shows, ranked by kind, not by spelling.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CommitRef {
     /// A remote-tracking tip, shown as `origin/feature`.
@@ -2014,9 +1932,7 @@ pub struct WorktreeEntry {
 /// placeholder, an individually-ignored file as itself. `.git` is never reported. Deduped and
 /// sorted; `-z` keeps paths with spaces or special characters verbatim.
 pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
-    // One spawn for tracked + untracked. `--others --exclude-standard` applies the same
-    // standard exclude rules as the untracked pass `changed_from` runs, so the
-    // untracked sets match without a status walk.
+    // Tracked and untracked in one spawn, with the same excludes `changed_from` uses.
     let listed = git(repo, &["ls-files", "--cached", "--others", "--exclude-standard", "-z"])?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -2080,10 +1996,7 @@ pub fn list_ignored_dir(repo: &Path, dir: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// Build the sorted `ChangedFile` list from one `git diff --raw --numstat` ([`diff_args`]). A `worktree`
-/// diff's new side is the worktree, sized when it is read, and it appends the untracked files
-/// a `git diff` never reports. Every blob is sized here, on the world worker, by object id: a
-/// file's diff then knows whether its sides fit the render budget before reading either.
+/// The sorted changeset from one [`diff_args`] run, untracked files appended for a worktree diff.
 fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> {
     let (rows, numstat) = parse_raw(out);
     let counts = parse_numstat(numstat);
@@ -2155,18 +2068,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
     Ok(files)
 }
 
-/// Of `paths`, those whose `diff` attribute git reports as unset — `-diff`, or the `binary`
-/// macro that implies it. Empty when `paths` is, so a repository with nothing untracked pays
-/// nothing. A `diff=<driver>` whose driver sets `binary` counts only once the path is tracked,
-/// where `--numstat` reports it.
-///
-/// One `check-attr` for the whole set, never one per path — the same rule
-/// [`untracked_additions`] follows, and for the same reason. Only untracked paths come here:
-/// a tracked path already carries git's verdict in its `--numstat` record, at no cost.
-///
-/// Under `-z` the answer is `PATH\0diff\0VALUE\0` per path, and the input must be
-/// NUL-terminated too — a newline-separated list makes git read the newline as part of the
-/// path and answer `unspecified` for every one of them.
+/// Of untracked `paths`, those whose `diff` attribute is unset, in one `check-attr -z`.
 fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
     if paths.is_empty() {
         return Ok(HashSet::new());
@@ -2189,19 +2091,10 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
     Ok(unset)
 }
 
-/// git's default `core.bigFileThreshold`: past it git takes a file for binary without reading
-/// it.
+/// git's default `core.bigFileThreshold`, past which it calls a file binary unread.
 const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
-/// Addition count of an untracked file: its line count, which is what `git diff` against
-/// nothing reports. `None` where git would report no countable diff — binary content, or a
-/// file past git's default [`BIG_FILE_THRESHOLD`] — matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
-/// shelling `git diff --no-index` per file — with `--untracked-files=all` a large untracked
-/// tree would otherwise fork git once per file on every poll and freeze the UI.
-///
-/// This is the content half of the untracked verdict only. An untracked path never reaches a
-/// `git diff`, so no numstat speaks for it; [`diff_unset`] asks git for the attribute half
-///.
+/// An untracked file's line count, `None` where git would call it binary.
 fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     use std::io::Read;
     let at = repo.join(path);
@@ -2209,9 +2102,7 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
         return Some(0);
     };
-    // git takes a file past its default threshold for binary without reading it, and so does
-    // this, so a huge log costs a build nothing. A `diff` attribute set on the path, or a
-    // threshold the repository raised, would make git read it; here it still reads as binary.
+    // Past git's threshold: binary, unread.
     if meta.len() > BIG_FILE_THRESHOLD {
         return None;
     }
@@ -2243,18 +2134,7 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
 
-/// Map of new-path to its line counts from `git diff --numstat -z`, `None` where git
-/// reports no countable diff — the `-`/`-` record.
-///
-/// Under `-z` a non-rename record is `ADDS\tDELS\tPATH\0`; a rename/copy record is
-/// `ADDS\tDELS\t\0OLD\0NEW\0` — the counts ride the front, then old and new arrive as
-/// their own NUL fields (no `=>` arrow, no brace factoring). The counts key under the new
-/// path, matching `parse_raw`.
-///
-/// `-`/`-` is git's own no-text-diff verdict, and it already accounts for `.gitattributes`:
-/// binary content, an unset `diff` attribute (`-diff`, or the `binary` macro), and a driver
-/// git will not text-diff all land there. Reading it as `0`/`0` — as this once did — loses
-/// that verdict and leaves a `-diff` file to be diffed as text anyway.
+/// New path to line counts from `git diff --numstat -z`; `None` is git's `-`/`-` binary verdict.
 fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
     let mut map = HashMap::new();
     let mut it = out.split('\0');
@@ -2299,11 +2179,7 @@ struct RawRow {
     new_oid: String,
 }
 
-/// The raw records that lead `git diff --raw --numstat --no-abbrev -z`, and the numstat
-/// records after them. Each raw record is `:MODE MODE OID OID STATUS\0PATH\0`, except a rename
-/// or copy, `:… R<score>\0OLD\0NEW\0`, which takes the new path and carries its old one; every
-/// other kind has `previous_path == None`. The first field not opening with `:` starts the
-/// numstat, which no raw path can be mistaken for: a path follows its record's meta field.
+/// The raw records of a [`diff_args`] run, and the numstat records after them.
 fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
     /// One NUL-terminated field off the front of `rest`.
     fn field<'a>(rest: &mut &'a str) -> Option<&'a str> {
@@ -2342,9 +2218,7 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
     (rows, rest)
 }
 
-/// The size of each blob in `oids`, by object id, which no path can garble. A blob's size is
-/// fixed for its id, so each is asked once per session, in one `cat-file` per build for the
-/// ids it has not seen. An all-zeros id (no blob) is left out, and reads as none.
+/// Each blob's size by id, asked once per session.
 fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
     static KNOWN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Mutex::default);
@@ -2419,9 +2293,7 @@ mod tests {
         // A plain directory git can read but that holds no worktree.
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(worktree_of(outside.path()), Worktree::Outside);
-        // A real worktree resolves to its root. Compare through std canonicalization, an oracle
-        // independent of `worktree_of`: both sides resolve the temp dir's symlinks, and on
-        // Windows git's `C:/…` and std's `\\?\C:\…` spell the same directory.
+        // Compared through std canonicalization, an oracle independent of `worktree_of`.
         let repo = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -2439,9 +2311,7 @@ mod tests {
 
     #[test]
     fn core_editor_reads_the_configured_value_verbatim() {
-        // The repository's own level outranks whatever the machine's global config says, so
-        // this reads the same on every runner. The value keeps its quotes: splitting it is the
-        // editor module's job.
+        // The repository's own level, so the test reads the same on every runner.
         let repo = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let status =
@@ -2858,8 +2728,7 @@ mod tests {
         };
         let header = "diff --git a/f b/f\nindex 1..2 100644\n--- a/f\n+++ b/f\n";
         let cases: &[(&str, Option<DiffSides>)] = &[
-            // Context lands on both sides, `-` on the old, `+` on the new. A body line that
-            // looks like a header is still body: here the deletion of `-- x`.
+            // A body line that looks like a header is still body.
             (" a\n--- x\n+b\n c\n", text("a\n-- x\nc\n", "a\nb\nc\n")),
             // A bare newline is an empty context line.
             (" a\n\n-b\n", text("a\n\nb\n", "a\n\n")),

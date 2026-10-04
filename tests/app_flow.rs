@@ -9574,8 +9574,7 @@ fn quitting_with_unsent_comments_asks_first() {
 
 // --- Diff sides from git ----------------------------------------------
 
-/// `git diff`'s changed lines for `path` against `rev`, a line-ending CR spelled as the
-/// marker reviewr paints for it. Split on `\n` alone, so a CR survives to be spelled.
+/// `git diff`'s changed lines for `path`, a kept CR spelled as reviewr's marker.
 fn git_changed_lines(r: &Repo, rev: &str, path: &str) -> Vec<String> {
     let out = r.git(&["diff", "--no-color", rev, "--", path]);
     out.split('\n')
@@ -9604,9 +9603,7 @@ fn loose_objects(r: &Repo) -> String {
     r.git(&["count-objects"]).split(' ').next().unwrap_or_default().to_string()
 }
 
-/// Whether reviewr's change rows say what `git diff` says: the same lines, a painted marker
-/// only where git's line has the CR. An unpaired line keeps its CR unpainted, since it has no
-/// old ending to have changed from.
+/// Whether reviewr's change rows say what `git diff` says.
 fn rows_agree_with_git(rows: &[String], git: &[String]) -> bool {
     let cr = herdr_reviewr::diff::CR_MARKER;
     rows.len() == git.len()
@@ -9615,8 +9612,7 @@ fn rows_agree_with_git(rows: &[String], git: &[String]) -> bool {
 
 #[test]
 fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
-    // `core.autocrlf=true`, as Git for Windows installs it. Set per repo, so the scenario
-    // runs the same on every OS. The agent rewrites a committed file.
+    // `core.autocrlf=true` per repo, as Git for Windows installs it.
     const BASE: &str = "one\ntwo\nthree\n";
     const CRLF: &str = "one\r\ntwo\r\nthree\r\n";
     const CRLF_EDIT: &str = "one\r\nTWO\r\nthree\r\n";
@@ -9644,8 +9640,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
             "one x\r\nTWO\r\nthree\r\n",
             &["-one\rx", "-two", "+one x", "+TWO"],
         ),
-        // A blob committed with its CRLFs beside a lone CR is binary to git, so its CRLFs
-        // don't keep the rewrite's: every line changed, and the one twin line shows its CR.
+        // A blob with CRLFs beside a lone CR is binary to git: every line changes.
         (
             "",
             "one\rx\r\ntwo\r\nthree\r\n",
@@ -9690,8 +9685,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
             }
         }
 
-        // Every view of the file reads it as is, the highlighter drops each ending CR, and a
-        // content comment's export carries no CR.
+        // Every view reads the file as is, and no export carries a CR.
         enter_tab(&mut app, herdr_reviewr::app::Tab::AllFiles);
         app.select_file(file_row_of(&app, "a.txt").expect("a.txt listed")).unwrap();
         let lines: Vec<String> = app.visible.iter().map(Row::text).collect();
@@ -9727,8 +9721,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
         // No writes: reviewr asked git for the diff and stored nothing.
         assert_eq!(loose_objects(&r), objects, "{case}");
 
-        // `last-turn` reads the baseline against the snapshot its changeset came from (a
-        // snapshot is the turn tracker's own write, so it comes after the no-writes check).
+        // `last-turn` reads the baseline against its changeset's snapshot.
         enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
         app.sync_turn_baseline(Some(baseline));
         app.set_scope(Scope::LastTurn).unwrap();
@@ -9743,9 +9736,7 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
 
 #[test]
 fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
-    // The file is in neither `HEAD` nor the index, only in the turn's snapshots: a diff of
-    // the baseline against the worktree would call it deleted. Under autocrlf the agent's
-    // CRLF rewrite is one edited line, as the changeset counts it.
+    // A file only in the turn's snapshots is one edited line, never deleted.
     let r = Repo::init();
     r.git(&["config", "core.autocrlf", "true"]);
     r.write("a.txt", "a\n");
@@ -9764,10 +9755,7 @@ fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
 
 #[test]
 fn a_file_diff_reads_the_trees_its_counts_came_from() {
-    // A new turn's baseline lands from any completion, a superseded one included, ahead of
-    // the changeset built against it. Until that changeset lands, a file opened now still
-    // diffs the landed baseline against the landed snapshot, the trees its counts came from:
-    // never the new baseline against the old snapshot, which reads the turn backwards.
+    // A file opened before the new changeset lands diffs the landed trees, never a mixed pair.
     let r = Repo::init();
     r.write("a.txt", "one\n");
     r.write("b.txt", "one\n");

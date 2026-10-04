@@ -73,16 +73,12 @@ impl Highlighter {
         Self { theme, default_fg }
     }
 
-    /// Highlight `content` line by line: [`highlight_lines`](Self::highlight_lines) over its
-    /// [`lines`](crate::diff::lines).
+    /// Highlight `content` line by line.
     pub fn highlight(&self, content: &str, language: Option<&str>) -> Vec<Vec<Span>> {
         self.highlight_lines(&crate::diff::lines(content), language)
     }
 
-    /// Highlight `lines`, each a line with its ending, into one `Vec` of spans per line. With no
-    /// known `language` — or no loaded theme — every line is a single plain span in the
-    /// default color. `language` matches as an extension first (paths), then as a token
-    /// name (markdown fence tags like `rust` or `python`).
+    /// Highlight `lines` into spans per line, plain with no known language or theme.
     pub fn highlight_lines(&self, lines: &[&str], language: Option<&str>) -> Vec<Vec<Span>> {
         let syntaxes = syntaxes();
         let syntax = language.and_then(|lang| {
@@ -102,8 +98,7 @@ impl Highlighter {
         let mut h = HighlightLines::new(syntax, theme);
         let mut out = Vec::new();
         for &line in lines {
-            // The newline syntaxes expect each line to end in `\n`, so a line that ended in a
-            // CR highlights as its LF form.
+            // A CR-ended line highlights as its LF form.
             let text = crate::diff::line_body(line).0;
             let line: Cow<'_, str> = if line[text.len()..].starts_with('\r') {
                 Cow::Owned(format!("{text}\n"))
@@ -163,8 +158,7 @@ mod tests {
         let text = |lines: Vec<Vec<super::Span>>| -> Vec<String> {
             lines.iter().map(|l| l.iter().map(|s| s.text.as_str()).collect()).collect()
         };
-        // Highlighted and plain alike: a CRLF line, an LF line, a final bare CR. A CR inside
-        // a line is content and stays.
+        // A CRLF line, an LF line, a final bare CR; an inner CR stays.
         let content = "let a = 1;\r\nlet b = 2;\nlet c\r= 3;\r";
         let want = ["let a = 1;", "let b = 2;", "let c\r= 3;"];
         assert_eq!(text(h.highlight(content, Some("rs"))), want);
@@ -178,10 +172,7 @@ mod tests {
 
     #[test]
     fn bundled_syntax_themes_all_parse() {
-        // Each bundled `.tmTheme` must load, or highlighting silently degrades to plain spans
-        // A loaded theme tokenizes rust into more than one span; a failed
-        // load would yield a single plain span — so this guards the parse path for every
-        // bundled theme, the only `SyntaxChoice` that can fail.
+        // Each bundled theme must load: a failed load would yield one plain span.
         for name in [
             "catppuccin",
             "tokyo-night",

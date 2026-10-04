@@ -341,16 +341,10 @@ enum CliError {
     Cancelled,
 }
 
-/// Run one prepared forge-CLI command to completion and return its stdout.
-///
-/// The CLI runs as the root of its own process tree, a process group on unix and a job object
-/// on Windows, so a cancel kills every descendant and not just the CLI. `az` on Windows is
-/// `az.cmd` running python: a grandchild left alive would hold the pipes open, and the readers
-/// below would never finish.
+/// Run one forge CLI in its own process tree, so a cancel kills every descendant.
 fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
     let mut cmd = CommandWrap::from(cmd);
-    // No stdin: the reviewer's terminal belongs to the pane, and a CLI in its own process
-    // group that read it would stop on SIGTTIN until cancelled.
+    // No stdin: the terminal belongs to the pane.
     cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     cmd.wrap(process_wrap::std::ProcessGroup::leader());
@@ -364,9 +358,7 @@ fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
         Err(error) => return Err(CliError::Io(error.to_string())),
     };
 
-    // Drain both pipes while polling so a large response cannot fill a pipe and block the
-    // child before it exits. A superseded config/fetch kills the process tree; the coordinator
-    // keeps ownership until this worker reports completion, preserving one real fetch in flight.
+    // Drain both pipes while polling, so a large answer cannot block the child.
     let mut stdout = child.stdout().take().expect("piped stdout");
     let mut stderr = child.stderr().take().expect("piped stderr");
     let stdout_reader = thread::spawn(move || {
@@ -379,9 +371,7 @@ fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
         let _ = stderr.read_to_end(&mut bytes);
         bytes
     });
-    // Done once the CLI has exited and both pipes have closed. A descendant can outlive the
-    // CLI with a pipe still open: once the CLI has exited its answer is whole, so the rest of
-    // the tree is ended, once, and the pipes close with it.
+    // Done once the CLI exits and its pipes close; a lingering descendant is ended once.
     let mut ended = false;
     let status = loop {
         if cancelled.load(Ordering::Acquire) {
@@ -2125,8 +2115,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-f", "o=owner"]));
     }
 
-    /// A provider that answers, starts a grandchild holding its pipes, then either waits on
-    /// it or exits. The grandchild alone would keep the pipes open for a minute.
+    /// A provider whose grandchild holds its pipes.
     #[cfg(unix)]
     fn provider_with_grandchild(_dir: &Path, ready: &Path, waits: bool) -> Command {
         let script = if waits {
@@ -2139,8 +2128,7 @@ mod tests {
         cmd
     }
 
-    /// The same provider as a batch file, the shape `az.cmd` has. The grandchild's stdout
-    /// goes nowhere, so the answer is the provider's alone. Its stderr is the held pipe.
+    /// The same provider as a batch file, the shape `az.cmd` has.
     #[cfg(windows)]
     fn provider_with_grandchild(dir: &Path, ready: &Path, waits: bool) -> Command {
         let mut script = String::from(
@@ -2157,8 +2145,7 @@ mod tests {
         cmd
     }
 
-    /// Run `cmd` as a fetch on its own thread, cancelled through `cancelled`. The result
-    /// arrives on the returned channel.
+    /// Run `cmd` as a fetch on its own thread, cancelled through `cancelled`.
     fn spawn_fetch(
         cmd: Command,
         cancelled: std::sync::Arc<AtomicBool>,
@@ -2178,8 +2165,7 @@ mod tests {
         let cancelled = std::sync::Arc::new(AtomicBool::new(false));
         let done = spawn_fetch(cmd, cancelled.clone());
 
-        // Cancel once the grandchild exists. Any earlier, the kill lands before the tree it
-        // has to reach.
+        // Cancel once the grandchild exists.
         let started = Instant::now();
         while !ready.exists() {
             assert!(started.elapsed() < Duration::from_secs(10), "never started");

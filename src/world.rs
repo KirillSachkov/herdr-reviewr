@@ -80,18 +80,14 @@ pub struct PickStatus {
     pub count: usize,
 }
 
-/// The two ends one changeset was diffed between: `old` a tree-ish, `new` another or `None`
-/// for the live worktree. A file's diff reads exactly these, so its rows come from the trees
-/// its counts came from, whatever moved since: `HEAD`, the merge base, the turn baseline.
-/// `None` where the scope lists nothing (no base, no baseline, a pruned pick).
+/// The ends a changeset was diffed between (`new` `None` for the worktree); a file's diff reads these.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffEnds {
     pub old: String,
     pub new: Option<String>,
 }
 
-/// The scope-dependent half of a build: the changeset and the base or pick it diffs against,
-/// landed together so the header and the list never disagree.
+/// A build's changeset and the base or pick it diffs against, landed together.
 #[derive(Debug)]
 pub struct ScopeBuild {
     pub branch_base: git::BaseStatus,
@@ -100,10 +96,7 @@ pub struct ScopeBuild {
     pub changed: Vec<ChangedFile>,
 }
 
-/// Build the snapshot for `input`. The changeset is computed regardless of tab so the
-/// header count and comment staleness stay correct while `All files` lists the whole
-/// worktree. In `last-turn` with no baseline yet, the changeset is empty until a turn
-/// start is observed.
+/// Build the snapshot for `input`; the changeset is built on every tab.
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     // Outside a git repo, an empty snapshot paints the quiet empty state rather than a
     // failing status line every poll.
@@ -129,9 +122,7 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     Ok(WorldSnapshot { changed: changed_map, entries, branch_base, pick_status, ends, head })
 }
 
-/// The active scope's changed files and, on the `branch` scope, the base they diff against —
-/// the piece a scope switch rebuilds before its frame, so the header count and list never
-/// wear another scope's label.
+/// The active scope's changeset and, on `branch`, its base.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     let plain = |changed| ScopeBuild {
         branch_base: git::BaseStatus::default(),
@@ -158,10 +149,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             Ok(ScopeBuild { ends: from(base, None), ..plain(changed) })
         }
         Scope::Branch => {
-            // A resolve failure fails the build whole, so the landing keeps the stale
-            // frame and reports — degrading to an empty snapshot would blank a populated
-            // view over a transient error (Continuity). A chain where
-            // nothing resolves is not a failure: it returns the legible no-base state.
+            // A resolve failure fails the build, keeping the stale frame.
             let resolution = git::resolve_base(&input.repo, input.base.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
             let merge_base = resolution
@@ -176,8 +164,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             Ok(ScopeBuild { branch_base: resolution.status, ends, ..plain(changed) })
         }
         Scope::Commits => {
-            // The scope is never entered without a pick; a tag without one
-            // builds the empty changeset rather than failing the landing.
+            // A tag without a pick builds the empty changeset.
             let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
             let (status, changed, old) = build_pick(&input.repo, pick)?;
             let ends = old.and_then(|old| from(old, Some(pick.newest.clone())));
@@ -186,10 +173,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     }
 }
 
-/// The pick's changeset and verdict in one pass: `gone`
-/// once any needed commit, `A^` included, is pruned, else `off branch` once any is
-/// unreachable from `HEAD`, else live. A `gone` pick has an empty changeset.
-/// The run's old end rides along: `None` once the pick is gone.
+/// The pick's changeset, verdict and old end in one pass; a `gone` pick has none.
 fn build_pick(
     repo: &Path,
     pick: &CommitPick,
@@ -309,11 +293,7 @@ fn worktree_cwd(cwd: Option<&str>) -> Option<&str> {
     cwd.filter(|c| Path::new(c).is_absolute())
 }
 
-/// Whether two git top levels name the same worktree. Windows paths ignore case, beyond ASCII
-/// too, and the two roots reach git from two cwds, reviewr's and the agent's, which can spell a
-/// drive letter or a folder in different case. A component that is not UTF-8 compares exactly.
-/// Elsewhere exact equality is the rule: on a case-sensitive file system `/work/Repo` and
-/// `/work/repo` are two worktrees.
+/// Whether two top levels name one worktree: case-insensitive on Windows, exact elsewhere.
 fn same_root(a: &Path, b: &Path) -> bool {
     if cfg!(windows) {
         let same = |x: &std::ffi::OsStr, y: &std::ffi::OsStr| match (x.to_str(), y.to_str()) {
@@ -327,9 +307,7 @@ fn same_root(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Fold the members' statuses into the worktree's work state and whether any member is present,
-/// or `None` if a member's membership was undetermined — the caller then holds the sample.
-/// Pure over the `member` resolver so the fold-and-hold rule is unit-testable without git.
+/// Fold the members' statuses, or `None` when any membership is undetermined.
 fn classify(
     samples: &[AgentSample],
     mut member: impl FnMut(&AgentSample) -> Membership,
@@ -542,8 +520,7 @@ mod tests {
 
     #[test]
     fn a_root_in_another_case_is_the_same_worktree_only_on_windows() {
-        // The literal pair, not git's output: git may already normalize case on a
-        // case-insensitive file system, and this pins the comparison itself.
+        // The literal pair, not git's output, pins the comparison itself.
         let same = |a: &str, b: &str| same_root(Path::new(a), Path::new(b));
         assert!(same("C:/Work/Repo", "C:/Work/Repo"));
         assert!(!same("C:/Work/Repo", "C:/Work/Other"));
@@ -553,8 +530,7 @@ mod tests {
         assert_eq!(same("/work/Repo", "/work/repo"), cfg!(windows));
     }
 
-    /// The membership row end to end on Windows: an agent whose cwd spells the reviewed root in
-    /// another case is a member.
+    /// An agent whose cwd spells the root in another case is a member.
     #[cfg(windows)]
     #[test]
     fn an_agent_at_the_root_in_another_case_is_a_member() {
@@ -577,9 +553,7 @@ mod tests {
 
     #[test]
     fn membership_decides_the_fold_and_undetermined_holds() {
-        // One working agent, resolved three ways. `Unknown` holds the sample (the caller reads
-        // this `None` exactly as a failed enumeration, never as an empty worktree); a determined
-        // verdict folds normally.
+        // One working agent, resolved three ways.
         let samples = [working_at("/w")];
         assert_eq!(classify(&samples, |_| Membership::Unknown), None);
         assert_eq!(
@@ -594,8 +568,7 @@ mod tests {
 
     #[test]
     fn one_undetermined_member_holds_even_beside_a_resolved_one() {
-        // A resolved working member does not rescue a sample that also holds an unknown one: an
-        // incomplete view of the worktree is held whole, not folded from the part that resolved.
+        // An unknown member holds the whole sample.
         let samples = [working_at("/a"), working_at("/b")];
         let held = classify(&samples, |s| match s.cwd.as_deref() {
             Some("/b") => Membership::Unknown,

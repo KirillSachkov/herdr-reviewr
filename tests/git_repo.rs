@@ -53,9 +53,7 @@ fn merge_base(repo: &Path, base: Option<&str>) -> Option<String> {
 
 #[test]
 fn a_diffs_sides_are_the_committed_blob_and_the_text_git_would_store() {
-    // git itself is the oracle: the old side is the committed blob, and the new side is what
-    // `git add` would store, the canonical form `git diff` compares. Every line-ending rule,
-    // `ident`, and a filter driver, read before the add that answers it.
+    // git is the oracle: the committed blob against what `git add` would store.
     let contents =
         ["a\r\nb\r\n", "a\nb\n", "a\r\nb\nc\r\n", "a\r\nb\rc\r\n", "a\r\nb", "$Id: x $\r\nb\r\n"];
     // core.autocrlf, .gitattributes, and the content each file was committed with.
@@ -120,8 +118,7 @@ fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob()
     let moved =
         diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("same.txt")).unwrap();
     assert_eq!(moved, text("same\n", "same\n"), "a pure rename: both sides are the blob");
-    // A rename whose source path is back, re-created and staged: only the rename's own
-    // sections spell its sides, never the new file at the old path.
+    // A re-created, staged source never joins the rename's sides.
     r.write("a.txt", "fresh\n");
     r.git(&["add", "a.txt"]);
     let renamed = diff_sides(r.path(), "HEAD", None, "b.txt", Origin::Renamed("a.txt")).unwrap();
@@ -144,9 +141,7 @@ fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob()
 
 #[test]
 fn a_path_the_diff_attribute_unsets_carries_gits_no_text_diff_verdict() {
-    // `.gitattributes` `-diff` makes git refuse to text-diff a path even though its bytes
-    // are text. The changeset must carry that verdict, not re-decide from content
-    //.
+    // `-diff` text is binary to git, and the changeset carries that verdict.
     let r = Repo::init();
     r.write(".gitattributes", "lock.txt -diff\n");
     r.write("lock.txt", "one\ntwo\n");
@@ -954,8 +949,7 @@ fn an_untracked_link_to_a_device_lists_without_reading_it() {
     assert!(files.iter().any(|f| f.path == "pipe" && f.additions == 0), "{files:?}");
 }
 
-/// An untracked file past git's default big-file threshold is binary, never read to count
-/// its lines; one at the threshold counts. Sparse, so neither costs the disk.
+/// Past git's default threshold an untracked file is binary, unread; sparse files.
 #[cfg(unix)]
 #[test]
 fn an_untracked_file_past_the_big_file_threshold_is_binary() {
@@ -1001,8 +995,7 @@ fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     r.write(odd, "ten bytes\n");
     r.commit_all("edit");
 
-    // Tree to tree, as `commits` and `last-turn` read: both sides are blobs, sized by id, so a
-    // path holding a newline sizes like any other.
+    // Tree to tree, sized by id, so a newline in a path sizes like any other.
     let between = changed_between(r.path(), "HEAD~1", "HEAD").unwrap();
     let sizes: Vec<_> = between.iter().map(|f| (f.path.as_str(), f.old_size, f.new_size)).collect();
     assert_eq!(sizes, [("a.txt", 5, 13), (odd, 6, 10)]);
@@ -1037,8 +1030,7 @@ fn a_copy_is_reported_as_a_copy_and_reads_its_source() {
 
 #[test]
 fn a_directory_removing_rename_keeps_its_stats() {
-    // Regression for the `-z` migration: `a/b/f.rs -> a/f.rs` once produced a `a//f.rs`
-    // numstat key that never matched, so the renamed+edited file showed +0 -0.
+    // `a/b/f.rs -> a/f.rs` once keyed as `a//f.rs`.
     let r = Repo::init();
     r.write("a/b/file.rs", "one\ntwo\nthree\nfour\nfive\nsix\n");
     r.commit_all("init");
@@ -1169,10 +1161,7 @@ fn changed_against_tree_sees_an_untracked_only_turn() {
 
 #[test]
 fn a_snapshot_sees_a_same_size_edit_made_in_the_index_writes_own_tick() {
-    // One clock tick holds the add, the index write, and a same-size rewrite: every stat
-    // field git compares matches the index entry, and only the index's own mtime (no older
-    // than the entry) tells git to compare content. `core.trustctime=false` stands in for a
-    // ctime that landed in the same tick too.
+    // A same-size rewrite in the index's own tick: only the index mtime makes git compare content.
     let r = Repo::init();
     r.git(&["config", "core.trustctime", "false"]);
     let tick = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
@@ -1443,8 +1432,7 @@ fn a_shallow_cut_is_gone_not_a_root() {
     use herdr_reviewr::git::{EMPTY_TREE, commit_exists, parent_or_empty};
     let (r, shas) = run_repo();
     let shallow = tempfile::tempdir().unwrap();
-    // A file URL takes forward slashes, and a Windows drive path needs the third slash a unix
-    // path already starts with: `file:///C:/…`.
+    // `file:///C:/…` on Windows, `file:///…` elsewhere.
     let path = r.path().to_string_lossy().replace('\\', "/");
     let url =
         if path.starts_with('/') { format!("file://{path}") } else { format!("file:///{path}") };
@@ -1455,8 +1443,7 @@ fn a_shallow_cut_is_gone_not_a_root() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let w = shallow.path().join("w");
-    // `HEAD`'s parent is named by the commit object even though the clone lacks it, so the
-    // pick reads `gone` rather than diffing the whole tree against the empty tree.
+    // A shallow clone's missing parent reads `gone`, never the empty tree.
     let parent = parent_or_empty(&w, &shas[3]).unwrap();
     assert_eq!(parent, shas[2]);
     assert_ne!(parent, EMPTY_TREE);
@@ -1540,10 +1527,7 @@ fn the_commit_scope_writes_nothing() {
     assert_eq!(before, after, "no ref, index, worktree, or HEAD change");
 }
 
-/// Reading a changeset and a file's diff sides never writes the repository. A file touched
-/// without changing (an editor's save, a CRLF round trip) is stat-dirty, and a plain
-/// `git diff` would refresh its index entry, rewrite `.git/index`, and hold `index.lock`
-/// across the agent's own `git add`.
+/// Reading never writes the repository, a stat-dirty file included.
 #[test]
 fn reading_a_touched_file_never_rewrites_the_index() {
     let r = Repo::init();
@@ -1582,8 +1566,7 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     assert!(ours.is_empty(), "reviewr left {ours:?} in .git");
 }
 
-/// Two reviewr panes on one worktree snapshot it at once. Each adds into its own index copy,
-/// so every snapshot lands, and lands the same tree.
+/// Concurrent snapshots of one worktree all land the same tree.
 #[test]
 fn concurrent_snapshots_of_one_worktree_all_land_the_same_tree() {
     let r = Repo::init();

@@ -32,18 +32,14 @@ fn open_default(url: &str) -> Result<()> {
     spawn_detached(tool, command)
 }
 
-/// Open `url` in the default browser, through `ShellExecuteW`. No shell parses the URL, so an
-/// `&` in it can't cut it short or start a second command, as it would through `cmd /c start`.
-/// The call returns once the shell has handed the URL on, leaving nothing to reap.
+/// Open `url` through `ShellExecuteW`: no shell parses it.
 #[cfg(windows)]
 fn open_default(url: &str) -> Result<()> {
     opener::open(url)
         .map_err(|error| anyhow::anyhow!("the default browser could not start: {error}"))
 }
 
-/// Open `url` through the configured `url_opener`, else the platform default. Only an
-/// http(s) URL opens ([`openable_url`]): an opener runs whatever a target names, a program
-/// included, so every caller is held to the check here.
+/// Open an http(s) `url` through `url_opener`, else the platform default.
 pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
     let url = openable_url(url).map_err(anyhow::Error::msg)?;
     let Some(template) = configured else { return open_default(url) };
@@ -54,10 +50,7 @@ pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
     spawn_detached(&program, command)
 }
 
-/// Run an opener detached from the frame: it is started and reaped on a background thread,
-/// never waited on, so a command that lingers (a browser launched in the foreground, a bridge
-/// to an unreachable host) can never freeze the pane. A command that cannot start is reported;
-/// what it does once running is its own.
+/// Start an opener and reap it on a background thread, never waited on.
 fn spawn_detached(tool: &str, mut command: Command) -> Result<()> {
     let mut child = command
         .stdin(Stdio::null())
