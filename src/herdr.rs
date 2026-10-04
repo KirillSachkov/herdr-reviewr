@@ -75,8 +75,16 @@ pub enum SendTarget {
     Many(Vec<AgentChoice>),
 }
 
+/// The plugin's id, as herdr knows it: its config dir, its state dir, its pane entrypoint.
+pub(crate) const PLUGIN_ID: &str = "persiyanov.reviewr";
+
+/// The display label reviewr stamps on its pane and its tab. Display only: identity is the
+/// process ([`crate::actions`]).
+pub(crate) const LABEL: &str = "reviewr";
+
+/// The herdr binary herdr names, else `herdr` on `PATH`. An empty value names nothing.
 fn herdr_bin() -> String {
-    env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_string())
+    env::var("HERDR_BIN_PATH").ok().filter(|bin| !bin.is_empty()).unwrap_or_else(|| "herdr".into())
 }
 
 /// How a herdr call failed, classified so a caller can tell a benign race from a real failure.
@@ -327,7 +335,7 @@ pub fn label_pane() {
         // An unreadable listing stamps anyway: with herdr wedged the rename fails too,
         // and both failures land in the log.
         if current_label(&ws, &pane).is_none() {
-            let _ = herdr(&["pane", "rename", &pane, "reviewr"]);
+            let _ = herdr(&["pane", "rename", &pane, LABEL]);
         }
     });
 }
@@ -342,7 +350,7 @@ pub fn clear_pane_label() {
     };
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        if current_label(&ws, &pane).as_deref() == Some("reviewr") {
+        if current_label(&ws, &pane).as_deref() == Some(LABEL) {
             let _ = herdr(&["pane", "rename", &pane, "--clear"]);
         }
         let _ = tx.send(());
@@ -371,8 +379,7 @@ pub fn plugin_config_dir() -> Option<String> {
 /// and the total wait stays bounded by [`ANSWER_BOUND`], so a wedged herdr degrades a
 /// visible pane to the defaults instead of holding the blank grid issue #4 fixed.
 pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
-    let rx =
-        herdr_on_thread(vec!["plugin".into(), "config-dir".into(), "persiyanov.reviewr".into()]);
+    let rx = herdr_on_thread(vec!["plugin".into(), "config-dir".into(), PLUGIN_ID.into()]);
     let answer = if let Ok(answer) = rx.recv_timeout(SIGNAL_DELAY) {
         answer
     } else {

@@ -684,7 +684,20 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("\"theme\""), "expected config JSON: {}", stdout(&output));
 
-    let output = action("close", dir.path()).arg("/some/repo").output().unwrap();
+    // The flag after a UI argument still dispatches to the action, never the review UI.
+    let mut close = action("close", dir.path());
+    let output = close.args(["/some/repo"]).output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
+    let output = Command::new(reviewr_bin())
+        .args(["/some/repo", "--action", "close"])
+        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
+        .env("HERDR_PLUGIN_STATE_DIR", dir.path())
+        .env("HERDR_BIN_PATH", fake_herdr())
+        .env("FAKE_HERDR_DIR", dir.path())
+        .env("HERDR_WORKSPACE_ID", "workspace-1")
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
 }
@@ -1122,21 +1135,21 @@ fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
-    assert!(elapsed >= Duration::from_millis(900), "returned before the bound: {elapsed:?}");
-    assert!(elapsed < Duration::from_secs(10), "the wait is bounded: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(5900), "returned before the bound: {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(15), "the wait is bounded: {elapsed:?}");
     assert!(opened_pane_reads(dir.path()) > 1, "{}", calls(dir.path()));
 }
 
 // --- Actions serialize on the lock in the plugin state dir.
 
-/// The action lock, held by the test process as another action would hold it.
-fn hold_lock(dir: &Path) -> fs::File {
+/// Workspace `ws`'s action lock, held by the test process as another action would hold it.
+fn hold_lock(dir: &Path, ws: &str) -> fs::File {
     let file = fs::File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join("action.lock"))
+        .open(dir.join(format!("action-{ws}.lock")))
         .unwrap();
     file.lock().unwrap();
     file
@@ -1184,7 +1197,7 @@ fn two_concurrent_toggles_open_then_close() {
 #[test]
 fn an_explicit_action_waits_for_a_held_lock_and_proceeds_once_released() {
     let dir = tempfile::tempdir().unwrap();
-    let lock = hold_lock(dir.path());
+    let lock = hold_lock(dir.path(), "workspace-1");
 
     let mut child = start("toggle", dir.path());
     std::thread::sleep(Duration::from_millis(500));
@@ -1200,7 +1213,7 @@ fn an_explicit_action_waits_for_a_held_lock_and_proceeds_once_released() {
 #[test]
 fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = hold_lock(dir.path());
+    let _lock = hold_lock(dir.path(), "workspace-1");
 
     let started = Instant::now();
     let children = ["toggle", "open", "close"].map(|mode| (mode, start(mode, dir.path())));
@@ -1209,21 +1222,21 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
         assert_eq!(output.status.code(), Some(1), "{mode}");
         assert_eq!(
             stderr(&output),
-            "reviewr: another reviewr action is still running after 10s\n",
+            "reviewr: another reviewr action in workspace-1 is still running after 15s\n",
             "{mode}"
         );
         assert!(output.stdout.is_empty(), "{mode}");
     }
     let elapsed = started.elapsed();
 
-    assert!(elapsed >= Duration::from_millis(9500), "refused before the bound: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(14500), "refused before the bound: {elapsed:?}");
     assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
 }
 
 #[test]
 fn auto_open_yields_silently_to_a_held_lock() {
     let dir = tempfile::tempdir().unwrap();
-    let _lock = hold_lock(dir.path());
+    let _lock = hold_lock(dir.path(), "workspace-9");
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
 
     let started = Instant::now();
@@ -1234,6 +1247,44 @@ fn auto_open_yields_silently_to_a_held_lock() {
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
     assert!(started.elapsed() < Duration::from_secs(3), "the event waited for the lock");
     assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+}
+
+#[test]
+fn a_held_lock_holds_back_only_its_own_workspace() {
+    // The race is per workspace, and so is the lock: an action in another workspace, or a new
+    // worktree's auto-open, never waits on this one.
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = hold_lock(dir.path(), "workspace-2");
+    let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
+
+    let started = Instant::now();
+    let toggle = run_with_context("toggle", dir.path(), &repo_context());
+    let born = run_auto_open(dir.path(), &event, None);
+
+    assert!(started.elapsed() < Duration::from_secs(5), "an action waited on another workspace");
+    assert!(toggle.status.success(), "{}", stderr(&toggle));
+    assert_eq!(stdout(&toggle), "reviewr: opened w1:p9 (split) in workspace-1\n");
+    assert!(born.status.success(), "{}", stderr(&born));
+    // The event read its own workspace instead of yielding to the held lock.
+    let log = calls(dir.path());
+    assert!(log.contains("pane list --workspace workspace-9"), "{log}");
+}
+
+#[test]
+fn auto_open_over_an_open_reviewr_pane_does_nothing_and_says_nothing() {
+    // The workspace already shows reviewr, whoever opened it: the birth event neither stacks a
+    // second pane nor closes the first, and stays silent.
+    let dir = tempfile::tempdir().unwrap();
+    procinfo(dir.path(), "w1:p1", &json!([review_ui()]));
+    let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
+
+    let output = run_auto_open(dir.path(), &event, None);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{}", stdout(&output));
+    assert!(output.stderr.is_empty(), "{}", stderr(&output));
+    let log = calls(dir.path());
+    assert!(!log.contains("plugin pane open") && !log.contains("pane close"), "{log}");
 }
 
 #[test]

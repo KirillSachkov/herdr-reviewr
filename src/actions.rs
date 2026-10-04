@@ -10,10 +10,10 @@
 //! `reviewr:` line on stderr) and reports a success on stdout. A refused event stays silent,
 //! except for a config error, which goes to stderr for herdr's plugin log.
 //!
-//! herdr runs plugin actions concurrently, so every action that reaches the workspace holds one
-//! exclusive OS lock on `$HERDR_PLUGIN_STATE_DIR/action.lock` from its pane listing to its end
-//! (see [`action_lock`]). The file holds no state: it is never written or deleted, and the OS
-//! releases the lock when a run exits or crashes.
+//! herdr runs plugin actions concurrently, so every action that reaches a workspace holds that
+//! workspace's exclusive OS lock, `$HERDR_PLUGIN_STATE_DIR/action-<workspace>.lock`, from its
+//! pane listing to its end (see [`action_lock`]). The file holds no state: it is never written
+//! or deleted, and the OS releases the lock when a run exits or crashes.
 
 use std::env;
 use std::ffi::OsStr;
@@ -101,7 +101,12 @@ pub fn run(name: Option<&str>) -> i32 {
         return 1;
     };
     match act(action) {
+        // The event reports nothing, on success either.
         Ok(None) => 0,
+        Ok(Some(line)) if action == Action::AutoOpen => {
+            logln!("auto-open: {line}");
+            0
+        }
         Ok(Some(line)) => {
             println!("reviewr: {line}");
             0
@@ -156,13 +161,11 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
         None
     };
 
-    let target = Target::read(event);
-    let Some(ws) = target.ws.as_deref() else {
-        return Err(refused("no workspace context (invoke from inside herdr)"));
-    };
-    // Held from the listing through the close or the open, so a concurrent action reads the
-    // workspace only after this one's effect is visible.
-    let Some(_lock) = action_lock(action)? else {
+    let target = Target::read(event)?;
+    let ws = target.ws.as_str();
+    // Held from the listing through the close or the open, so a concurrent action on this
+    // workspace reads it only after this one's effect is visible.
+    let Some(_lock) = action_lock(action, ws)? else {
         return Ok(None);
     };
 
@@ -177,47 +180,50 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     if !existing.is_empty() {
         return match action {
             Action::Close | Action::Toggle => close_all(&existing, ws).map(Some),
-            Action::Open => Ok(Some(format!("already open ({}) in {ws}", existing.join(" ")))),
-            Action::AutoOpen => Ok(None),
+            Action::Open | Action::AutoOpen => {
+                Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))))
+            }
         };
     }
     if action == Action::Close {
         return Ok(Some(format!("nothing open in {ws}")));
     }
-    let line = open(action, &config, &target, ws, &panes)?;
-    // The event reports nothing on success either.
-    Ok((action != Action::AutoOpen).then_some(line))
+    open(action, &config, &target, &panes).map(Some)
 }
 
-/// How long an explicit action waits for another action to release the lock. One action holds
-/// it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]: under a second
-/// warm, and up to 5.5 s for a cold first open on a Windows VM. Ten seconds waits out that slow
-/// open with room to spare. The wait runs on herdr's action thread and blocks nothing, so the
-/// bound only ends a wait on a wedged holder.
-const LOCK_BOUND: Duration = Duration::from_secs(10);
+/// How long an explicit action waits for another action on its workspace to release the lock.
+/// One action holds it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]:
+/// under a second warm, and up to 5.5 s for a cold first open on a Windows VM. This waits out
+/// the slowest holder with room to spare. The wait runs on herdr's action thread and blocks
+/// nothing, so the bound only ends a wait on a wedged holder.
+const LOCK_BOUND: Duration = Duration::from_secs(15);
 
 /// The pause between two lock attempts while an explicit action waits.
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Take the action lock, or `None` when the event finds it held and yields.
+/// Take workspace `ws`'s action lock, or `None` when the event finds it held and yields.
 ///
 /// herdr spawns every action and event hook on its own thread with no per-plugin queue, so two
 /// quick toggles, or a toggle and an auto-open, would both read "no reviewr pane" and both
-/// open. An explicit action waits, bounded, so a double press opens and
-/// then closes. Past [`LOCK_BOUND`] it refuses rather than act unguarded. The event tries once
-/// and yields: whoever holds the lock is already acting on reviewr panes, and a second open
-/// is exactly what the lock exists to stop. This is the pattern of herdr-sidebar's launcher
-/// lock.
+/// open. An explicit action waits, bounded, so a double press opens and then closes. Past
+/// [`LOCK_BOUND`] it refuses rather than act unguarded. The event tries once and yields:
+/// whoever holds this workspace's lock is already acting on its reviewr panes, and a second
+/// open is exactly what the lock exists to stop. The lock is per workspace, since the race is:
+/// an action in one workspace never holds back another's. This is the pattern of
+/// herdr-sidebar's launcher lock.
 ///
 /// The wait polls `try_lock` against a deadline instead of blocking in `lock`, because Windows
 /// can take a moment to release a crashed holder's lock. Without a usable state dir the action
 /// refuses: herdr sets and creates the dir for every action, so a run without it is not a herdr
 /// action, and an unguarded run is the race this lock closes.
-fn action_lock(action: Action) -> Result<Option<File>, Stop> {
+fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
     let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
-    let path = Path::new(&dir).join("action.lock");
+    // A workspace id names the file: anything but a letter, digit, `-` or `_` becomes `_`.
+    let name: String =
+        ws.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
     // Read and write without truncation: Windows locks need a handle with access, and the
     // file's (empty) content is never touched.
@@ -233,13 +239,13 @@ fn action_lock(action: Action) -> Result<Option<File>, Stop> {
         match file.try_lock() {
             Ok(()) => return Ok(Some(file)),
             Err(TryLockError::WouldBlock) if action == Action::AutoOpen => {
-                logln!("auto-open yielded: another reviewr action holds the lock");
+                logln!("auto-open yielded: another reviewr action holds {ws}'s lock");
                 return Ok(None);
             }
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(LOCK_POLL),
             Err(TryLockError::WouldBlock) => {
                 return Err(refused(format!(
-                    "another reviewr action is still running after {LOCK_BOUND:?}"
+                    "another reviewr action in {ws} is still running after {LOCK_BOUND:?}"
                 )));
             }
             Err(TryLockError::Error(error)) => return Err(unusable(error)),
@@ -262,7 +268,7 @@ fn text(value: &Value, pointer: &str) -> Option<String> {
 /// Where an action acts.
 #[derive(Debug)]
 struct Target {
-    ws: Option<String>,
+    ws: String,
     /// The pane a split or zoomed open attaches to.
     pane: Option<String>,
     /// The launch cwd to review.
@@ -272,30 +278,33 @@ struct Target {
 }
 
 impl Target {
-    /// The target of the event with payload `event`, else of an explicit action.
-    fn read(event: Option<Value>) -> Self {
+    /// The target of the event with payload `event`, else of an explicit action. Refused
+    /// without a workspace to act in.
+    fn read(event: Option<Value>) -> Result<Self, Stop> {
+        let no_workspace = || refused("no workspace context (invoke from inside herdr)");
         // The events fire without a focused pane: target the fresh workspace from their
         // payload, never a focused pane's cwd. The `worktree` fields are compatible fallbacks
         // (`docs/herdr-api-notes.md`).
         if let Some(event) = event {
-            return Self {
+            return Ok(Self {
                 ws: text(&event, "/data/workspace/workspace_id")
-                    .or_else(|| text(&event, "/data/worktree/open_workspace_id")),
+                    .or_else(|| text(&event, "/data/worktree/open_workspace_id"))
+                    .ok_or_else(no_workspace)?,
                 pane: None,
                 cwd: text(&event, "/data/workspace/worktree/checkout_path")
                     .or_else(|| text(&event, "/data/worktree/path")),
                 focused: None,
-            };
+            });
         }
         let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        Self {
-            ws: var("HERDR_WORKSPACE_ID"),
+        Ok(Self {
+            ws: var("HERDR_WORKSPACE_ID").ok_or_else(no_workspace)?,
             pane: var("HERDR_PANE_ID"),
             cwd: text(&context, "/focused_pane_cwd").or_else(|| text(&context, "/workspace_cwd")),
             focused: text(&context, "/focused_pane_id"),
-        }
+        })
     }
 }
 
@@ -372,21 +381,22 @@ fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
 
 /// How long an open waits for its new pane to read as reviewr. herdr caches its Windows process
 /// snapshot for 250 ms, so a just-opened pane can read empty, and a toggle that returned then
-/// would let the next toggle open a second pane instead of closing this one. Past the bound
+/// would let the next toggle open a second pane instead of closing this one. A cold first open
+/// on a Windows VM took up to 5.5 s to read as reviewr, so the bound waits that out. Past it
 /// the open reports success anyway: the pane is open, only its read lags.
-const VISIBLE_BOUND: Duration = Duration::from_secs(1);
+const VISIBLE_BOUND: Duration = Duration::from_secs(6);
 
 /// The pause between two reads of the new pane while an open waits.
 const VISIBLE_POLL: Duration = Duration::from_millis(50);
 
-/// Open a reviewr pane in `ws` and return the success line.
+/// Open a reviewr pane in the target's workspace and return the success line.
 fn open(
     action: Action,
     config: &PluginConfig,
     target: &Target,
-    ws: &str,
     panes: &PaneList,
 ) -> Result<String, Stop> {
+    let ws = target.ws.as_str();
     // Prefer the focused pane's live `foreground_cwd`, read from the pane-list snapshot already
     // in hand, over the context's launch cwd (the launch-vs-live split is in
     // docs/herdr-api-notes.md). The live cwd wins only inside a repo.
@@ -408,7 +418,7 @@ fn open(
         }
     };
 
-    let plugin = var("HERDR_PLUGIN_ID").unwrap_or_else(|| "persiyanov.reviewr".to_owned());
+    let plugin = var("HERDR_PLUGIN_ID").unwrap_or_else(|| herdr::PLUGIN_ID.to_owned());
     let placement = config.toggle_placement();
     let mut args = vec!["--plugin", &plugin, "--entrypoint", "pane", "--placement"];
     args.push(placement.as_str());
@@ -441,7 +451,7 @@ fn open(
     if placement == TogglePlacement::Tab
         && let Some(tab) = opened.tab_id.as_deref().filter(|tab| !tab.is_empty())
     {
-        let _ = herdr::rename_tab(tab, "reviewr");
+        let _ = herdr::rename_tab(tab, herdr::LABEL);
     }
 
     wait_until_visible(&opened.pane_id);
@@ -491,7 +501,7 @@ fn repoint_launch_links() {
     if !executable {
         return;
     }
-    let state_bin = home.join(".local/state/herdr/plugins/persiyanov.reviewr/bin");
+    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::PLUGIN_ID).join("bin");
     let local_bin = home.join(".local/bin");
     // `~/.local/bin` only when it already exists: reviewr never creates a PATH directory.
     let dirs = [Some(state_bin), local_bin.is_dir().then_some(local_bin)];
