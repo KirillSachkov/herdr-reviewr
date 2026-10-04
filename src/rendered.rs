@@ -1,5 +1,4 @@
-//! A file tab's rendered markdown view: the reviewer's choice, the content it renders, the render
-//! itself, its change marks, and the index over its rows.
+//! A file tab's rendered markdown view.
 
 use crate::diff::{RenderedKind, Row};
 use crate::marks::{DocMap, MarkMap, Unit, landing};
@@ -10,8 +9,7 @@ use std::collections::HashMap;
 pub(crate) struct RenderedView {
     /// The open markdown file's content, the render's input.
     pub content: Option<Content>,
-    /// The old side's source map, cached by the old text and open `<details>` it came from: the
-    /// width never moves it, so a resize renders the new side alone.
+    /// The old side's source map, cached by the old text and open `<details>` it came from.
     pub old_map: Option<OldMap>,
     /// The reviewer's own `<details>` choices, by key: open or closed.
     pub details: HashMap<String, bool>,
@@ -51,20 +49,17 @@ impl RenderedView {
         self.content.as_ref().map(|c| c.text.as_str())
     }
 
-    /// Whether the current content renders no rows at all: its source shows whatever the pane's
-    /// choice, and `m` neither shows nor acts.
+    /// Whether the current content renders no rows at all.
     pub(crate) fn renders_nothing(&self) -> bool {
         self.content.as_ref().is_some_and(|c| c.nothing)
     }
 
-    /// Whether the rows on screen are rendered rows: the one answer to it, read off the index a
-    /// build leaves and a source build drops.
+    /// Whether the rows on screen are rendered rows.
     pub(crate) fn on_screen(&self) -> bool {
         !self.index.units.is_empty()
     }
 
-    /// Drop what stood behind rendered rows no longer on screen — the render, the marks, the index
-    /// — so nothing reads a stale one.
+    /// Drop what stood behind rendered rows no longer on screen.
     pub(crate) fn drop_rows(&mut self) {
         self.doc = crate::markdown::Rendered::default();
         self.marks = MarkMap::default();
@@ -86,16 +81,14 @@ pub(crate) struct Built {
     pub empty: bool,
 }
 
-/// The input rendered rows build from — the content, the open `<details>` keys (sorted), the wrap
-/// width, the theme, and the changes the marks read.
+/// The input rendered rows build from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RenderedInput {
     pub text: String,
     pub details: Vec<String>,
     pub width: usize,
     pub theme: &'static str,
-    /// A digest of the diff's changed lines in the `Changes` tab, `None` elsewhere: a scope switch
-    /// moves the marks without touching the text.
+    /// A digest of the diff's changed lines in the `Changes` tab, `None` elsewhere.
     pub changes: Option<u64>,
 }
 
@@ -168,8 +161,7 @@ pub(crate) struct RenderedIndex {
     /// marker's own line), and whether it is a block's gap.
     row_source: Vec<(u32, u32)>,
     gap: Vec<bool>,
-    /// The units a new-side line can sit in — blocks, and markers over new lines — and their
-    /// ranges: where a new-side comment shows.
+    /// The units a new-side line can sit in.
     new_side: Vec<usize>,
     new_ranges: Vec<(u32, u32)>,
 }
@@ -254,8 +246,7 @@ impl RenderedIndex {
         self.land(Some(line)).map(|u| u.lead)
     }
 
-    /// The units a new-side range `start..=end` shows in: those it overlaps — a block, or a marker
-    /// over new lines — else the one its first line lands on, by the landing rule.
+    /// The units a new-side range `start..=end` shows in.
     pub(crate) fn new_side_cover(&self, start: u32, end: u32) -> Vec<usize> {
         let overlap: Vec<usize> = self
             .new_ranges
@@ -271,8 +262,7 @@ impl RenderedIndex {
         }
     }
 
-    /// The unit a new-side line lands on, by the landing rule; `None`, past the file's end, lands
-    /// on the last.
+    /// The unit a new-side line lands on, by the landing rule.
     pub(crate) fn new_side_land(&self, line: Option<u32>) -> Option<usize> {
         landing(&self.new_ranges, line).map(|k| self.new_side[k])
     }

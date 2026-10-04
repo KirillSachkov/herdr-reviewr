@@ -11,15 +11,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::highlight::Highlighter;
 use crate::theme::Palette;
 
-/// Block indents (quote bars, list levels) deeper than this render at the cap, so pathological
-/// nesting can never squeeze the content column to nothing.
+/// Block indents (quote bars, list levels) deeper than this render at the cap.
 const MAX_NEST: usize = 8;
 
 /// The indent code-block lines carry inside their block.
 const CODE_INDENT: &str = "  ";
 
-/// A shrunk table column never drops below this width (or its natural width, when smaller), so
-/// wrapped cells stay readable.
+/// A shrunk table column never drops below this width (or its natural width, when smaller).
 const COL_FLOOR: usize = 8;
 
 /// Rendered markdown: the styled lines, one metadata entry per line in lockstep, and the document's
@@ -30,13 +28,11 @@ pub struct Rendered {
     pub meta: Vec<LineMeta>,
     /// Each heading's GitHub slug and the rendered line it starts on.
     pub anchors: Vec<(String, usize)>,
-    /// The 1-based source lines whose content does not render, wholly or in part: HTML comments
-    /// (block or inline, single or multi-line), link reference definitions, lone tags.
+    /// The 1-based source lines whose content does not render, wholly or in part.
     pub silent: Vec<usize>,
     /// Every `<details>` that has a summary, open or not, in close order: its key and source lines.
     pub disclosures: Vec<Disclosure>,
-    /// Every code block's whole source range, fences included: its lines map one rendered line
-    /// each, yet review treats the block as one.
+    /// Every code block's whole source range, fences included.
     pub code_blocks: Vec<(usize, usize)>,
 }
 
@@ -63,13 +59,11 @@ pub struct LineMeta {
     pub details: Option<DetailsHit>,
     /// Whether the line is the blank gap set above its block, not its content.
     pub gap: bool,
-    /// The source lines this line's own text comes from, first and last — within its block's range,
-    /// so a wrapped paragraph's lines tell apart which source line each shows.
+    /// The source lines this line's own text comes from, first and last.
     pub lines: (usize, usize),
 }
 
-/// Click target for a `<details>` summary: display columns, and the key the expand state keys on —
-/// the summary plus how many earlier disclosures share it (`Details#1`).
+/// Click target for a `<details>` summary.
 #[derive(Clone, Debug)]
 pub struct DetailsHit {
     pub start: usize,
@@ -245,8 +239,7 @@ struct Renderer<'a> {
     /// The 1-based source lines the block being emitted spans.
     block_src: usize,
     block_end: usize,
-    /// The source ranges of blocks that rendered at least one line: their structural lines —
-    /// fences, delimiter rows, wrapper tags, item markers — show as part of them.
+    /// The source ranges of blocks that rendered at least one line.
     covered: Vec<(usize, usize)>,
     /// The source lines the lines being pushed take their own text from, while narrower than their
     /// block's ([`LineMeta::lines`]).
@@ -278,8 +271,7 @@ struct Renderer<'a> {
     links: Vec<(usize, usize)>,
     /// Every link destination seen, indexed by the chunks that belong to it.
     urls: Vec<std::sync::Arc<str>>,
-    /// The heading text being collected for its slug — prose only, never a link's appended
-    /// destination, so `## See [docs](url)` slugs as GitHub does.
+    /// The heading text being collected for its slug.
     heading_text: Option<String>,
     /// Open images: the chunk index where the alt text starts, the heading-text
     /// length to roll back to — alt text stays out of a heading's slug, as on GitHub —
@@ -373,8 +365,7 @@ impl Renderer<'_> {
             }
             Event::Html(t) => {
                 if self.emitting() && !self.collecting_summary() {
-                    // A tight list item's text can still be pending: it emits first, with its
-                    // marker, so the HTML block never jumps ahead of it.
+                    // A tight list item's text can still be pending.
                     self.flush_block(true);
                 }
                 self.block_src = self.src_line(range.start);
@@ -576,15 +567,13 @@ impl Renderer<'_> {
                 None => (start, end),
             });
         }
-        // A run reads forward through its source: text emitted at an inline's end — a link's url,
-        // an image's — never goes back to an earlier line than the text before it.
+        // A run reads forward through its source.
         let after = self.chunks_mut().last().map_or(0, |c| c.line);
         let source = self.event_lines.0.max(after);
         self.chunks_mut().push(Chunk { text, style, link, line: source });
     }
 
-    /// Push an inline code span's text, each piece on the source line it came from: a span crossing
-    /// a line break reads as one run with a space where the break was.
+    /// Push an inline code span's text, each piece on the source line it came from.
     fn push_code_span(&mut self, text: &str, range: &Range<usize>, style: Style) {
         let raw = self.source.get(range.clone()).unwrap_or_default();
         let inner = raw.trim_matches('`');
@@ -901,8 +890,7 @@ impl Renderer<'_> {
                 self.out.disclosures.push(Disclosure { key, start: d.start, body, end });
             }
         }
-        // Blank once container markers go: a `>`-only line inside a quote shows nothing of its own
-        // and hides nothing either.
+        // Blank once container markers go.
         let blank: Vec<bool> = text
             .lines()
             .map(|l| l.trim_start_matches(|c: char| c == '>' || c.is_whitespace()).is_empty())
@@ -1014,8 +1002,7 @@ impl Renderer<'_> {
             }
             return;
         }
-        // The run maps to the lines that fed it — its item marker's line included — never to a
-        // block stamped around it; that block keeps its own stamp for what follows.
+        // The run maps to the lines that fed it.
         let stamp = (self.block_src, self.block_end);
         if let Some((mut start, mut end)) = span {
             if self.marker.is_some()
@@ -1160,8 +1147,7 @@ impl Renderer<'_> {
             return;
         };
         self.blank_before_block();
-        // The pending item marker lands on the first row, like every block emitter — `first` and
-        // `cont` share a width, so the column accounting is unchanged.
+        // The pending item marker lands on the first row, like every block emitter.
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
         let budget = self.budget(cont.width());
@@ -1233,8 +1219,7 @@ impl Renderer<'_> {
             let head = r < table.head_rows;
             let style_of =
                 |c: &Chunk| if head { c.style.add_modifier(Modifier::BOLD) } else { c.style };
-            // A cell that fits its column emits verbatim, spaces and all; only a cell wider than
-            // its shrunk column wraps inside it.
+            // A cell that fits its column emits verbatim, spaces and all.
             let cells: Vec<Vec<WrappedLine>> = (0..cols)
                 .map(|i| {
                     let cell = row.get(i).map_or(&[][..], Vec::as_slice);
@@ -1337,8 +1322,7 @@ pub(crate) fn slug_text(text: &str) -> String {
     slug
 }
 
-/// A character the terminal must never receive raw: a control character or an explicit
-/// bidirectional override.
+/// A character the terminal must never receive raw.
 pub(crate) fn hostile_char(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}')
@@ -1443,8 +1427,7 @@ fn html_attr(tag: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Neutralize text the terminal must never interpret: hostile characters render as a visible
-/// placeholder; tabs widen to spaces.
+/// Neutralize text the terminal must never interpret.
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -1895,8 +1878,7 @@ mod tests {
     #[test]
     fn a_column_shrinks_to_its_floor_and_still_renders() {
         let (hl, p) = setup();
-        // Natural widths: elem 4, prose 24; a 15-cell pane leaves the prose column exactly its
-        // 8-cell floor, and the table still renders as a grid.
+        // Natural widths: elem 4, prose 24.
         let md = "| elem | wraps at the floor width |\n|---|---|\n| a | b |";
         let t = texts(&render_lines(md, 15, &hl, &p));
         assert!(!t[0].starts_with('|'), "a grid, not source fallback: {t:?}");
@@ -2044,8 +2026,7 @@ mod tests {
     #[test]
     fn a_lines_own_source_lines_run_forward_through_links_and_code_spans() {
         let (hl, p) = setup();
-        // A link and a code span each crossing a line break: the url shows after the text of line
-        // 2, and each piece of the code span keeps its own line.
+        // A link and a code span each crossing a line break.
         let md = "aaa [link text\nmore words](http://example.com/a/b/c) end of\n\n\
                   x `code one\ncode two` y\n";
         for width in [16, 17, 80] {
@@ -2061,8 +2042,7 @@ mod tests {
         assert_eq!(at("://example.com/a"), (2, 2), "the url follows line 2's text: {t:?}");
         assert_eq!(at("x code one code"), (4, 5), "`code` and `one` from line 4: {t:?}");
         assert_eq!(at("two y"), (5, 5), "{t:?}");
-        // A span over three lines inside a list item, and inside a quoted one: the container
-        // prefixes never shift a piece onto the wrong line.
+        // A span over three lines inside a list item, and inside a quoted one.
         for (md, width, needle, want) in [
             ("- x `aa\n  bb\n  cc` y\n", 4, "bb", (2, 2)),
             ("- x `aa\n  bb\n  cc` y\n", 6, "bb", (2, 2)),

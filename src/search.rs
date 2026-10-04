@@ -66,8 +66,7 @@ pub struct SearchResults {
 pub enum SearchOutcome {
     /// Results for the query; the previously landed set stays painted until this lands.
     Ready(SearchResults),
-    /// The engine's first scan is still running — the overlay shows `indexing…` and the worker
-    /// re-runs the query when the scan lands.
+    /// The engine's first scan is still running.
     Indexing,
     /// The engine failed; its message shows in the results pane.
     Failed(String),
@@ -146,8 +145,7 @@ impl Engine {
             .collect();
         let file_total = found.total_matched.max(files.len());
 
-        // The empty query paints the frecency-ranked Files group alone: an empty grep is
-        // engine-defined noise, not something the spec describes.
+        // The empty query paints the frecency-ranked Files group alone.
         if raw.trim().is_empty() {
             return Ok(SearchResults { files, code: Vec::new(), file_total, code_more: false });
         }
@@ -160,8 +158,7 @@ impl Engine {
                 ..Default::default()
             },
         );
-        // Drop each match line's leading indentation so the row text aligns at the left in the
-        // narrow pane; the engine adjusts its match offsets as it trims.
+        // Drop each match line's leading indentation so the row text aligns at the left in the narrow pane.
         for m in &mut grep.matches {
             m.trim_leading_whitespace();
         }
@@ -208,8 +205,7 @@ pub fn spawn(
             let engine = match Engine::start(repo, &cache_dir) {
                 Ok(engine) => engine,
                 Err(e) => {
-                    // Report on the first query, then exit: without an engine every later request
-                    // would fail the same way.
+                    // Report on the first query, then exit.
                     if let Ok(SearchJob::Query { generation, .. }) = rx.recv() {
                         let outcome = SearchOutcome::Failed(e);
                         let _ = tx.send(SearchCompletion { generation, outcome });
@@ -250,8 +246,7 @@ pub fn spawn(
                         SearchJob::Track { path } => engine.track(&path),
                     }
                 }
-                // A fresh job supersedes any query still parked for warm-up, so a stale generation
-                // never burns a grep after the scan lands.
+                // A fresh job supersedes any query still parked for warm-up.
                 if job.is_some() {
                     pending = None;
                 }

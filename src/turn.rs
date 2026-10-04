@@ -12,8 +12,7 @@ pub enum Status {
 }
 
 impl Status {
-    /// A resting status the agent waits at between turns — a new `working` after one of these is a
-    /// fresh instruction.
+    /// A resting status the agent waits at between turns.
     fn is_resting(self) -> bool {
         matches!(self, Status::Idle | Status::Done)
     }
@@ -138,8 +137,7 @@ mod tests {
         assert_eq!(Status::from_wire("blocked"), Status::Blocked);
         assert_eq!(Status::from_wire("done"), Status::Done);
         assert_eq!(Status::from_wire("unknown"), Status::Unknown);
-        // A state herdr adds is unknown to tracking, and unknown is never resting, so the next
-        // `working` sample resumes the turn in flight instead of starting a new one.
+        // A state herdr adds is unknown to tracking, and unknown is never resting.
         assert_eq!(Status::from_wire("compacting"), Status::Unknown);
         assert!(!Status::from_wire("compacting").is_resting());
     }
@@ -156,8 +154,7 @@ mod tests {
 
     #[test]
     fn one_working_agent_makes_the_whole_worktree_work() {
-        // Any agent still editing means the worktree is still being worked on, so `working` wins
-        // over every resting or held peer (HH-TURN-PER-WORKTREE).
+        // Any agent still editing means the worktree is still being worked on.
         assert_eq!(WorktreeState::fold([Status::Idle, Status::Working]), WorktreeState::Working);
         assert_eq!(WorktreeState::fold([Status::Blocked, Status::Working]), WorktreeState::Working);
         assert_eq!(WorktreeState::fold([Status::Idle, Status::Done]), WorktreeState::Resting);

@@ -44,8 +44,7 @@ pub struct Annotation {
 }
 
 impl From<&ChangedFile> for Annotation {
-    /// The scope annotation a changed file carries — the one mapping, shared by the `Changes` entry
-    /// build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
+    /// The scope annotation a changed file carries.
     fn from(f: &ChangedFile) -> Self {
         Self {
             change: f.kind,
@@ -67,8 +66,7 @@ pub struct Entry {
     pub annotation: Option<Annotation>,
     /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
-    /// A wholly-ignored directory placeholder whose children load lazily on expand; never set on a
-    /// `Changes` entry.
+    /// A wholly-ignored directory placeholder whose children load lazily on expand.
     pub is_dir: bool,
 }
 

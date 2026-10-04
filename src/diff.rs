@@ -108,8 +108,7 @@ impl Row {
         }
     }
 
-    /// The char ranges within this line that differ from its paired counterpart; empty on context,
-    /// folds, and unpaired change lines.
+    /// The char ranges within this line that differ from its paired counterpart.
     pub fn emphasis(&self) -> &[CharRange] {
         match self {
             Row::Deletion { emphasis, .. } | Row::Insertion { emphasis, .. } => emphasis,
@@ -192,13 +191,11 @@ pub struct FileDiff {
     pub state: FileState,
     pub view: View,
     pub rows: Vec<Row>,
-    /// The `(old, new)` line numbers of each deletion paired with its homolog insertion — one line
-    /// edited, not one removed and another added ([`compute_emphasis`]).
+    /// The `(old, new)` line numbers of each deletion paired with its homolog insertion.
     pub pairs: Vec<(u32, u32)>,
 }
 
-/// A file beyond either budget renders as `too_large` rather than stalling the diff — the byte
-/// budget also catches a single huge line that the line budget misses.
+/// A file beyond either budget renders as `too_large` rather than stalling the diff.
 const MAX_LINES: usize = 50_000;
 /// The byte budget. A file larger than this renders as a `too_large` notice.
 pub(crate) const MAX_BYTES: usize = 2_000_000;
@@ -484,8 +481,7 @@ fn pair_homologs(
 /// ~0.71–0.78, so the bar sits in the gap.
 const MIN_SIMILARITY: f32 = 0.7;
 
-/// The word-level similarity of `(old, new)` and the char ranges that changed: the words present
-/// only in `old` (deletion emphasis) and only in `new` (insertion emphasis).
+/// The word-level similarity of `(old, new)` and the char ranges that changed.
 fn word_emphasis(old: &str, new: &str) -> (f32, Vec<CharRange>, Vec<CharRange>) {
     let diff = TextDiff::from_words(old, new);
     let (mut old_ranges, mut new_ranges) = (Vec::new(), Vec::new());
@@ -598,8 +594,7 @@ fn collapse_context(rows: &[Row]) -> Vec<Row> {
     out
 }
 
-/// The extension used to pick a syntax, e.g. `rs` for `src/app.rs`; `None` when the file name has
-/// no extension.
+/// The extension used to pick a syntax, e.g. `rs` for `src/app.rs`.
 pub(crate) fn language_of(path: &str) -> Option<String> {
     Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_string)
 }
@@ -610,8 +605,7 @@ pub struct DiffCache {
     entries: HashMap<String, (u64, FileDiff)>,
 }
 
-/// Cap the cache so a long session browsing many files cannot grow it without bound; at the cap it
-/// is cleared (only the open file is ever rebuilt).
+/// Cap the cache so a long session browsing many files cannot grow it without bound.
 const CACHE_CAP: usize = 256;
 
 impl DiffCache {
@@ -865,8 +859,7 @@ mod tests {
 
     #[test]
     fn emphasis_hugs_the_tokens_not_surrounding_whitespace() {
-        // Adding a trailing comment: the highlight is `// note`, not ` // note` — leading
-        // whitespace is trimmed off the range so it never paints bare spaces.
+        // Adding a trailing comment: the highlight is `// note`, not ` // note`.
         let d = build("    let x = 1;\n", "    let x = 1; // note\n");
         let ins = d.rows.iter().find(|r| matches!(r, Row::Insertion { .. })).unwrap();
         assert_eq!(ins.emphasis().len(), 1);

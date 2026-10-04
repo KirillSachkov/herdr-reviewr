@@ -46,8 +46,7 @@ pub fn rows_from_snippet(
             i += 1;
             on
         });
-        // `render_row` paints `new_no` first; on an old-side range copy `old_no` so the gutter
-        // matches `path:start-end`.
+        // `render_row` paints `new_no` first.
         if side == Side::Old {
             for row in &mut rows {
                 if let Row::Context { old_no, new_no, .. } = row {

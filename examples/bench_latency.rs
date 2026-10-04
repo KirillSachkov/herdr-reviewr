@@ -1,5 +1,4 @@
-//! Component attribution for the perceived-latency work: times the individual blocking calls (git
-//! spawns, diff builds, highlights) that make up a switch, against a real repo.
+//! Component attribution for the perceived-latency work.
 
 use std::path::PathBuf;
 use std::time::Instant;

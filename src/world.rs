@@ -21,8 +21,7 @@ pub struct WorldInput {
     pub scope: Scope,
     /// The `--base` flag, resolved fresh per build.
     pub base: Option<String>,
-    /// Bumped by this pane's own pick, so a build that read the previous pick fails the landing's
-    /// input-equality gate instead of reverting the picked base.
+    /// Bumped by this pane's own pick.
     pub base_epoch: u64,
     /// The `last-turn` baseline tree the changed set diffs against; `None` before a turn.
     pub turn_baseline: Option<String>,
@@ -32,8 +31,7 @@ pub struct WorldInput {
     pub toggled_dirs: HashSet<String>,
 }
 
-/// The derived state one refresh produces: the scope changeset, the navigator entries, and the
-/// `branch` scope's resolved base.
+/// The derived state one refresh produces.
 #[derive(Debug)]
 pub struct WorldSnapshot {
     pub changed: HashMap<String, Annotation>,
@@ -199,14 +197,12 @@ fn build_pick(
     Ok((PickStatus { verdict, subject, count }, changed, Some(old)))
 }
 
-/// The changed-files map every consumer keys by path — one construction site, shared by the worker
-/// build and the scope switch's synchronous rebuild.
+/// The changed-files map every consumer keys by path.
 pub fn annotate(changed: &[ChangedFile]) -> HashMap<String, Annotation> {
     changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect()
 }
 
-/// The persisted turn baseline for `repo`, if any — the one seeding rule, shared by the worker's
-/// tracker and the app's first-frame mirror.
+/// The persisted turn baseline for `repo`, if any.
 pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
     git::read_baseline_ref(repo)
 }
@@ -237,8 +233,7 @@ pub(crate) fn all_files_entries(
     Ok(entries)
 }
 
-/// Turn tracking, owned by the worker: the sample, the snapshot capture, and the baseline promotion
-/// happen on one thread, so the snapshot always rides the sample that observed the edge.
+/// Turn tracking, owned by the worker.
 #[derive(Debug)]
 pub struct TurnHost {
     tracker: TurnTracker,
@@ -302,8 +297,7 @@ fn classify(
 }
 
 impl TurnHost {
-    /// Resume any persisted turn baseline for this worktree, so `last-turn` keeps its anchor across
-    /// a reviewr pane restart.
+    /// Resume any persisted turn baseline for this worktree.
     pub fn open(repo: PathBuf) -> Self {
         let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
         Self { tracker, repo, resolved: HashMap::new() }
@@ -318,8 +312,7 @@ impl TurnHost {
         self.observe_agents(crate::herdr::agent_samples().ok().as_deref())
     }
 
-    /// Advance the baseline from one enumeration — the core [`Self::sample`] wraps, and the seam
-    /// tests drive without herdr.
+    /// Advance the baseline from one enumeration.
     pub fn observe_agents(&mut self, samples: Option<&[AgentSample]>) -> TurnReport {
         let Some(samples) = samples else {
             return TurnReport { ended: false, agents_present: None };
@@ -403,8 +396,7 @@ pub struct WorldRequest {
 pub struct WorldJob {
     pub generation: u64,
     pub input: WorldInput,
-    /// Poll-driven requests sample the agents in the worktree; tab entry and `r` do not, so the
-    /// herdr CLI call count tracks the poll alone.
+    /// Poll-driven requests sample the agents in the worktree.
     pub sample_turn: bool,
     /// A user-initiated switch re-reveals the cursor when its result lands; a poll never does.
     pub reveal: bool,
@@ -470,8 +462,7 @@ mod tests {
 
     #[test]
     fn only_an_absolute_cwd_can_name_a_worktree() {
-        // A blank or relative cwd would resolve against reviewr's own cwd (the reviewed worktree),
-        // so membership must reject it before any git call.
+        // A blank or relative cwd would resolve against reviewr's own cwd (the reviewed worktree).
         let abs = if cfg!(windows) { r"C:\abs\path" } else { "/abs/path" };
         assert_eq!(worktree_cwd(Some(abs)), Some(abs));
         assert_eq!(worktree_cwd(Some("relative/path")), None);

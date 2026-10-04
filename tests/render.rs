@@ -1,5 +1,4 @@
-//! Render tests: drive `ui::render` through ratatui's `TestBackend` and assert on the painted
-//! buffer, so the layout and component wiring are checked for real.
+//! Render tests: drive `ui::render` through ratatui's `TestBackend` and assert on the painted buffer.
 
 mod common;
 
@@ -57,8 +56,7 @@ const SELECTION_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x58, 0x5
 /// Catppuccin orange — the comment-editor caret block.
 const PEACH: ratatui::style::Color = ratatui::style::Color::Rgb(0xfa, 0xb3, 0x87);
 
-/// The right `100-pct`% of every frame row, for pane-scoped assertions — one home for the column
-/// math, so the two panes' cut points can't drift apart silently.
+/// The right `100-pct`% of every frame row, for pane-scoped assertions.
 fn right_column(out: &str, pct: usize) -> String {
     out.lines()
         .map(|l| l.chars().skip(l.chars().count() * pct / 100).collect::<String>())
@@ -201,8 +199,7 @@ fn a_height_capped_composer_scrolls_to_keep_the_caret_visible() {
         .flat_map(|y| (0..buffer.area.width).map(move |x| (x, y)))
         .find(|&(x, y)| buffer.cell((x, y)).unwrap().symbol() == "z")
         .expect("the box scrolled the last typed character into view");
-    // The cursor sits where the next character lands: right after `z`, or on the first text column
-    // of the fresh row below when `z` exactly filled its row.
+    // The cursor sits where the next character lands.
     let inline = (cursor.x, cursor.y) == (zx + 1, zy);
     let row_start =
         (0..buffer.area.width).find(|&x| buffer.cell((x, zy)).unwrap().symbol() == "x").unwrap();
@@ -296,8 +293,7 @@ fn edited_app() -> App {
     r.write("hello.rs", "alpha\nbeta\n");
     r.commit_all("init");
     r.write("hello.rs", "alpha\nBETA\n");
-    // The repo is only needed through reload(); rendering reads cached state, so `r` can drop here
-    // and clean up its tempdir.
+    // The repo is only needed through reload().
     app_on(&r)
 }
 
@@ -313,8 +309,7 @@ fn the_file_list_renders_as_a_directory_tree() {
     r.write("Cargo.toml", "[package]\nname='z'\n");
     let app = app_on(&r);
 
-    // Scan only the default-right navigator so the diff header — which does show the open file's
-    // full path — doesn't confuse the assertions.
+    // Scan only the default-right navigator so the diff header.
     let files_pane = right_column(&render(&app), 70);
     assert!(files_pane.contains("src/"), "the directory groups its files: {files_pane:?}");
     assert!(files_pane.contains("app.rs") && files_pane.contains("ui.rs"), "files by basename");
@@ -435,8 +430,7 @@ fn a_long_line_wraps_across_display_rows() {
 
 #[test]
 fn wrapping_breaks_at_word_boundaries() {
-    // Words sized so the line must wrap, but no word is wider than the pane: every break should
-    // land on a space, so no word is split across two display rows.
+    // Words sized so the line must wrap, but no word is wider than the pane.
     let words = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima \
                  mike november oscar papa quebec romeo sierra tango";
     let r = Repo::init();
@@ -550,8 +544,7 @@ const UNFOCUSED_CURSOR_BG: ratatui::style::Color = ratatui::style::Color::Rgb(0x
 
 #[test]
 fn the_diff_cursor_row_is_marked_from_either_pane() {
-    // The diff pane's cursor row fills like the file list's: brightest when the pane holds focus, a
-    // step softer when it does not.
+    // The diff pane's cursor row fills like the file list's.
     let mut app = edited_app();
     app.focus = Focus::Diff;
     app.next_hunk();
@@ -711,8 +704,7 @@ fn the_footer_trims_trailing_actions_to_fit_keeping_the_primary_and_the_more_hin
     assert!(narrow.contains("c comment"), "the primary action is never dropped:\n{narrow}");
     assert!(narrow.trim_end().ends_with('?'), "the `?` never drops:\n{narrow}");
     assert!(!narrow.contains("v select"), "the trailing action is trimmed off row 1:\n{narrow}");
-    // Too narrow for the primary and the `?` together: the primary sheds its label to its key, and
-    // the `?` still survives at the right.
+    // Too narrow for the primary and the `?` together.
     let tiny = footer_line(&render_at(&app, 11));
     assert!(tiny.contains(" c "), "the primary keeps its key:\n{tiny}");
     assert!(!tiny.contains("comment"), "the primary sheds its label:\n{tiny}");
@@ -958,8 +950,7 @@ fn pr_header_names_the_resolved_branch_and_marks_a_fork() {
             ..common::pr_snapshot()
         }))
     };
-    // The header shows the branch that resolved — it can differ from the local branch — and marks a
-    // fork head, so a same-named fork PR is visible.
+    // The header shows the branch that resolved.
     app.pr = snap(false);
     let header = render(&app).lines().next().unwrap().to_string();
     assert!(header.contains("persiyanov/feature"), "resolved branch in the header:\n{header}");
@@ -1423,8 +1414,7 @@ fn last_turn_with_an_agent_and_no_turn_yet_waits_for_the_first() {
 
 #[test]
 fn last_turn_before_the_first_sample_waits_rather_than_asserting_emptiness() {
-    // The pre-poll frame has observed nothing, so it may wait but not claim the worktree is empty —
-    // stale is allowed, wrong is not (Continuity).
+    // The pre-poll frame has observed nothing.
     let r = Repo::init();
     r.write("a.rs", "a\n");
     r.commit_all("init");
@@ -1603,8 +1593,7 @@ fn a_block_is_numbered_on_its_content_never_on_the_gap_above_it() {
     // A quote's second paragraph: its `▎` gap row is no content, so the number sits on `b`.
     assert!(out.contains("  3 ▎ b"), "the quote's block numbers its text:\n{out}");
     assert!(!out.lines().any(|l| l.contains("  3 ▎ ") && !l.contains('b')), "{out}");
-    // A fenced block owns its fences: the blank gap above it is no unit of its own, and the block
-    // numbers its first code line with the fence's line.
+    // A fenced block owns its fences.
     assert!(out.contains("  5   let x = 1;"), "the code block numbers its code:\n{out}");
 }
 
@@ -1618,8 +1607,7 @@ fn a_deleted_markdown_file_offers_no_rendered_toggle_in_the_footer() {
     assert_eq!(app.diff_path.as_deref(), Some("gone.md"));
     app.focus = Focus::Diff;
 
-    // The deletion rows are commentable, but a deleted file has no current content, so the footer
-    // never offers the inert rendered toggle.
+    // The deletion rows are commentable, but a deleted file has no current content.
     let out = render(&app);
     let footer = out.lines().last().unwrap();
     assert!(footer.contains("c comment"), "a deletion row is commentable:\n{footer}");
@@ -1862,8 +1850,7 @@ fn pr_navigator_scroll_is_independent_and_preserved() {
     assert!(scrolled.contains("@author-00"), "the wheel exposes overflowed comments:\n{scrolled}");
     assert_eq!(app.pr_selected_comment().map(|c| c.author.clone()), selected);
 
-    // Click a comment that is not already selected: the click acts at the release , so it takes a
-    // press and its same-row release.
+    // Click a comment that is not already selected.
     let current = app.pr_selected_comment().map(|c| c.author.clone());
     let (clicked_row, clicked_author) = scrolled
         .lines()
@@ -2164,8 +2151,7 @@ fn a_body_that_fits_the_pane_shows_no_scrollbar() {
     let out = render(&app);
     assert!(!out.contains('┃'), "content that fits paints no thumb:\n{out}");
 
-    // The same pane paints the thumb once its body overflows, so the absence above proves fitting
-    // content, not a dead scrollbar.
+    // The same pane paints the thumb once its body overflows.
     let mut long = String::new();
     for i in 0..80 {
         let _ = writeln!(long, "line {i}\n");
@@ -2194,8 +2180,7 @@ fn rendered_rows_paint_link_and_details_regions() {
         (u16::try_from(x).unwrap(), u16::try_from(y).unwrap())
     };
 
-    // The regions sit where the text paints, right of the gutter: the link's first cell resolves
-    // and the cell before it does not.
+    // The regions sit where the text paints, right of the gutter.
     let buf = render_buffer(&app);
     assert!(dump(&buf).contains("README.md · rendered"), "the title names the mode");
     let (x, y) = cell_of(&buf, "docs");
@@ -2240,8 +2225,7 @@ fn the_changes_tab_paints_rendered_markdown() {
     assert!(out.contains("README.md · rendered"), "the title names the mode:\n{out}");
     assert!(out.contains("Install"), "the heading text renders:\n{out}");
     assert!(!out.contains("# Install"), "the # markers are gone rendered:\n{out}");
-    // "checks" is on the new side only (the committed side is the bare heading), so this proves the
-    // render shows current content, not the old version being diffed.
+    // "checks" is on the new side only (the committed side is the bare heading).
     assert!(out.contains("checks"), "the render shows the new-side content:\n{out}");
     let footer = out.lines().last().unwrap();
     assert!(footer.contains("m source"), "the footer leads to the diff:\n{footer}");
@@ -2307,8 +2291,7 @@ fn an_anchor_in_a_comment_body_jumps_past_the_snippet_offset() {
     let out = render(&app);
     assert!(out.contains("new"), "the snippet paints above the body:\n{out}");
 
-    // The anchor stores its content line snippet-offset included, so the jump lands on the heading,
-    // scrolling the snippet and the body's top out of view.
+    // The anchor stores its content line snippet-offset included.
     app.open_link("#target");
     let out = render(&app);
     assert!(out.contains("Target"), "the heading is on screen:\n{out}");
@@ -2740,8 +2723,7 @@ mod search_screen_render {
 
         let buf = render_size(&app, 140, 40);
         let out = dump(&buf);
-        // The results row above is correctly trimmed; assert on the preview row, which keeps the
-        // true indentation — that is where the trimmed spans had to be shifted.
+        // The results row above is correctly trimmed.
         let preview_at =
             out.lines().position(|l| l.contains("─ preview")).expect("the preview divider");
         let below = out
@@ -2803,8 +2785,7 @@ mod search_screen_render {
 
     #[test]
     fn an_elided_file_result_still_highlights_the_visible_match() {
-        // A head-elided path must still mark a match that survives in the shown tail — the
-        // highlight is unconditional, remapped across the elision, not dropped.
+        // A head-elided path must still mark a match that survives in the shown tail.
         let repo = Repo::init();
         let path = "aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbb/target_match.rs";
         repo.write(path, "x\n");
@@ -2843,8 +2824,7 @@ mod search_screen_render {
         repo.commit_all("c");
         let mut app = open_on_all_files(&repo);
         land(&mut app, SearchResults::default()); // warm, so the chips have a fixed width
-        // The caret sits at the end of the query; a band narrower than the query must scroll its
-        // head off and keep the tail (and caret) on screen.
+        // The caret sits at the end of the query.
         let query = "aaaaHEAD_bbbbccccddddeeeeffffgggg_TAILzzzz";
         for c in query.chars() {
             key(&mut app, KeyCode::Char(c));
@@ -2888,8 +2868,7 @@ mod search_screen_render {
 
     #[test]
     fn a_poll_refreshes_the_open_preview_in_place() {
-        // A landed poll rebuilds the previewed file's diff in place, so the preview follows the
-        // worktree while the held results stay as queried (Continuity).
+        // A landed poll rebuilds the previewed file's diff in place.
         let repo = Repo::init();
         repo.write("a.rs", "alpha\n");
         repo.commit_all("c");
@@ -2950,8 +2929,7 @@ mod search_row_emphasis {
         enter_tab(&mut app, Tab::AllFiles);
         handle_key(&mut app, KeyEvent::from(KeyCode::Char('/')), AREA, default_keymap()).unwrap();
 
-        // A long head of `x`s pushes the match past the pane, so the row clips around the first
-        // matched span (`needle_marker`, 13 bytes) rather than the un-shown head.
+        // A long head of `x`s pushes the match past the pane.
         let text = format!("{}needle_marker tail", "x".repeat(200));
         let start = 200u32;
         let hit = CodeHit { path: "a.rs".into(), line: 1, text, spans: vec![(start, start + 13)] };
@@ -2976,8 +2954,7 @@ mod search_row_emphasis {
             Some(app.palette().match_hl),
             "the matched span wears the match highlight",
         );
-        // A cell in the clipped `…x` head keeps the selection fill, not the match highlight — the
-        // band covers the match only, never spilling left across the cut.
+        // A cell in the clipped `…x` head keeps the selection fill, not the match highlight.
         let ell = row.find('…').unwrap();
         let head_x = row[..ell].chars().count() as u16 + 1;
         assert_ne!(
@@ -2987,8 +2964,7 @@ mod search_row_emphasis {
         );
     }
 
-    /// A tab-indented code row expands its tabs to spaces, so the indentation shows and the
-    /// emphasis lands on the matched word, not shifted by the collapsed tabs
+    /// A tab-indented code row expands its tabs to spaces.
     #[test]
     fn tab_indented_code_row_expands_and_emphasizes() {
         let repo = Repo::init();
@@ -3023,8 +2999,7 @@ mod search_row_emphasis {
         );
     }
 
-    /// A multi-byte head forced through the clip path must paint, not panic — the engine's span
-    /// offsets are bytes and the cut walks char boundaries.
+    /// A multi-byte head forced through the clip path must paint, not panic.
     #[test]
     fn clipped_multibyte_code_row_paints() {
         let repo = Repo::init();
@@ -3053,8 +3028,7 @@ mod search_row_emphasis {
             .lines()
             .position(|l| l.contains("needle"))
             .expect("the clipped multibyte row paints without panicking") as u16;
-        // The highlight starts exactly on the match, not shifted onto the multibyte head: the first
-        // highlighted cell on the row is `needle`'s `n`.
+        // The highlight starts exactly on the match, not shifted onto the multibyte head.
         let hx = (0..buf.area.width)
             .find(|&x| buf.cell((x, y)).expect("cell").style().bg == Some(app.palette().match_hl))
             .expect("the match is highlighted");
@@ -3097,8 +3071,7 @@ fn picker_app() -> App {
 fn the_last_sent_row_carries_its_tag_and_no_other_row_does() {
     let mut app = edited_app();
     write_comment(&mut app, "one");
-    // A prior send to release-bot arms the highlight there and tags the row, so the remembered
-    // default reads before `enter` fires it.
+    // A prior send to release-bot arms the highlight there and tags the row.
     app.last_sent_pane = Some("w8:p2".to_string());
     app.open_picker(vec![
         agent_row("w8:p1", "claude", "idle", "1"),
@@ -3154,8 +3127,7 @@ fn neither_popup_reaches_the_footer_that_advertises_its_keys() {
         agent_row("w8:p2", "release-bot", "idle", "Grip Outreach Campaign"),
     ];
 
-    // Both popups place through one rule, `body_popup`, so at every pane size the footer keeps
-    // naming the keys the popup is listening for — it is the only surface that does
+    // Both popups place through one rule, `body_popup`.
     for h in 8..=30u16 {
         app.open_list();
         let listed = dump(&render_size(&app, 44, h));
@@ -3235,8 +3207,7 @@ fn a_picker_taller_than_the_pane_scrolls_to_keep_the_highlight_visible() {
     let scrolled = dump(&render_size(&app, 80, 12));
     assert!(scrolled.contains("agent20"), "the view follows the highlight:\n{scrolled}");
 
-    // The popup clamps to the body band, so even this over-tall picker never covers the footer —
-    // the one surface advertising its keys.
+    // The popup clamps to the body band.
     let last_row = scrolled.lines().last().unwrap_or_default().to_string();
     assert!(last_row.contains("enter"), "the footer keeps the picker's keys: {last_row:?}");
 }
@@ -3335,8 +3306,7 @@ fn the_picker_title_counts_matches_while_filtering() {
     assert!(render(&app).contains("base · 1/3"), "matched over total: {}", render(&app));
     app.close_base_picker();
 
-    // A current non-branch pick is a row, never a count: `HEAD~1` is listed under the three
-    // branches but both numbers still say three.
+    // A current non-branch pick is a row, never a count.
     herdr_reviewr::git::write_base_pick(r.path(), "HEAD~1").unwrap();
     app.set_scope(Scope::Branch).unwrap();
     app.open_base_picker();
@@ -3353,8 +3323,7 @@ fn the_picker_title_counts_matches_while_filtering() {
 
 #[test]
 fn a_probe_row_still_fits_when_every_branch_matches() {
-    // One branch, and it matches the query: the frozen full-list height has no spare row, so the
-    // box must grow by the hit's row or the tag is unpainted and unclickable.
+    // One branch, and it matches the query.
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
@@ -3682,8 +3651,7 @@ fn without_a_resolving_base_the_header_reads_no_base() {
 
 #[test]
 fn a_local_only_repo_has_its_main_as_the_base() {
-    // No remote at all: `origin/HEAD` names nothing, and the local `main` is the default, so the
-    // header never reads `no base` in a repo that plainly has a trunk.
+    // No remote at all: `origin/HEAD` names nothing, and the local `main` is the default.
     let r = Repo::init();
     r.write("hello.rs", "alpha\n");
     r.commit_all("init");
@@ -3788,8 +3756,7 @@ fn a_narrow_header_never_maps_a_click_outside_the_painted_base() {
             .filter(|&c| ui::hit_header(area, &app, app.keymap(), c, 0) == Some(HeaderHit::Base))
             .collect();
         let Some((&first, &last)) = hits.first().zip(hits.last()) else {
-            // Too narrow for even one column of the name: the base left the header whole, so
-            // nothing paints a nameless `vs` and nothing claims it.
+            // Too narrow for even one column of the name.
             assert!(!line0.contains("vs"), "width {width}: a nameless `vs` paints: {line0}");
             assert!(line0.contains("[branch]"), "width {width}: the scope survives: {line0}");
             continue;
@@ -3855,8 +3822,7 @@ fn the_hovered_row_shows_a_plus_in_its_change_bar_cell() {
     let buf = render_buffer(&app);
     assert_eq!(buf.cell((inner.x, inner.y)).unwrap().symbol(), "▌");
 
-    // Hovering anywhere on the row puts the `[+]` button over the number field; the change bar
-    // stays, so the diff signal never blinks.
+    // Hovering anywhere on the row puts the `[+]` button over the number field.
     app.hover = Some((inner.x + 8, inner.y));
     let buf = render_buffer(&app);
     assert_eq!(buf.cell((inner.x, inner.y)).unwrap().symbol(), "▌");
@@ -3869,8 +3835,7 @@ fn the_hovered_row_shows_a_plus_in_its_change_bar_cell() {
 
 #[test]
 fn the_plus_button_right_aligns_in_a_wide_number_field() {
-    // A 1000-line file widens the number field past the 3-column minimum, so the right-aligned
-    // `[+]` leaves blank padding on its left, like the numbers it replaces.
+    // A 1000-line file widens the number field past the 3-column minimum.
     let r = Repo::init();
     r.write("base.rs", "fn main() {}\n");
     r.commit_all("init");
@@ -3902,8 +3867,7 @@ fn the_text_selection_highlights_the_dragged_span() {
     let area = Rect::new(0, 0, 140, 40);
     let inner = ui::read_inner_rect(area, &app);
     let sel_bg = app.palette().sel_bg;
-    // The selection fill is its own slot, distinct by hue from the cursor fills, so a selection
-    // reads inside a cursor row.
+    // The selection fill is its own slot, distinct by hue from the cursor fills.
     app.diff_cursor = 1;
 
     // `beta` on row 0 through char 1 (`本`) of row 2: a three-row stream selection.
@@ -3917,16 +3881,14 @@ fn the_text_selection_highlights_the_dragged_span() {
     };
     let buf = render_buffer(&app);
     let bg = |x: u16, y: u16| buf.cell((x, y)).unwrap().style().bg;
-    // The `b` of beta is selected; the chars before the anchor are not — the first row runs from
-    // its start character, not whole.
+    // The `b` of beta is selected; the chars before the anchor are not.
     assert_eq!(bg(inner.x + 5 + 6, inner.y), Some(sel_bg));
     assert_ne!(bg(inner.x + 5, inner.y), Some(sel_bg));
     assert_ne!(bg(inner.x + 5 + 5, inner.y), Some(sel_bg));
     // Row 1 lies whole between the endpoints: tab expansion through its last char.
     assert_eq!(bg(inner.x + 5, inner.y + 1), Some(sel_bg));
     assert_eq!(bg(inner.x + 5 + 6, inner.y + 1), Some(sel_bg));
-    // Row 2 runs up to its end character: both wide glyphs (each asserted at its first cell — the
-    // buffer diff skips a wide char's hidden continuation cell), and nothing past them.
+    // Row 2 runs up to its end character.
     assert_eq!(bg(inner.x + 5, inner.y + 2), Some(sel_bg));
     assert_eq!(bg(inner.x + 5 + 2, inner.y + 2), Some(sel_bg));
     assert_ne!(bg(inner.x + 5 + 4, inner.y + 2), Some(sel_bg));
@@ -4260,8 +4222,7 @@ const FILES_X0: u16 = 140 - 140 * 32 / 100 + 1;
 /// Its last inner column: the frame edge less the right border.
 const FILES_X1: u16 = 140 - 2;
 
-/// The files-pane row holding `token`: its y, and its text from the pane's first inner column to
-/// its last, untrimmed, so a test can check both what a row ends in and where.
+/// The files-pane row holding `token`.
 fn files_row_at(buf: &Buffer, token: &str) -> (u16, String) {
     let row = |y: u16| -> String {
         (FILES_X0..=FILES_X1).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect()
@@ -4343,8 +4304,7 @@ fn a_kept_change_under_an_ignored_folder_wears_the_same_dot() {
 
 #[test]
 fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
-    // A staged deletion leaves the index, so `All files` has no row for it and the folder stays
-    // quiet: a dot there would open onto nothing.
+    // A staged deletion leaves the index.
     let r = dotted_repo();
     r.write("gone/a.rs", "a\n");
     r.write("gone/b.rs", "b\n");
@@ -4362,8 +4322,7 @@ fn a_folder_whose_only_change_has_no_row_wears_no_dot() {
 
 #[test]
 fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
-    // On `Changes` every folder holds a change, so the dot would say nothing, and the row keeps its
-    // full width for the name.
+    // On `Changes` every folder holds a change.
     let r = dotted_repo();
     r.write("src/app.rs", "x2\n"); // two changed files keep `src/` a directory row
     let mut app = app_on(&r);

@@ -60,8 +60,7 @@ impl Repo {
         self.dir.path().to_path_buf()
     }
 
-    /// Like [`Self::git`] with extra environment variables — a pinned committer date makes
-    /// commit-recency ordering deterministic without sleeping across a clock tick.
+    /// Like [`Self::git`] with extra environment variables.
     pub fn git_env(&self, args: &[&str], env: &[(&str, &str)]) -> String {
         let out = Command::new("git")
             .env("GIT_AUTHOR_NAME", "Test")
@@ -87,8 +86,7 @@ impl Repo {
         self.git_env(args, &[])
     }
 
-    /// Fabricate a remote-tracking default branch without a real remote: a
-    /// `refs/remotes/origin/<name>` ref at the given rev plus the `origin/HEAD` symref.
+    /// Fabricate a remote-tracking default branch without a real remote.
     pub fn set_origin_default(&self, name: &str, rev: &str) {
         let oid = self.git(&["rev-parse", rev]).trim().to_string();
         self.git(&["update-ref", &format!("refs/remotes/origin/{name}"), &oid]);
@@ -108,8 +106,7 @@ impl Repo {
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick` — for the
-    /// values only a foreign writer could put on this worktree's pick ref.
+    /// Record `content` as the base-pick blob verbatim, bypassing `write_base_pick`.
     pub fn write_raw_base_pick(&self, content: &str) {
         self.plant_blob("refs/worktree/reviewr/base-pick", content);
     }
@@ -227,8 +224,7 @@ pub fn comment() -> herdr_reviewr::forge::Comment {
     }
 }
 
-/// Switch to `tab` and service the deferred reload the switch schedules, so assertions run against
-/// the freshly reloaded state — the same sequence the event loop performs.
+/// Switch to `tab` and service the deferred reload the switch schedules.
 pub fn enter_tab(app: &mut App, tab: herdr_reviewr::app::Tab) {
     app.set_tab(tab).unwrap();
     land_world(app);

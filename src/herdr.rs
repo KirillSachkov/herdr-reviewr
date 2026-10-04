@@ -433,8 +433,7 @@ impl AgentPane {
         Status::from_wire(&self.agent_status)
     }
 
-    /// A real agent pane other than our own — the shared gate both readers apply, so turn sampling
-    /// and send targeting never drift on what counts as an agent (`../docs/herdr-api-notes.md`).
+    /// A real agent pane other than our own.
     fn is_agent_other_than(&self, me: Option<&str>) -> bool {
         self.agent.is_some() && Some(self.pane_id.as_str()) != me
     }
@@ -552,8 +551,7 @@ enum Readiness {
     Gone,
 }
 
-/// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of sending:
-/// a prompt drops a paste, so the comments would never reach the input (`docs/herdr-api-notes.md`).
+/// Refuse a send to an agent at a prompt, read from a fresh `agent list` at the moment of sending.
 fn ensure_ready(pane: &str) -> Result<()> {
     let agents = match agent_list() {
         Ok(agents) => agents,

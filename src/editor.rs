@@ -48,8 +48,7 @@ const DIALECTS: &[Dialect] = &[
         window: true,
     },
     Dialect { names: &["subl", "sublime_text"], line: LineArg::Suffix, window: true },
-    // Plain `zed` collides with the OpenZFS event daemon, so Linux packages ship the CLI under a
-    // name of their own.
+    // Plain `zed` collides with the OpenZFS event daemon.
     Dialect { names: &["zed", "zeditor", "zedit"], line: LineArg::Suffix, window: true },
     Dialect { names: &["bbedit", "gedit"], line: LineArg::Plus, window: true },
     Dialect { names: &["mate"], line: LineArg::Flag, window: true },
@@ -253,8 +252,7 @@ mod tests {
 
     #[test]
     fn window_editors_get_their_line_and_nothing_else() {
-        // reviewr adds no flag of its own: the launcher hands the file over and returns, and
-        // nothing waits on it.
+        // reviewr adds no flag of its own.
         for name in ["code", "code-insiders", "codium", "cursor", "windsurf", "positron"] {
             assert_eq!(argv(&env(name).unwrap()), format!("{name} -g /repo/src/lib.rs:41"));
         }
@@ -291,8 +289,7 @@ mod tests {
 
     #[test]
     fn only_a_terminal_editor_is_handed_the_pane() {
-        // The one question the argv does not answer, so nothing else in this module asserts it:
-        // which of the two paths `run_editor` takes.
+        // The one question the argv does not answer.
         for name in ["vim", "nvim", "nano", "micro", "kak", "emacs", "hx", "helix"] {
             assert!(env(name).unwrap().wants_terminal, "{name} paints in the pane");
         }

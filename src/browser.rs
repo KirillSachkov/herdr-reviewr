@@ -61,8 +61,7 @@ fn spawn_detached(tool: &str, mut command: Command) -> Result<()> {
     Ok(())
 }
 
-/// The configured opener's program and arguments: `template` split the way the `editor` key is,
-/// `{url}` substituted per word — so a URL never splits — and appended when absent.
+/// The configured opener's program and arguments.
 fn opener_argv(template: &str, url: &str) -> Option<(String, Vec<String>)> {
     let names_url = template.contains("{url}");
     let mut words =

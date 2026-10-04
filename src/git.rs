@@ -51,8 +51,7 @@ fn git_error(args: &[&str], what: &str, detail: impl std::fmt::Display) -> Strin
     format!("git {} {what}: {detail}", subcommand(args))
 }
 
-/// The git subcommand an argv runs, for an error the reviewer reads: `rev-parse`, not the whole
-/// argv in Rust's debug quoting.
+/// The git subcommand an argv runs, for an error the reviewer reads.
 fn subcommand<'a>(args: &[&'a str]) -> &'a str {
     let mut rest = args.iter().copied();
     while let Some(arg) = rest.next() {
@@ -203,8 +202,7 @@ pub struct ForgeHosts<'a> {
 pub struct RepoTarget {
     forge: Forge,
     host: String,
-    /// Exactly `[owner, name]` for GitHub; the full namespace path (2+ segments) for GitLab;
-    /// exactly `[organization, project, repository]` for Azure DevOps.
+    /// Exactly `[owner, name]` for GitHub.
     path: Vec<String>,
 }
 
@@ -220,14 +218,12 @@ impl RepoTarget {
         let host = host.to_ascii_lowercase();
         let valid_len = match forge {
             Forge::GitHub => segments.len() == 2,
-            // GitLab reserves `-` as the separator between a project path and the rest of a web
-            // URL, so a pasted browse link is a malformed remote, not a deep namespace.
+            // GitLab reserves `-` as the separator between a project path and the rest of a web URL.
             Forge::GitLab => segments.len() >= 2 && !segments.contains(&"-"),
             // Always `[organization, project, repository]`, shaped by `ado_canonicalize`.
             Forge::AzureDevOps => segments.len() == 3,
         };
-        // Azure DevOps project and repository names admit spaces and non-ASCII characters, which
-        // arrive percent-encoded and are decoded by `ado_canonicalize`.
+        // Azure DevOps project and repository names admit spaces and non-ASCII characters.
         let valid_component: fn(&str) -> bool = match forge {
             Forge::AzureDevOps => valid_ado_component,
             _ => valid_repository_component,
@@ -296,8 +292,7 @@ fn valid_repository_component(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-/// An Azure DevOps identity segment after percent-decoding: any visible name, so long as it cannot
-/// smuggle a path step, an option-shaped token, or a control sequence into a CLI argument.
+/// An Azure DevOps identity segment after percent-decoding.
 fn valid_ado_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -375,8 +370,7 @@ pub(crate) fn forge_for_host(host: &str, hosts: &ForgeHosts<'_>) -> Option<Forge
     None
 }
 
-/// Canonicalize an Azure DevOps remote into its one target identity: the canonical host and the
-/// `[organization, project, repository]` path.
+/// Canonicalize an Azure DevOps remote into its one target identity.
 fn ado_canonicalize(host: &str, segments: &[&str]) -> Option<(String, Vec<String>)> {
     // The ssh forms carry a leading `v3` marker and their own hostnames.
     let (host, segments): (String, Vec<&str>) = match host {
@@ -465,8 +459,7 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
 // transient [`GitFail`], never read as absence. The caller distinguishes a target read failure
 // from a later branch-state failure so only an unproven target replaces the visible snapshot.
 
-/// A git command that failed (spawn error or unexpected non-zero exit) during the PR fetch's local
-/// reads — a transient failure per, never absence.
+/// A git command that failed (spawn error or unexpected non-zero exit) during the PR fetch's local reads.
 #[derive(Debug)]
 pub struct GitFail(pub String);
 
@@ -508,8 +501,7 @@ fn git_strict(repo: &Path, args: &[&str]) -> Result<String, GitFail> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrFetchInput {
     pub repository: RepositoryIdentity,
-    /// The `origin` repository, when it is a usable forge identity — on a fork clone it is the
-    /// fork, queried beside the target.
+    /// The `origin` repository, when it is a usable forge identity.
     pub origin_repository: Option<RepoTarget>,
     /// The locally derived pins and published heads, read in the same pass.
     pub local: PrLocalState,
@@ -518,18 +510,15 @@ pub struct PrFetchInput {
 /// The local identity one PR fetch derives: the pins, the branch, and where its work lives.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrLocalState {
-    /// `HEAD` pinned to an OID at the start of the pass; every ancestry test, distance, and the
-    /// `sync` count use this pin, so one fetch reads one consistent local state.
+    /// `HEAD` pinned to an OID at the start of the pass.
     pub head_oid: Option<String>,
-    /// The winning base entry pinned to an OID — the paint guard keys on it, so a base moving
-    /// mid-fetch never paints a stale verdict.
+    /// The winning base entry pinned to an OID.
     pub base_oid: Option<String>,
     /// The checked-out branch. `None` is a detached `HEAD`: no branch, no PR story.
     pub branch: Option<String>,
     /// The branch's published heads: every (repository, branch name) its work was pushed to.
     pub heads: Vec<Head>,
-    /// The pull request a `gh pr checkout` or `glab mr checkout` recorded as the branch's upstream
-    /// — an exact key that outranks every name lookup.
+    /// The pull request a `gh pr checkout` or `glab mr checkout` recorded as the branch's upstream.
     pub pin: Option<PrPin>,
 }
 
@@ -682,8 +671,7 @@ impl ResolvedBase {
     }
 }
 
-/// The chain outcome the header paints: the winner and the first recorded choice the chain skipped
-/// because it no longer resolves.
+/// The chain outcome the header paints.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseStatus {
     pub winner: Option<ResolvedBase>,
@@ -694,8 +682,7 @@ pub struct BaseStatus {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BaseResolution {
     pub status: BaseStatus,
-    /// The default branch the chain ran against ([`default_branch_name`]), so the picker marks its
-    /// row from the same pass that resolved the winner.
+    /// The default branch the chain ran against ([`default_branch_name`]).
     pub default: Option<String>,
     candidates: Vec<ResolvedBase>,
     recorded: Vec<String>,
@@ -828,8 +815,7 @@ pub struct BranchRow {
     pub tip_secs: u64,
 }
 
-/// Every branch for the base picker: `refs/heads` and `refs/remotes/origin` merged by bare name,
-/// newest tip first, `origin/HEAD` excluded.
+/// Every branch for the base picker.
 pub fn list_branches(repo: &Path) -> Result<Vec<BranchRow>, GitFail> {
     let out = git_strict(
         repo,
@@ -912,12 +898,10 @@ fn frontier_names(
     bases: &[String],
 ) -> Result<Vec<(String, String)>, GitFail> {
     if tips.is_empty() {
-        // Nothing is published at all; skip the history walk, which `--not --remotes` would
-        // otherwise run unbounded.
+        // Nothing is published at all; skip the history walk.
         return Ok(Vec::new());
     }
-    // Only configured remotes bound the walk: a ref a removed remote left behind is no publication
-    // and must not hide the real frontier.
+    // Only configured remotes bound the walk.
     let excluded: Vec<String> = remotes.iter().map(|r| format!("--remotes={r}")).collect();
     let mut args = vec!["rev-list", "--boundary", head, "--not"];
     args.extend(excluded.iter().map(String::as_str));
@@ -1099,8 +1083,7 @@ fn classify_flag(
     })
 }
 
-/// Where a bare branch name is looked up, in the order that decides a name on both sides: origin's
-/// tip is what the PR sees, so it wins.
+/// Where a bare branch name is looked up, in the order that decides a name on both sides.
 const BRANCH_REF_PREFIXES: [&str; 2] = ["refs/remotes/origin/", "refs/heads/"];
 
 fn resolve_base_entry(repo: &Path, name: &str) -> Result<Option<String>, GitFail> {
@@ -1157,8 +1140,7 @@ enum BranchMerge {
     Other,
 }
 
-/// The branch's upstream record from config — `branch.<name>.remote` and what its first `merge`
-/// names, as git reads it — or `None` when no remote is recorded or it is local (`.`).
+/// The branch's upstream record from config.
 fn branch_record(config: &GitConfig, branch: &str) -> Option<(String, BranchMerge)> {
     let remote = config.get(&format!("branch.{branch}.remote"))?;
     if remote.is_empty() || remote == "." {
@@ -1186,8 +1168,7 @@ fn is_named_remote(config: &GitConfig, value: &str) -> bool {
     config.get(&format!("remote.{value}.url")).is_some()
 }
 
-/// The configured remote names, longest first — the order that splits a remote-tracking refname
-/// whose remote name itself contains `/`.
+/// The configured remote names, longest first.
 fn remote_names(config: &GitConfig) -> Vec<&str> {
     let mut names: Vec<&str> = config
         .0
@@ -1246,8 +1227,7 @@ pub fn ahead_behind_oids(
     local: &str,
     other: &str,
 ) -> Result<Option<(u32, u32)>, GitFail> {
-    // Plain `-e` (no `^{commit}` peel): peeling a missing object exits 128, not the clean-absence 1
-    // this check relies on.
+    // Plain `-e` (no `^{commit}` peel).
     if git_tristate(repo, &["cat-file", "-e", other])?.is_none() {
         return Ok(None);
     }
@@ -1780,8 +1760,7 @@ impl CommitRef {
     }
 }
 
-/// The picker's universe, newest first, along the first-parent walk from `HEAD`: `merge_base..HEAD`
-/// when the base has one, or the last 50 commits without.
+/// The picker's universe, newest first, along the first-parent walk from `HEAD`.
 pub fn list_commits(repo: &Path, merge_base: Option<&str>) -> Result<Vec<CommitRow>> {
     if head_oid(repo).is_none() {
         return Ok(Vec::new());
@@ -1802,8 +1781,7 @@ pub fn list_commits(repo: &Path, merge_base: Option<&str>) -> Result<Vec<CommitR
     Ok(parse_commit_log(&out))
 }
 
-/// Parse `git log --format=%H%x00%s%x00%ct%x00%an%x00%D%x00%P -z` output: six NUL-separated fields
-/// per commit, commits themselves NUL-terminated.
+/// Parse `git log --format=%H%x00%s%x00%ct%x00%an%x00%D%x00%P -z` output.
 fn parse_commit_log(out: &str) -> Vec<CommitRow> {
     let fields: Vec<&str> = out.split('\0').collect();
     fields
@@ -1820,8 +1798,7 @@ fn parse_commit_log(out: &str) -> Vec<CommitRow> {
         .collect()
 }
 
-/// `%D` under `--decorate=full` as typed refs: `HEAD -> refs/heads/feature,
-/// refs/remotes/origin/feature, tag: refs/tags/v1` becomes `Remote("origin/feature")`, `Tag("v1")`.
+/// `%D` under `--decorate=full` as typed refs.
 fn parse_decorations(d: &str) -> Vec<CommitRef> {
     d.split(", ")
         .map(str::trim)
@@ -1838,8 +1815,7 @@ fn parse_decorations(d: &str) -> Vec<CommitRef> {
         .collect()
 }
 
-/// One entry in the `All files` worktree listing: a path plus whether git ignores it and whether it
-/// is a (lazily-expanded) directory placeholder.
+/// One entry in the `All files` worktree listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorktreeEntry {
     pub path: String,
@@ -1953,8 +1929,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
             if !seen.insert(path.clone()) {
                 continue;
             }
-            // An unset `diff` attribute is git's no-text-diff verdict before any content read: no
-            // lines to count, as a tracked `-diff` path shows none.
+            // An unset `diff` attribute is git's no-text-diff verdict before any content read.
             let additions = if undiffable.contains(path.as_str()) {
                 None
             } else {
@@ -2441,8 +2416,7 @@ mod tests {
             classify_remote("https://dev.azure.com/extruct/Extruct%20AI/_git/reviewr-qa", &NONE),
             repo("dev.azure.com", "extruct", "Extruct AI", "reviewr-qa")
         );
-        // The organization is case-insensitive on Azure DevOps and the legacy host derives it
-        // lowercased, so every casing and clone form is one target.
+        // The organization is case-insensitive on Azure DevOps and the legacy host derives it lowercased.
         assert_eq!(
             classify_remote("https://dev.azure.com/Extruct/project/_git/repo", &NONE),
             repo("dev.azure.com", "extruct", "project", "repo")
@@ -2451,8 +2425,7 @@ mod tests {
             classify_remote("Org@vs-ssh.visualstudio.com:v3/Extruct/project/repo", &NONE),
             repo("extruct.visualstudio.com", "extruct", "project", "repo")
         );
-        // On a self-hosted server the first segment is the collection identity, so a literal
-        // `DefaultCollection` collection survives canonicalization.
+        // On a self-hosted server the first segment is the collection identity.
         assert_eq!(
             classify_remote(
                 "https://tfs.corp.example/DefaultCollection/proj/_git/repo",
@@ -2478,8 +2451,7 @@ mod tests {
             classify_remote("https://dev.azure.com/org/project/_git/repo/extra", &NONE),
             RepositoryIdentity::Malformed("dev.azure.com".to_string())
         );
-        // A self-hosted virtual directory is not supported: its extra path segment leaves a
-        // four-part path, which is malformed, not a silently misread target.
+        // A self-hosted virtual directory is not supported.
         assert_eq!(
             classify_remote(
                 "https://tfs.corp.example/tfs/collection/project/_git/repo",
@@ -2554,8 +2526,7 @@ mod tests {
 
     #[test]
     fn numstat_keys_renames_under_the_new_path() {
-        // Under `-z` a rename is `ADDS\tDELS\t\0OLD\0NEW`: old and new are their own fields, no
-        // `=>` arrow or brace form.
+        // Under `-z` a rename is `ADDS\tDELS\t\0OLD\0NEW`.
         let m = parse_numstat("3\t1\t\0src/old.rs\0src/new.rs\0");
         assert_eq!(m["src/new.rs"], Some((3, 1)));
         assert!(!m.contains_key("src/old.rs"));
@@ -2618,8 +2589,7 @@ mod tests {
 
     #[test]
     fn a_copy_keys_under_its_new_path() {
-        // A copy carries old + new like a rename; it must key under the new path, not collapse to a
-        // Modified entry on the source path.
+        // A copy carries old + new like a rename.
         let raw = format!(":100644 100644 {0} {0} C75\0orig.rs\0copy.rs\0", "b".repeat(40));
         let row = &parse_raw(&raw).0[0];
         assert_eq!(

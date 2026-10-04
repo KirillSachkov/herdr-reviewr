@@ -117,8 +117,7 @@ fn a_github_com_prefixed_host_is_only_supported_when_configured_literally() {
 
 #[test]
 fn push_head_other_name_adds_the_pushed_name() {
-    // The headline workflow: `git push origin HEAD:other` with no `-u` updates the remote-tracking
-    // ref; the pushed name joins the branch's forge names.
+    // The headline workflow: `git push origin HEAD:other` with no `-u` updates the remote-tracking ref.
     let repo = worktree();
     repo.git(&["update-ref", "refs/remotes/origin/other", "HEAD"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
@@ -138,8 +137,7 @@ fn unpushed_commits_keep_the_published_boundary_name() {
 
 #[test]
 fn a_zero_work_branch_carries_only_its_own_name() {
-    // The parallel-worktree adversary: HEAD parked at (or behind) the base tip while sibling
-    // branches with open PRs sit at it.
+    // The parallel-worktree adversary.
     let repo = worktree();
     repo.git(&["switch", "-qC", "work", "main"]); // zero work: HEAD == base tip
     repo.git(&["update-ref", "refs/remotes/origin/sibling", "HEAD"]);
@@ -164,8 +162,7 @@ fn a_recorded_upstream_joins_the_names_unless_it_names_a_base() {
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.head_names(), ["work", "pub"]);
 
-    // The record `git switch -c work origin/main` auto-writes is tracking, not publication — it
-    // never joins the names.
+    // The record `git switch -c work origin/main` auto-writes is tracking, not publication.
     repo.git(&["config", "branch.work.merge", "refs/heads/main"]);
     let local = pr_local(repo.path(), None).expect("pr_local");
     assert_eq!(local.head_names(), ["work"]);
@@ -198,8 +195,7 @@ fn every_resolved_base_source_excludes_names() {
 
 #[test]
 fn a_dormant_pick_still_shields_its_name() {
-    // The picked `develop` was never created, so it resolves to nothing, but the record stands: an
-    // upstream naming it is still tracking a base, not publishing to it
+    // The picked `develop` was never created.
     let repo = worktree();
     herdr_reviewr::git::write_base_pick(repo.path(), "develop").unwrap();
     repo.git(&["config", "branch.work.remote", "origin"]);
@@ -211,8 +207,7 @@ fn a_dormant_pick_still_shields_its_name() {
 
 #[test]
 fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
-    // The `develop`-default repo under the stock `main`/`master` config: the base resolves only
-    // through `origin/HEAD`, so no configured entry carries its name.
+    // The `develop`-default repo under the stock `main`/`master` config.
     let repo = Repo::init();
     repo.write("a.txt", "one\n");
     repo.commit_all("base");
@@ -233,8 +228,7 @@ fn an_upstream_on_a_base_resolved_without_its_name_is_excluded_by_tip() {
     assert_eq!(local.base_oid.as_deref(), Some(develop_tip.as_str()), "origin/HEAD wins the pin");
     assert_eq!(local.head_names(), ["work"], "the default branch never joins the names");
 
-    // A verbatim-rev flag (a raw SHA here) has no canonical name either; the tip comparison still
-    // recognizes the upstream as that base.
+    // A verbatim-rev flag (a raw SHA here) has no canonical name either.
     let local = pr_local(repo.path(), Some(&develop_tip)).expect("pr_local");
     assert_eq!(local.head_names(), ["work"]);
 }
@@ -261,8 +255,7 @@ fn a_merged_branch_keeps_its_local_name_and_its_recorded_upstream() {
 
 #[test]
 fn resolve_pick_drives_the_ancestry_guard_against_a_real_repo() {
-    // The history pick wired end to end: a finished PR admits on the branch that holds its head
-    // commit and never on a fresh branch reusing the name
+    // The history pick wired end to end.
     let repo = worktree();
     let old_tip = head(&repo);
     repo.write("c.txt", "three\n");
@@ -355,8 +348,7 @@ fn the_base_flag_resolves_verbatim_revs_before_canonical_entries() {
 
 #[test]
 fn without_a_resolvable_base_no_frontier_name_joins() {
-    // A repo whose only branch is `trunk` and no origin/HEAD: no base resolves, so no frontier name
-    // can be proven beyond one.
+    // A repo whose only branch is `trunk` and no origin/HEAD.
     let repo = Repo::init();
     repo.git(&["branch", "-qm", "trunk"]);
     repo.write("a.txt", "one\n");

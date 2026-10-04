@@ -58,8 +58,7 @@ pub struct Palette {
     /// The search match highlight: a warm fill behind a matched substring, legible over a plain
     /// row, a syntax-colored row, and the preview's banded hit line alike.
     pub match_hl: Color,
-    /// The text-selection highlight, live and settled: a cool fill distinct by hue from the
-    /// `surface1`/`surface2` row fills, so a selection reads inside a cursor row in any pane
+    /// The text-selection highlight, live and settled.
     pub sel_bg: Color,
 }
 
@@ -100,8 +99,7 @@ impl Palette {
         lift(hue, self.base, self.text, MIN_MARK_CONTRAST)
     }
 
-    /// Recede a painted color behind an open modal: halfway to `base`, so the modal owns the eye
-    /// while the page behind stays recognizable.
+    /// Recede a painted color behind an open modal.
     pub fn scrim(&self, color: Color) -> Color {
         match color {
             Color::Rgb(..) => blend(color, self.base, 0.5),
@@ -290,8 +288,7 @@ const ROSE_PINE: Anchors =
     anchors(0x191724, 0xe0def4, 0xeb6f92, 0x9ccfd8, 0xf6c177, 0xebbcba, 0xc4a7e7, 0x31748f);
 const ROSE_PINE_DAWN: Anchors =
     anchors(0xfaf4ed, 0x575279, 0xb4637a, 0x56949f, 0xea9d34, 0xd7827e, 0x907aa9, 0x286983);
-/// ayu Dark from `ayu-colors` 9.1: the `ui.bg` base (the terminal background ayu's own ports use),
-/// the `editor.fg` text, and its syntax palette for the accents.
+/// ayu Dark from `ayu-colors` 9.1.
 const AYU: Anchors =
     anchors(0x0d1017, 0xbfbdb6, 0xf07178, 0xaad94c, 0xffb454, 0xff8f40, 0xd2a6ff, 0x59c2ff);
 /// Everforest dark, hard background: `bg0`, `fg` and the accents from `autoload/everforest.vim`.
@@ -369,8 +366,7 @@ const MIN_FILL_CONTRAST: f64 = 4.5;
 /// The lowest contrast a change mark keeps against the base: WCAG's floor for non-text marks.
 const MIN_MARK_CONTRAST: f64 = 3.0;
 
-/// `fg` blended toward `toward` just far enough to clear `min` contrast on `bg`; `fg` itself when
-/// it already does.
+/// `fg` blended toward `toward` just far enough to clear `min` contrast on `bg`.
 fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
     let mut t = 0.0;
     while t < 1.0 {
@@ -383,8 +379,7 @@ fn lift(fg: Color, bg: Color, toward: Color, min: f64) -> Color {
     toward
 }
 
-/// Lift a syntax `fg` painted on `fill` just enough that the fill costs it no legibility: to its
-/// own contrast on the plain `base`, capped at [`MIN_FILL_CONTRAST`].
+/// Lift a syntax `fg` painted on `fill` just enough that the fill costs it no legibility.
 pub fn legible(fg: Color, fill: Color, base: Color, toward: Color) -> Color {
     let target = contrast(fg, base).min(MIN_FILL_CONTRAST);
     let mut t = 0.0;
@@ -424,8 +419,7 @@ fn readable_tint(
     base
 }
 
-/// Halfway between an accent and its colorful core — the shared gray component removed and the
-/// remainder rescaled to full range.
+/// Halfway between an accent and its colorful core.
 fn saturated(c: Color) -> Color {
     let (r, g, b) = channels(c);
     let lo = r.min(g).min(b);
@@ -509,16 +503,14 @@ mod tests {
         assert_eq!(p.text, Color::Rgb(0xcd, 0xd6, 0xf4));
         assert_eq!(p.del_bg, Color::Rgb(0x45, 0x23, 0x2f));
         assert_eq!(p.ins_bg, Color::Rgb(0x1f, 0x3a, 0x2a));
-        // The renamed slots keep their Mocha values: orange was peach, purple mauve, blue lavender,
-        // and dim0/1/2 were subtext0/overlay1/overlay0.
+        // The renamed slots keep their Mocha values.
         assert_eq!(p.orange, Color::Rgb(0xfa, 0xb3, 0x87));
         assert_eq!(p.purple, Color::Rgb(0xcb, 0xa6, 0xf7));
         assert_eq!(p.blue, Color::Rgb(0xb4, 0xbe, 0xfe));
         assert_eq!(p.dim0, Color::Rgb(0xa6, 0xad, 0xc8));
         assert_eq!(p.dim1, Color::Rgb(0x7f, 0x84, 0x9c));
         assert_eq!(p.dim2, Color::Rgb(0x6c, 0x70, 0x86));
-        // The selection fill: saturated `blue` tinted over `base` at emphasis strength — a real
-        // hue, nothing near the gray `surface1`/`surface2` cursor fills.
+        // The selection fill: saturated `blue` tinted over `base` at emphasis strength.
         assert_eq!(p.sel_bg, Color::Rgb(0x35, 0x3d, 0x7d));
     }
 
@@ -569,8 +561,7 @@ mod tests {
 
     #[test]
     fn distinct_syntax_colors_stay_distinct_on_floor_hugging_themes() {
-        // These themes keep their fills just above the floor for `text`; lifting every color to
-        // that floor would paint them all as `text`.
+        // These themes keep their fills just above the floor for `text`.
         let (comment, keyword) = (Color::Rgb(0x56, 0x5f, 0x89), Color::Rgb(0x9d, 0x7c, 0xd8));
         for name in ["tokyo-night-day", "solarized", "tokyo-night"] {
             let p = resolve(Some(name)).palette;
@@ -587,8 +578,7 @@ mod tests {
 
     #[test]
     fn light_derivation_keeps_diff_fills_legible() {
-        // Exercise the shipped catppuccin-latte anchors, so a real retune that breaks the contrast
-        // floor or the surface ramp is caught here.
+        // Exercise the shipped catppuccin-latte anchors.
         let anchors = CATPPUCCIN_LATTE;
         let p: Palette = derive(anchors, Appearance::Light);
         // Text stays readable on every derived fill, on a light base.
@@ -598,8 +588,7 @@ mod tests {
                 "fill {fill:?} drops below the legibility floor",
             );
         }
-        // A light theme steps its surfaces darker than the base, deepening along the ramp, so the
-        // fills read against the light canvas.
+        // A light theme steps its surfaces darker than the base, deepening along the ramp.
         let base_lum = super::luminance(anchors.base);
         assert!(super::luminance(p.surface0) < base_lum, "surface0 is darker than the base");
         assert!(
