@@ -736,9 +736,14 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
 /// dropped on the one path that exercises the CLI fallback from a plain shell.
 pub fn print_plugin_config() -> Result<(), PluginConfigError> {
     crate::log::init();
-    let dir = resolve_config_dir(crate::herdr::plugin_config_dir);
-    println!("{}", plugin_config(dir.as_deref())?.to_json());
+    println!("{}", plugin_config_from_herdr()?.to_json());
     Ok(())
+}
+
+/// The plugin config a non-UI run reads: the directory from the environment, else from herdr,
+/// then the file in it. The one read both flag entry points share.
+pub(crate) fn plugin_config_from_herdr() -> Result<PluginConfig, PluginConfigError> {
+    plugin_config(resolve_config_dir(crate::herdr::plugin_config_dir).as_deref())
 }
 
 #[cfg(test)]

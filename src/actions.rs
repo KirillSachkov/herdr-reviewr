@@ -130,8 +130,7 @@ pub fn run(name: Option<&str>) -> i32 {
 fn act(action: Action) -> Result<Option<String>, Stop> {
     // The whole plugin config validates before any workspace read or pane write, so every
     // plugin entry point shares exactly one contract.
-    let dir = crate::config::resolve_config_dir(herdr::plugin_config_dir);
-    let config = crate::config::plugin_config(dir.as_deref()).map_err(Stop::Config)?;
+    let config = crate::config::plugin_config_from_herdr().map_err(Stop::Config)?;
 
     #[cfg(unix)]
     repoint_launch_links();
@@ -411,8 +410,8 @@ fn open(
         .and_then(|entry| entry.foreground_cwd.clone())
         .filter(|cwd| !cwd.is_empty());
     let cwd = match (&live, &target.cwd) {
-        (Some(live), _) if is_repo(live) => live,
-        (_, Some(cwd)) if is_repo(cwd) => cwd,
+        (Some(live), _) if has_worktree(live) => live,
+        (_, Some(cwd)) if has_worktree(cwd) => cwd,
         // Name every candidate the check rejected, or a refusal over an inspected but unusable
         // live cwd would read as if no directory was ever tried.
         _ => {
@@ -469,7 +468,9 @@ fn open(
     Ok(format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str()))
 }
 
-fn is_repo(dir: &str) -> bool {
+/// Whether `dir` sits in a worktree: git names its top level. Unlike `git::is_repo`, a `.git`
+/// dir or a bare repository does not count, since reviewr reviews a worktree.
+fn has_worktree(dir: &str) -> bool {
     crate::git::toplevel(Path::new(dir)).is_some()
 }
 

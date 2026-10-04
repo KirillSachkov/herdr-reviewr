@@ -1,9 +1,11 @@
 //! Small helpers for locating and naming external command-line tools.
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 /// Usual host bin dirs a stripped pane PATH may omit. Unix only: on Windows these names
 /// resolve to directories like `C:\\usr\\bin` on the current drive, which any user can create.
@@ -12,8 +14,29 @@ const COMMON_BINS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"
 #[cfg(not(unix))]
 const COMMON_BINS: &[&str] = &[];
 
-fn host_path() -> OsString {
-    prepended_path(env::var_os("PATH").as_deref())
+/// The host PATH: the common bins, then the inherited PATH. Built once: the process's PATH is
+/// fixed for its life.
+fn host_path() -> &'static OsString {
+    static PATH: OnceLock<OsString> = OnceLock::new();
+    PATH.get_or_init(|| prepended_path(env::var_os("PATH").as_deref()))
+}
+
+/// `name` resolved on the host PATH, a bare name's hit kept for the session. Every spawn,
+/// a file build's git on the frame loop included, would otherwise search the PATH again, and on
+/// Windows each directory once per PATHEXT extension. A miss is asked again next time, so a
+/// tool installed meanwhile is found.
+fn resolve_on_host(name: &OsStr) -> Option<PathBuf> {
+    static FOUND: OnceLock<Mutex<HashMap<OsString, PathBuf>>> = OnceLock::new();
+    let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
+    let found = FOUND.get_or_init(Mutex::default);
+    if bare && let Some(hit) = found.lock().unwrap_or_else(PoisonError::into_inner).get(name) {
+        return Some(hit.clone());
+    }
+    let hit = resolve_on(host_path(), name)?;
+    if bare {
+        found.lock().unwrap_or_else(PoisonError::into_inner).insert(name.into(), hit.clone());
+    }
+    Some(hit)
 }
 
 fn common_bins() -> impl Iterator<Item = PathBuf> {
@@ -28,18 +51,17 @@ fn inherited_dirs(inherited: Option<&OsStr>) -> Vec<PathBuf> {
 }
 
 /// Join PATH entries with the platform's separator. Every entry came out of `split_paths` or
-/// `COMMON_BINS`, so none holds a separator and the join cannot fail. Were it to, the inherited
-/// PATH passes through untouched rather than becoming an empty one.
-fn joined(dirs: impl Iterator<Item = PathBuf>, inherited: Option<&OsStr>) -> OsString {
-    env::join_paths(dirs).unwrap_or_else(|_| inherited.map(OsStr::to_os_string).unwrap_or_default())
+/// `COMMON_BINS`, so none holds a separator and the join cannot fail.
+fn joined(dirs: impl Iterator<Item = PathBuf>) -> OsString {
+    env::join_paths(dirs).expect("entries split from a PATH join back into one")
 }
 
 fn prepended_path(inherited: Option<&OsStr>) -> OsString {
-    joined(common_bins().chain(inherited_dirs(inherited)), inherited)
+    joined(common_bins().chain(inherited_dirs(inherited)))
 }
 
 fn appended_path(inherited: Option<&OsStr>) -> OsString {
-    joined(inherited_dirs(inherited).into_iter().chain(common_bins()), inherited)
+    joined(inherited_dirs(inherited).into_iter().chain(common_bins()))
 }
 
 /// Resolve `name` against `path` the way a shell would: an executable file, with PATHEXT on
@@ -56,9 +78,8 @@ fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
 /// reviewer's own.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
-    let path = host_path();
-    let mut cmd = resolve_on(&path, program).map_or_else(|| Command::new(program), Command::new);
-    cmd.env("PATH", path);
+    let mut cmd = resolve_on_host(program).map_or_else(|| Command::new(program), Command::new);
+    cmd.env("PATH", host_path());
     cmd
 }
 
@@ -97,7 +118,7 @@ pub(crate) fn program_name(path: &str) -> &str {
 /// (`export.rs`) and the URL-opener probe (`browser.rs`).
 #[must_use]
 pub fn on_path(name: &str) -> bool {
-    resolve_on(&host_path(), OsStr::new(name)).is_some()
+    resolve_on_host(OsStr::new(name)).is_some()
 }
 
 #[cfg(test)]

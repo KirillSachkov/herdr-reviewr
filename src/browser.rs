@@ -13,52 +13,40 @@ const OPENERS: &[&str] = &["xdg-open"];
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 const OPENERS: &[&str] = &["open", "xdg-open"];
 
-/// How a link opens when no `url_opener` is configured.
-#[derive(Debug, PartialEq, Eq)]
-enum DefaultOpener {
-    /// A platform opener program, found on `PATH`.
-    #[cfg(not(windows))]
-    Tool(&'static str),
-    /// The default browser, through `ShellExecuteW`. No shell parses the URL, so an `&` in it
-    /// can't cut it short or start a second command, as it would through `cmd /c start`.
-    #[cfg(windows)]
-    Shell,
-}
-
-/// The first platform opener the `present` predicate accepts, in list order. Windows needs
-/// none on `PATH`: its shell opens links itself.
+/// The first platform opener the `present` predicate accepts, in list order.
 #[cfg(not(windows))]
-fn default_opener(present: impl Fn(&str) -> bool) -> Result<DefaultOpener> {
+fn default_tool(present: impl Fn(&str) -> bool) -> Result<&'static str> {
     OPENERS
         .iter()
         .copied()
         .find(|candidate| present(candidate))
-        .map(DefaultOpener::Tool)
         .context("no link opener: install open or xdg-open, or set `url_opener`")
 }
 
-#[cfg(windows)]
-#[allow(clippy::unnecessary_wraps)] // One signature on every OS.
-fn default_opener(_present: impl Fn(&str) -> bool) -> Result<DefaultOpener> {
-    Ok(DefaultOpener::Shell)
+/// Open `url` with the platform's own opener, found on `PATH`.
+#[cfg(not(windows))]
+fn open_default(url: &str) -> Result<()> {
+    let tool = default_tool(crate::proc::on_path)?;
+    let mut command = crate::proc::command(tool);
+    command.arg(url);
+    spawn_detached(tool, command)
 }
 
-/// Open `url` through the configured `url_opener`, else the platform default.
+/// Open `url` in the default browser, through `ShellExecuteW`. No shell parses the URL, so an
+/// `&` in it can't cut it short or start a second command, as it would through `cmd /c start`.
+/// The call returns once the shell has handed the URL on, leaving nothing to reap.
+#[cfg(windows)]
+fn open_default(url: &str) -> Result<()> {
+    opener::open(url)
+        .map_err(|error| anyhow::anyhow!("the default browser could not start: {error}"))
+}
+
+/// Open `url` through the configured `url_opener`, else the platform default. Only an
+/// http(s) URL opens ([`openable_url`]): an opener runs whatever a target names, a program
+/// included, so every caller is held to the check here.
 pub fn open(url: &str, configured: Option<&str>) -> Result<()> {
-    let Some(template) = configured else {
-        return match default_opener(crate::proc::on_path)? {
-            #[cfg(not(windows))]
-            DefaultOpener::Tool(tool) => {
-                let mut command = crate::proc::command(tool);
-                command.arg(url);
-                spawn_detached(tool, command)
-            }
-            // The call returns once the shell has handed the URL on, leaving nothing to reap.
-            #[cfg(windows)]
-            DefaultOpener::Shell => opener::open(url)
-                .map_err(|error| anyhow::anyhow!("the default browser could not start: {error}")),
-        };
-    };
+    let url = openable_url(url).map_err(anyhow::Error::msg)?;
+    let Some(template) = configured else { return open_default(url) };
     let (program, args) = opener_argv(template, url).context("`url_opener` names no program")?;
     let mut command = crate::proc::user_command(&program)
         .with_context(|| format!("`url_opener` not found: {program}"))?;
@@ -111,7 +99,9 @@ pub fn openable_url(url: &str) -> Result<&str, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_opener, open, openable_url, opener_argv};
+    #[cfg(not(windows))]
+    use super::default_tool;
+    use super::{open, openable_url, opener_argv};
 
     #[test]
     fn a_configured_opener_that_cannot_start_is_reported_never_replaced() {
@@ -122,26 +112,20 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn the_default_opener_is_the_first_one_on_path_and_its_absence_says_what_to_install() {
-        use super::DefaultOpener::Tool;
         let all = |_: &str| true;
         #[cfg(target_os = "macos")]
-        assert_eq!(default_opener(all).unwrap(), Tool("open"));
+        assert_eq!(default_tool(all).unwrap(), "open");
         #[cfg(target_os = "linux")]
-        assert_eq!(default_opener(all).unwrap(), Tool("xdg-open"));
+        assert_eq!(default_tool(all).unwrap(), "xdg-open");
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        assert_eq!(default_opener(all).unwrap(), Tool("open"));
+        assert_eq!(default_tool(all).unwrap(), "open");
         assert_eq!(
-            default_opener(|_| false).unwrap_err().to_string(),
+            default_tool(|_| false).unwrap_err().to_string(),
             "no link opener: install open or xdg-open, or set `url_opener`"
         );
     }
 
     /// Windows opens a link through its shell, so nothing has to be on `PATH`.
-    #[cfg(windows)]
-    #[test]
-    fn the_default_opener_on_windows_is_the_shell_with_nothing_on_path() {
-        assert_eq!(default_opener(|_| false).unwrap(), super::DefaultOpener::Shell);
-    }
 
     #[test]
     fn the_opener_template_splits_like_editor_and_places_the_url() {
