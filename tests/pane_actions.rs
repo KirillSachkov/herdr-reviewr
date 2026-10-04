@@ -353,6 +353,61 @@ fn auto_open_birth_events_follow_shared_policy() {
 }
 
 #[test]
+fn auto_open_without_its_payload_refuses_silently_before_any_herdr_call() {
+    let dir = tempfile::tempdir().unwrap();
+    // A focused workspace and pane are in reach, and opening there would stack a pane into
+    // whatever workspace the user is looking at.
+    for payload in [None, Some("")] {
+        let mut command = with_context("auto-open", dir.path(), &repo_context());
+        match payload {
+            Some(json) => command.env("HERDR_PLUGIN_EVENT_JSON", json),
+            None => command.env_remove("HERDR_PLUGIN_EVENT_JSON"),
+        };
+
+        let output = command.output().unwrap();
+
+        assert!(output.status.success(), "{payload:?}: {}", stderr(&output));
+        assert!(output.stdout.is_empty(), "{payload:?}: {}", stdout(&output));
+        assert!(output.stderr.is_empty(), "{payload:?}: {}", stderr(&output));
+    }
+    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+}
+
+#[test]
+fn auto_open_reads_each_payload_field_on_its_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = env!("CARGO_MANIFEST_DIR");
+    let data = |extra: Value| {
+        let mut data = json!({
+            "type": "worktree_opened",
+            "workspace": {"workspace_id": "workspace-9", "worktree": {"checkout_path": repo}},
+        });
+        data.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        json!({"event": "worktree_opened", "data": data}).to_string()
+    };
+    // A field of an unexpected type reads as absent and leaves the rest of the payload alone.
+    // Only a boolean `true` marks the workspace as already open.
+    let payloads = [
+        data(json!({"worktree": {"path": 42, "open_workspace_id": ["w"]}})),
+        data(json!({"already_open": "true"})),
+    ];
+    for payload in payloads {
+        reset(dir.path());
+
+        let output = run_auto_open(dir.path(), &payload, None);
+
+        assert!(output.status.success(), "{payload}: {}", stderr(&output));
+        let open = open_call(dir.path());
+        assert!(open.contains(&format!("--cwd {repo}")), "{payload}: {open}");
+        assert!(
+            calls(dir.path()).contains("pane list --workspace workspace-9"),
+            "{payload}: {}",
+            calls(dir.path())
+        );
+    }
+}
+
+#[test]
 fn auto_open_falls_back_to_the_worktree_fields_of_the_payload() {
     let dir = tempfile::tempdir().unwrap();
     // A payload without `data.workspace`: the hook targets `data.worktree`'s workspace and

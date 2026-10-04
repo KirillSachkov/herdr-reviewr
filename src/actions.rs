@@ -22,7 +22,7 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde_json::Value;
 
 use crate::config::{PluginConfig, PluginConfigError, TogglePlacement};
 use crate::herdr::{self, HerdrError, PaneList, Process, ProcessInfo};
@@ -131,28 +131,32 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     #[cfg(unix)]
     repoint_launch_links();
 
-    let event = (action == Action::AutoOpen)
-        .then(|| var("HERDR_PLUGIN_EVENT_JSON"))
-        .flatten()
-        .map(|json| serde_json::from_str::<Event>(&json).unwrap_or_default());
-
     // Event policy gates the event alone: explicit actions ignore it. This sits after
     // validation but before any workspace or pane read, so a disabled event does no work.
-    if action == Action::AutoOpen {
+    let event = if action == Action::AutoOpen {
         if !config.auto_open()
             || !matches!(config.toggle_placement(), TogglePlacement::Split | TogglePlacement::Tab)
         {
             return Ok(None);
         }
+        // The payload names the event's workspace. Without it, the only workspace in reach is
+        // the focused one, whatever the user is looking at, so the event refuses.
+        let Some(json) = var("HERDR_PLUGIN_EVENT_JSON") else {
+            return Err(refused("no event payload"));
+        };
+        let event: Value = serde_json::from_str(&json).unwrap_or_default();
         // `worktree.opened` also fires when its workspace is already live. That is a
         // focus/open request, not a workspace birth: never resurrect a reviewr pane the user
         // closed there.
-        if event.as_ref().is_some_and(|event| event.data.already_open == Some(true)) {
+        if event.pointer("/data/already_open") == Some(&Value::Bool(true)) {
             return Ok(None);
         }
-    }
+        Some(event)
+    } else {
+        None
+    };
 
-    let target = Target::read(action, event);
+    let target = Target::read(event);
     let Some(ws) = target.ws.as_deref() else {
         return Err(refused("no workspace context (invoke from inside herdr)"));
     };
@@ -247,44 +251,11 @@ fn var(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// The action context herdr hands an action (`HERDR_PLUGIN_CONTEXT_JSON`).
-#[derive(Debug, Default, Deserialize)]
-struct Context {
-    focused_pane_id: Option<String>,
-    focused_pane_cwd: Option<String>,
-    workspace_cwd: Option<String>,
-}
-
-/// The `worktree.created` / `worktree.opened` payload (`HERDR_PLUGIN_EVENT_JSON`). Every
-/// field is optional: a payload missing one targets nothing, and the event then refuses.
-#[derive(Debug, Default, Deserialize)]
-struct Event {
-    #[serde(default)]
-    data: EventData,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct EventData {
-    workspace: Option<EventWorkspace>,
-    worktree: Option<EventWorktree>,
-    already_open: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventWorkspace {
-    workspace_id: Option<String>,
-    worktree: Option<EventCheckout>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventCheckout {
-    checkout_path: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EventWorktree {
-    path: Option<String>,
-    open_workspace_id: Option<String>,
+/// The non-empty string at JSON `pointer` in `value`. Each field of herdr's action context
+/// (`HERDR_PLUGIN_CONTEXT_JSON`) and event payload (`HERDR_PLUGIN_EVENT_JSON`) reads on its own:
+/// one missing or of another type reads as absent and leaves the rest of the payload usable.
+fn text(value: &Value, pointer: &str) -> Option<String> {
+    value.pointer(pointer).and_then(Value::as_str).filter(|text| !text.is_empty()).map(Into::into)
 }
 
 /// Where an action acts.
@@ -300,32 +271,29 @@ struct Target {
 }
 
 impl Target {
-    fn read(action: Action, event: Option<Event>) -> Self {
-        let context = var("HERDR_PLUGIN_CONTEXT_JSON")
-            .and_then(|json| serde_json::from_str::<Context>(&json).ok())
-            .unwrap_or_default();
-        let nonempty = |value: Option<String>| value.filter(|value| !value.is_empty());
+    /// The target of the event with payload `event`, else of an explicit action.
+    fn read(event: Option<Value>) -> Self {
         // The events fire without a focused pane: target the fresh workspace from their
-        // payload. The `worktree` fields are compatible fallbacks (`docs/herdr-api-notes.md`).
-        if let Some(Event { data }) = event {
-            let (workspace, worktree) = (data.workspace, data.worktree);
-            let ws = workspace.as_ref().and_then(|w| nonempty(w.workspace_id.clone()));
-            let cwd = workspace.and_then(|w| w.worktree).and_then(|w| nonempty(w.checkout_path));
-            let (fallback_ws, fallback_cwd) = worktree
-                .map_or((None, None), |w| (nonempty(w.open_workspace_id), nonempty(w.path)));
+        // payload, never a focused pane's cwd. The `worktree` fields are compatible fallbacks
+        // (`docs/herdr-api-notes.md`).
+        if let Some(event) = event {
             return Self {
-                ws: ws.or(fallback_ws),
+                ws: text(&event, "/data/workspace/workspace_id")
+                    .or_else(|| text(&event, "/data/worktree/open_workspace_id")),
                 pane: None,
-                cwd: cwd.or(fallback_cwd),
+                cwd: text(&event, "/data/workspace/worktree/checkout_path")
+                    .or_else(|| text(&event, "/data/worktree/path")),
                 focused: None,
             };
         }
+        let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
         Self {
             ws: var("HERDR_WORKSPACE_ID"),
             pane: var("HERDR_PANE_ID"),
-            cwd: nonempty(context.focused_pane_cwd).or(nonempty(context.workspace_cwd)),
-            // The event keeps its payload's cwd, never a focused pane's.
-            focused: nonempty(context.focused_pane_id).filter(|_| action != Action::AutoOpen),
+            cwd: text(&context, "/focused_pane_cwd").or_else(|| text(&context, "/workspace_cwd")),
+            focused: text(&context, "/focused_pane_id"),
         }
     }
 }
