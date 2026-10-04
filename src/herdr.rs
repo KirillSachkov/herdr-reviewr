@@ -23,11 +23,6 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-struct AgentListResponse {
-    result: AgentList,
-}
-
-#[derive(Debug, Deserialize)]
 struct AgentList {
     agents: Vec<AgentPane>,
 }
@@ -189,31 +184,31 @@ fn answer<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, HerdrError> {
 
 /// One `herdr pane list` snapshot of a workspace.
 #[derive(Debug, Deserialize)]
-pub struct PaneList {
-    pub panes: Vec<PaneEntry>,
+pub(crate) struct PaneList {
+    pub(crate) panes: Vec<PaneEntry>,
 }
 
 /// One pane in a [`PaneList`]. `pane_id` is required: an entry without one could never be
 /// addressed, so the listing fails to parse instead.
 #[derive(Debug, Deserialize)]
-pub struct PaneEntry {
-    pub pane_id: String,
+pub(crate) struct PaneEntry {
+    pub(crate) pane_id: String,
     /// The live foreground process's cwd, which can differ from the pane's launch cwd
     /// (`docs/herdr-api-notes.md`).
     #[serde(default)]
-    pub foreground_cwd: Option<String>,
+    pub(crate) foreground_cwd: Option<String>,
     #[serde(default)]
     label: Option<String>,
 }
 
 impl PaneList {
     /// The panes in workspace `ws`.
-    pub fn of(ws: &str) -> Result<Self, HerdrError> {
+    pub(crate) fn of(ws: &str) -> Result<Self, HerdrError> {
         answer(&call(&["pane", "list", "--workspace", ws])?)
     }
 
     /// The entry for pane `pane`, if the snapshot lists it.
-    pub fn pane(&self, pane: &str) -> Option<&PaneEntry> {
+    pub(crate) fn pane(&self, pane: &str) -> Option<&PaneEntry> {
         self.panes.iter().find(|entry| entry.pane_id == pane)
     }
 
@@ -228,30 +223,31 @@ impl PaneList {
 /// On macOS and Linux that is the foreground process group. On Windows it is one process, the
 /// topmost recognized agent or else the pane's root process.
 #[derive(Debug, Deserialize)]
-pub struct ProcessInfo {
+pub(crate) struct ProcessInfo {
     /// Required, and what marks an answer as a process-info answer at all: an answer without
     /// it is a shape failure, never "no processes".
-    pub pane_id: String,
+    #[serde(rename = "pane_id")]
+    _pane_id: String,
     /// herdr omits the key when the list is empty, so an absent key is zero processes. On
     /// Windows a just-opened pane answers that way until herdr's 250 ms process snapshot
     /// catches up (`docs/herdr-api-notes.md`).
     #[serde(default)]
-    pub foreground_processes: Vec<Process>,
+    pub(crate) foreground_processes: Vec<Process>,
 }
 
 /// One foreground process. `name` is left out on purpose: it is a rewritable process title,
 /// so only the executable identifies a process (`docs/herdr-api-notes.md`).
 #[derive(Debug, Deserialize)]
-pub struct Process {
+pub(crate) struct Process {
     #[serde(default)]
-    pub argv0: Option<String>,
+    pub(crate) argv0: Option<String>,
     #[serde(default)]
-    pub argv: Option<Vec<String>>,
+    pub(crate) argv: Vec<String>,
 }
 
 impl ProcessInfo {
     /// The foreground processes of pane `pane`.
-    pub fn of(pane: &str) -> Result<Self, HerdrError> {
+    pub(crate) fn of(pane: &str) -> Result<Self, HerdrError> {
         Self::parse(&call(&["pane", "process-info", "--pane", pane])?)
     }
 
@@ -266,14 +262,31 @@ impl ProcessInfo {
 
 /// The pane a `herdr plugin pane open` created.
 #[derive(Debug, Deserialize)]
-pub struct OpenedPane {
-    pub pane_id: String,
+pub(crate) struct OpenedPane {
+    pub(crate) pane_id: String,
     #[serde(default)]
-    pub tab_id: Option<String>,
+    pub(crate) tab_id: Option<String>,
 }
 
-/// Open one of a plugin's panes. `args` follows `plugin pane open` on the command line.
-pub fn open_plugin_pane(args: &[&str]) -> Result<OpenedPane, HerdrError> {
+/// Where and how `plugin pane open` opens a plugin's pane.
+#[derive(Debug)]
+pub(crate) struct PaneOpen<'a> {
+    pub plugin: &'a str,
+    pub entrypoint: &'a str,
+    /// `split`, `zoomed`, `tab`, or `overlay`.
+    pub placement: &'a str,
+    /// The pane a split or zoomed open attaches to.
+    pub target_pane: Option<&'a str>,
+    /// A split's direction.
+    pub direction: Option<&'a str>,
+    /// The workspace a tab opens in.
+    pub workspace: Option<&'a str>,
+    pub cwd: &'a str,
+    pub focus: bool,
+}
+
+/// Open one of a plugin's panes.
+pub(crate) fn open_plugin_pane(open: &PaneOpen) -> Result<OpenedPane, HerdrError> {
     #[derive(Deserialize)]
     struct Result {
         plugin_pane: PluginPane,
@@ -282,8 +295,17 @@ pub fn open_plugin_pane(args: &[&str]) -> Result<OpenedPane, HerdrError> {
     struct PluginPane {
         pane: OpenedPane,
     }
-    let call_args = [&["plugin", "pane", "open"], args].concat();
-    let opened = answer::<Result>(&call(&call_args)?)?.plugin_pane.pane;
+    let mut args = vec!["plugin", "pane", "open", "--plugin", open.plugin, "--entrypoint"];
+    args.extend([open.entrypoint, "--placement", open.placement]);
+    for (flag, value) in [
+        ("--target-pane", open.target_pane),
+        ("--direction", open.direction),
+        ("--workspace", open.workspace),
+    ] {
+        args.extend(value.map(|value| [flag, value]).into_iter().flatten());
+    }
+    args.extend(["--cwd", open.cwd, if open.focus { "--focus" } else { "--no-focus" }]);
+    let opened = answer::<Result>(&call(&args)?)?.plugin_pane.pane;
     if opened.pane_id.is_empty() {
         return Err(HerdrError::Unreadable);
     }
@@ -293,12 +315,12 @@ pub fn open_plugin_pane(args: &[&str]) -> Result<OpenedPane, HerdrError> {
 /// Close pane `pane` with plain `pane close`, which reaches any pane by id. `plugin pane close`
 /// only reaches panes in herdr's in-memory plugin-pane registry, which forgets them on a restart
 /// and never holds a layout-launched one (`docs/herdr-api-notes.md`).
-pub fn close_pane(pane: &str) -> Result<(), HerdrError> {
+pub(crate) fn close_pane(pane: &str) -> Result<(), HerdrError> {
     call(&["pane", "close", pane]).map(drop)
 }
 
 /// Set tab `tab`'s label.
-pub fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
+pub(crate) fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
     call(&["tab", "rename", tab, label]).map(drop)
 }
 
@@ -504,18 +526,12 @@ fn tab_labels(ws: Option<&str>) -> HashMap<String, String> {
 /// The documented `result.tabs` array from `herdr tab list`, as tab id → label. A tab
 /// without a label is dropped, so its rows show no tab part.
 fn parse_tab_labels(json: &str) -> Result<HashMap<String, String>> {
-    let response: TabListResponse = serde_json::from_str(json).context("parsing tab list")?;
-    Ok(response
-        .result
+    Ok(answer::<TabList>(json)
+        .context("parsing tab list")?
         .tabs
         .into_iter()
         .filter_map(|tab| tab.label.map(|label| (tab.tab_id, label)))
         .collect())
-}
-
-#[derive(Debug, Deserialize)]
-struct TabListResponse {
-    result: TabList,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,8 +548,7 @@ struct TabInfo {
 
 /// The documented `result.agents` array from `herdr agent list`.
 fn parse_agents(json: &str) -> Result<Vec<AgentPane>> {
-    let response: AgentListResponse = serde_json::from_str(json).context("parsing agent list")?;
-    Ok(response.result.agents)
+    Ok(answer::<AgentList>(json).context("parsing agent list")?.agents)
 }
 
 /// One agent as turn tracking sees it: where it works, and what it is doing. Membership is
@@ -812,10 +827,19 @@ mod socket {
 /// to do: CRLF on Windows and the text unchanged elsewhere, as herdr encodes a paste of its own
 /// (`prepare_paste_text_for_pty_platform`).
 fn paste_payload(text: &str) -> String {
-    if cfg!(windows) { pasted(&crate::export::crlf_line_breaks(text)) } else { pasted(text) }
+    if cfg!(windows) { pasted(&crlf_line_breaks(text)) } else { pasted(text) }
 }
 
-const PASTE_START: &str = "\x1b[200~";
+/// `text` with Windows' line breaks: each `\n` becomes CRLF, a CRLF already there stays one,
+/// and a lone CR, which breaks no line, passes through. herdr's own paste breaks lines this way
+/// on Windows, and so does the Windows clipboard ([`crate::export`]).
+pub(crate) fn crlf_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// The bracketed-paste markers: what a send writes around the review, and what the Windows
+/// input reader finds around a paste.
+pub(crate) const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 
 /// The batch as one bracketed paste event, never raw bytes: a paste inserts verbatim in any

@@ -25,13 +25,6 @@ fn normalize_text(text: &str) -> String {
         .join("\n")
 }
 
-/// `text` with Windows' line breaks: each `\n` becomes CRLF, a CRLF already there stays one,
-/// and a lone CR, which breaks no line, passes through. The clipboard and herdr's paste both
-/// break lines this way on Windows.
-pub(crate) fn crlf_line_breaks(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\n', "\r\n")
-}
-
 /// Many comments, sorted by file then start line, one blank line between blocks.
 pub fn format_all(comments: &[&Comment]) -> String {
     let mut sorted = comments.to_vec();
@@ -161,7 +154,7 @@ mod clipboard {
     /// Line breaks go in as CRLF, the clipboard's own convention, so an edit control that
     /// splits only on CRLF still shows the review's lines.
     pub(super) fn write(text: &str) -> Result<()> {
-        let text = super::crlf_line_breaks(text);
+        let text = crate::herdr::crlf_line_breaks(text);
         arboard::Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(text))
             .context("writing the Windows clipboard")
@@ -217,7 +210,8 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Clipboard, ExportTarget, crlf_line_breaks, format_all, format_comment};
+    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment};
+    use crate::herdr::crlf_line_breaks;
     use crate::model::{Comment, Side};
 
     #[test]

@@ -351,9 +351,13 @@ fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
 /// name in `argv0` or `argv[0]` decides, never `name`, which is a rewritable process title
 /// (`docs/herdr-api-notes.md`).
 fn is_review_ui(process: &Process) -> bool {
-    let argv = process.argv.as_deref().unwrap_or_default();
-    let named =
-        process.argv0.iter().chain(argv.first()).any(|exe| program_name(exe) == "herdr-reviewr");
+    let argv = process.argv.as_slice();
+    // Windows names ignore case, so `HERDR-REVIEWR.EXE` is the same program.
+    let named = process
+        .argv0
+        .iter()
+        .chain(argv.first())
+        .any(|exe| program_name(exe).eq_ignore_ascii_case("herdr-reviewr"));
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 
@@ -420,30 +424,37 @@ fn open(
 
     let plugin = var("HERDR_PLUGIN_ID").unwrap_or_else(|| herdr::PLUGIN_ID.to_owned());
     let placement = config.toggle_placement();
-    let mut args = vec!["--plugin", &plugin, "--entrypoint", "pane", "--placement"];
-    args.push(placement.as_str());
+    let mut spot = herdr::PaneOpen {
+        plugin: &plugin,
+        entrypoint: "pane",
+        placement: placement.as_str(),
+        target_pane: None,
+        direction: None,
+        workspace: None,
+        cwd,
+        // A manual open takes focus. The event never does.
+        focus: action != Action::AutoOpen,
+    };
     // A split or zoomed open attaches to the focused pane, else the workspace's first pane.
     match placement {
         TogglePlacement::Split | TogglePlacement::Zoomed => {
-            let attach = target
-                .pane
-                .as_deref()
-                .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
-                .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))?;
-            args.extend(["--target-pane", attach]);
+            spot.target_pane = Some(
+                target
+                    .pane
+                    .as_deref()
+                    .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
+                    .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))?,
+            );
             if placement == TogglePlacement::Split {
-                args.extend(["--direction", config.toggle_direction().as_str()]);
+                spot.direction = Some(config.toggle_direction().as_str());
             }
         }
-        TogglePlacement::Tab => args.extend(["--workspace", ws]),
+        TogglePlacement::Tab => spot.workspace = Some(ws),
         TogglePlacement::Overlay => {}
     }
-    // A manual open takes focus. The event never does.
-    let focus = if action == Action::AutoOpen { "--no-focus" } else { "--focus" };
-    args.extend(["--cwd", cwd, focus]);
 
     let opened =
-        herdr::open_plugin_pane(&args).map_err(|_| refused("herdr plugin pane open failed"))?;
+        herdr::open_plugin_pane(&spot).map_err(|_| refused("herdr plugin pane open failed"))?;
 
     // A tab open lands in a fresh tab that herdr labels with a bare index: name it after the
     // plugin so the tab bar reads "reviewr". Cosmetic, so a failed rename never fails an open

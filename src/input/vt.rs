@@ -23,7 +23,7 @@ use ratatui::crossterm::event::Event;
 /// write and still short enough to read as a stall.
 pub(super) const PASTE_IDLE: Duration = Duration::from_millis(500);
 
-const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_START: &[u8] = crate::herdr::PASTE_START.as_bytes();
 
 /// The parser state between console reads.
 #[derive(Debug, Default)]
