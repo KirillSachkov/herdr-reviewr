@@ -1978,8 +1978,9 @@ impl App {
         // The ends the changeset came from, whatever moved since: a commit, a new merge base,
         // a promoted turn baseline. No ends means the scope lists nothing.
         let Some(ends) = &self.diff_ends else { return empty() };
-        let sides =
-            git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, previous_path);
+        let kind = self.changed.get(path).map_or(ChangeKind::Modified, |a| a.change);
+        let origin = git::Origin::of(kind, previous_path);
+        let sides = git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, origin);
         sides.unwrap_or_else(|_| empty())
     }
 

@@ -81,6 +81,7 @@ pub enum ChangeKind {
     Modified,
     Deleted,
     Renamed,
+    Copied,
     Untracked,
 }
 
@@ -91,6 +92,7 @@ impl ChangeKind {
             ChangeKind::Modified => 'M',
             ChangeKind::Deleted => 'D',
             ChangeKind::Renamed => 'R',
+            ChangeKind::Copied => 'C',
             ChangeKind::Untracked => '?',
         }
     }

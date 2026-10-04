@@ -4975,7 +4975,7 @@ fn kind_color(p: &Palette, kind: ChangeKind) -> Color {
     match kind {
         ChangeKind::Added | ChangeKind::Untracked => p.green,
         ChangeKind::Deleted => p.red,
-        ChangeKind::Renamed => p.purple,
+        ChangeKind::Renamed | ChangeKind::Copied => p.purple,
         ChangeKind::Modified => p.yellow,
     }
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use common::Repo;
 use herdr_reviewr::git::{
-    DiffSides, ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
+    DiffSides, Origin, ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
     changed_files as changed_files_oid, checked_out_branch, default_branch_name, delete_base_pick,
     diff_sides, file_content, list_branches, merge_base as merge_base_oid, read_base_pick,
     read_baseline_ref, resolve_base, resolve_commit, snapshot_worktree, write_base_pick,
@@ -74,7 +74,7 @@ fn a_diffs_sides_are_the_committed_blob_and_the_text_git_would_store() {
             let path = format!("f{i}.txt");
             let case = format!("{content:?}, autocrlf={autocrlf}, {attributes:?}, {committed:?}");
             r.write(&path, content);
-            let sides = diff_sides(r.path(), "HEAD", None, &path, None).expect(&case);
+            let sides = diff_sides(r.path(), "HEAD", None, &path, Origin::Same).expect(&case);
             r.git(&["add", &path]);
             let old = r.git(&["cat-file", "blob", &format!("HEAD:{path}")]);
             let new = r.git(&["cat-file", "blob", &format!(":{path}")]);
@@ -97,21 +97,22 @@ fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob()
     r.write("x.txt", "edited\n");
     let text = |old: &str, new: &str| DiffSides::Text { old: old.into(), new: new.into() };
 
-    let renamed = diff_sides(r.path(), "HEAD", None, "b.txt", Some("a.txt")).unwrap();
+    let renamed = diff_sides(r.path(), "HEAD", None, "b.txt", Origin::Renamed("a.txt")).unwrap();
     assert_eq!(renamed, text("one\ntwo\nthree\nfour\n", "one\ntwo\nthree\nFOUR\n"));
-    let moved = diff_sides(r.path(), "HEAD", None, "moved.txt", Some("same.txt")).unwrap();
+    let moved =
+        diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("same.txt")).unwrap();
     assert_eq!(moved, text("same\n", "same\n"), "a pure rename: both sides are the blob");
     // A copy's source is unchanged, so the old side is its committed content.
     r.write("copy.txt", "one\ntwo\nTHREE\nfour\n");
     r.git(&["add", "copy.txt"]);
-    let copy = diff_sides(r.path(), "HEAD", None, "copy.txt", Some("x.txt")).unwrap();
+    let copy = diff_sides(r.path(), "HEAD", None, "copy.txt", Origin::Copied("x.txt")).unwrap();
     assert_eq!(copy, text("not me\n", "one\ntwo\nTHREE\nfour\n"));
     // A path is literal: `[x].txt` is not a glob that reaches the edited `x.txt`.
-    let literal = diff_sides(r.path(), "HEAD", None, "[x].txt", None).unwrap();
+    let literal = diff_sides(r.path(), "HEAD", None, "[x].txt", Origin::Same).unwrap();
     assert_eq!(literal, text("glob\n", "glob\n"));
     // Tree to tree, the way `commits` and `last-turn` read.
     r.commit_all("second");
-    let between = diff_sides(r.path(), "HEAD~1", Some("HEAD"), "x.txt", None).unwrap();
+    let between = diff_sides(r.path(), "HEAD~1", Some("HEAD"), "x.txt", Origin::Same).unwrap();
     assert_eq!(between, text("not me\n", "edited\n"));
 }
 
@@ -908,6 +909,28 @@ fn rename_is_reported_at_the_new_path() {
 }
 
 #[test]
+fn a_copy_is_reported_as_a_copy_and_reads_its_source() {
+    let r = Repo::init();
+    r.git(&["config", "diff.renames", "copies"]);
+    r.write("orig.rs", "one\ntwo\nthree\nfour\nfive\n");
+    r.commit_all("init");
+    r.write("orig.rs", "one\ntwo\nthree\nfour\nfive\nsix\n");
+    r.write("copy.rs", "one\ntwo\nTHREE\nfour\nfive\n");
+    r.git(&["add", "-A"]);
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let copy = files.iter().find(|f| f.path == "copy.rs").expect("the copy");
+    assert_eq!((copy.kind, copy.previous_path.as_deref()), (ChangeKind::Copied, Some("orig.rs")));
+    // The source edited in its own right stays out of the copy's sides.
+    let sides = diff_sides(r.path(), "HEAD", None, "copy.rs", Origin::Copied("orig.rs")).unwrap();
+    let want = DiffSides::Text {
+        old: "one\ntwo\nthree\nfour\nfive\n".into(),
+        new: "one\ntwo\nTHREE\nfour\nfive\n".into(),
+    };
+    assert_eq!(sides, want);
+}
+
+#[test]
 fn a_directory_removing_rename_keeps_its_stats() {
     // Regression for the `-z` migration: `a/b/f.rs -> a/f.rs` once produced a `a//f.rs`
     // numstat key that never matched, so the renamed+edited file showed +0 -0.
@@ -1457,7 +1480,7 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     let paths: Vec<&str> = changed.iter().map(|f| f.path.as_str()).collect();
     let expected: &[&str] = if cfg!(unix) { &["run.sh"] } else { &[] };
     assert_eq!(paths, expected, "a touched file with the same content is no change");
-    diff_sides(r.path(), "HEAD", None, "a.txt", None).unwrap();
+    diff_sides(r.path(), "HEAD", None, "a.txt", Origin::Same).unwrap();
 
     assert_eq!(stamp(), before, ".git/index was rewritten");
 }

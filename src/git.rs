@@ -1361,20 +1361,40 @@ pub enum DiffSides {
     Binary,
 }
 
+/// Where a changed path's old side lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin<'a> {
+    /// At the path itself.
+    Same,
+    /// At the source of a rename, which the change deleted.
+    Renamed(&'a str),
+    /// At the source of a copy, which is still there.
+    Copied(&'a str),
+}
+
+impl<'a> Origin<'a> {
+    /// The origin of a changeset entry of `kind` with `previous_path`.
+    pub fn of(kind: ChangeKind, previous_path: Option<&'a str>) -> Self {
+        match (kind, previous_path) {
+            (_, None) => Self::Same,
+            (ChangeKind::Copied, Some(source)) => Self::Copied(source),
+            (_, Some(source)) => Self::Renamed(source),
+        }
+    }
+}
+
 /// `path`'s diff sides from the tree-ish `old` to the tree-ish `new`, or to the worktree when
-/// `new` is `None`. A rename or copy names its source in `previous_path`, whose content is
-/// the old side.
+/// `new` is `None`, its old side read where `origin` says.
 ///
 /// One `git diff`. A second, a `git show`, only where that diff spells no side: a copy's
-/// unchanged source, and a file git reports no line of (a mode change), whose two sides are
-/// the one blob. An error is a git that could not answer: a missing revision, an unborn
-/// `HEAD`.
+/// source, and a file git reports no line of (a mode change), whose two sides are the one
+/// blob. An error is a git that could not answer: a missing revision, an unborn `HEAD`.
 pub fn diff_sides(
     repo: &Path,
     old: &str,
     new: Option<&str>,
     path: &str,
-    previous_path: Option<&str>,
+    origin: Origin<'_>,
 ) -> Result<DiffSides> {
     // Context as wide as the byte budget holds every line of a file the diff can render
     // (each line is at least a byte), so the one hunk is the whole file. A file past the
@@ -1399,30 +1419,29 @@ pub fn diff_sides(
         old,
     ];
     args.extend(new);
-    if previous_path.is_some() {
-        // A rename or copy target is a new file, and a rename source a deleted one. A copy
-        // source edited in its own right is neither, and stays out of the target's sides.
-        args.push("--diff-filter=AD");
-    }
     args.push("--");
-    args.extend(previous_path);
+    if let Origin::Renamed(source) = origin {
+        // A rename's target is a new file and its source a deleted one, so the two sections
+        // spell both sides.
+        args.extend(["--diff-filter=AD", source]);
+    }
     args.push(path);
     let out = git(repo, &args)?;
-    // A copy's source is still there, so no section spells it. Every other source is a
-    // deleted file. Only a header line starts with a letter.
-    let copied_from = previous_path.filter(|_| !out.contains("\ndeleted file mode "));
     let same = |rev: &str, at: &str| {
         let text = file_content(repo, rev, at);
         DiffSides::Text { old: text.clone(), new: text }
     };
-    Ok(match (parse_sides(&out), copied_from) {
-        (Some(DiffSides::Text { new: text, .. }), Some(source)) => {
+    Ok(match (parse_sides(&out), origin) {
+        // A copy's source is still there, in a section of its own if it changed too, so its
+        // old side is read rather than diffed.
+        (Some(DiffSides::Text { new: text, .. }), Origin::Copied(source)) => {
             DiffSides::Text { old: file_content(repo, old, source), new: text }
         }
         (Some(sides), _) => sides,
-        (None, _) => match new {
+        (None, Origin::Same) => same(new.unwrap_or(old), path),
+        (None, Origin::Renamed(source) | Origin::Copied(source)) => match new {
             Some(new) => same(new, path),
-            None => same(old, previous_path.unwrap_or(path)),
+            None => same(old, source),
         },
     })
 }
@@ -2175,8 +2194,7 @@ fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
 /// `(kind, path, previous_path)` from `git diff --name-status -z`. Under `-z` each record is
 /// `STATUS\0PATH\0`, except a rename/copy is `R<score>\0OLD\0NEW\0` (status, then old and new
 /// as separate fields). A rename or copy takes the new path and carries its old path; every
-/// other kind has `previous_path == None`. Copy folds into `Renamed` — a copy's old content
-/// lives at the old path exactly like a rename, which is what `content_sides` reads.
+/// other kind has `previous_path == None`.
 fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
     let mut rows = Vec::new();
     let mut it = out.split('\0');
@@ -2184,9 +2202,10 @@ fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
         let row = match status.chars().next() {
             Some('A') => it.next().map(|p| (ChangeKind::Added, p.to_string(), None)),
             Some('D') => it.next().map(|p| (ChangeKind::Deleted, p.to_string(), None)),
-            Some('R' | 'C') => {
+            Some(code @ ('R' | 'C')) => {
+                let kind = if code == 'R' { ChangeKind::Renamed } else { ChangeKind::Copied };
                 let old = it.next();
-                it.next().map(|new| (ChangeKind::Renamed, new.to_string(), old.map(str::to_string)))
+                it.next().map(|new| (kind, new.to_string(), old.map(str::to_string)))
             }
             // Modified, type-changed, etc.; also skips the trailing empty record.
             Some(_) => it.next().map(|p| (ChangeKind::Modified, p.to_string(), None)),
@@ -2653,7 +2672,7 @@ mod tests {
         let rows = parse_name_status("C75\0orig.rs\0copy.rs\0");
         assert_eq!(
             rows[0],
-            (ChangeKind::Renamed, "copy.rs".to_string(), Some("orig.rs".to_string()))
+            (ChangeKind::Copied, "copy.rs".to_string(), Some("orig.rs".to_string()))
         );
     }
 
