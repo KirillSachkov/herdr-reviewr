@@ -1954,11 +1954,13 @@ impl App {
     ///
     /// Sides past the render budget read as [`git::DiffSides::TooLarge`] before anything reads
     /// them: git's sides by the sizes the changeset build took, the worktree's by a stat of
-    /// the file as it is read, so nothing streams a large file through the frame loop.
+    /// the file as it is read, so nothing streams a large file through the frame loop. The stat
+    /// sees the raw file, before any clean filter: a large file git-lfs stores as a pointer
+    /// shows its notice, though git would diff the pointer.
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
         let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
-        // A path outside the landed changeset, a row painted from an older build, has no diff
-        // at the landed ends. The next reconcile shows the right file.
+        // A path outside the landed changeset is a row painted from an older build, which the
+        // landed ends cannot diff: it shows empty until the next reconcile repaints the list.
         let Some(annotation) = self.changed.get(path) else { return empty() };
         let untracked = annotation.change == ChangeKind::Untracked;
         let new_size = annotation.new_size.unwrap_or_else(|| {

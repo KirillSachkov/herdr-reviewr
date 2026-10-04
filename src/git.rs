@@ -2119,8 +2119,13 @@ fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
     use std::io::Read;
     let at = repo.join(path);
     // Only a regular file has lines: a link to a device would read without end.
-    if !std::fs::metadata(&at).is_ok_and(|m| m.is_file()) {
+    let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
         return Some(0);
+    };
+    // git takes a file past its default `core.bigFileThreshold` for binary without reading it,
+    // and so does this, so a huge log costs a build nothing.
+    if meta.len() > 512 * 1024 * 1024 {
+        return None;
     }
     let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };
     // Counted a buffer at a time, so a large file never sits in memory whole.

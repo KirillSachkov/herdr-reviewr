@@ -919,6 +919,13 @@ fn an_untracked_link_to_a_device_lists_without_reading_it() {
     let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
     let zero = files.iter().find(|f| f.path == "zero").expect("the link lists");
     assert_eq!((zero.kind, zero.additions), (ChangeKind::Untracked, 0));
+    // A link to a FIFO would block the open itself. git lists the link, never a bare FIFO.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let fifo = elsewhere.path().join("pipe");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    std::os::unix::fs::symlink(&fifo, r.path().join("pipe")).unwrap();
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert!(files.iter().any(|f| f.path == "pipe" && f.additions == 0), "{files:?}");
 }
 
 #[test]
