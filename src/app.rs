@@ -1951,12 +1951,28 @@ impl App {
     /// rename reads its old side from `previous_path`, so the diff shows real edits, not a
     /// wholesale delete-and-add. An untracked file is in no `git diff`: it reads raw, all
     /// additions. A git that can't answer shows no sides.
+    ///
+    /// Sides past the render budget read as [`git::DiffSides::TooLarge`] before anything reads
+    /// them: git's sides by the sizes the changeset build took, the worktree's by a stat of
+    /// the file as it is read, so nothing streams a large file through the frame loop.
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
         let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
-        if self.changed.get(path).is_some_and(|a| a.change == ChangeKind::Untracked) {
-            if git::over_budget(&self.repo, &[], Some(path)) {
-                return git::DiffSides::TooLarge;
-            }
+        let annotation = self.changed.get(path);
+        let untracked = annotation.is_some_and(|a| a.change == ChangeKind::Untracked);
+        let (old_size, new_size) = annotation.map_or((0, None), |a| (a.old_size, a.new_size));
+        let new_size = new_size.unwrap_or_else(|| {
+            // git diffs a tracked symlink as its target's path; an untracked file reads raw,
+            // through the link.
+            let at = self.repo.join(path);
+            let stat =
+                if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
+            stat.map_or(0, |m| m.len())
+        });
+        let total = old_size.saturating_add(new_size);
+        if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
+            return git::DiffSides::TooLarge;
+        }
+        if untracked {
             return git::DiffSides::Text {
                 old: String::new(),
                 new: worktree_content(&self.repo, path),
@@ -6456,28 +6472,45 @@ mod tests {
     }
 
     #[test]
-    fn an_over_budget_worktree_file_opens_as_its_notice_without_reading() {
+    fn an_over_budget_file_opens_as_its_notice_without_reading_in_any_scope() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output();
-            assert!(out.unwrap().status.success(), "git {args:?}");
+            let out = out.unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@t"]);
         git(&["config", "user.name", "t"]);
+        // A `diff` attribute forces text, which git's own size threshold would not override.
+        std::fs::write(repo.join(".gitattributes"), "big.txt diff\n").unwrap();
         std::fs::write(repo.join("big.txt"), "x\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "init"]);
-        std::fs::write(repo.join("big.txt"), "y\n".repeat(crate::diff::MAX_BYTES / 2 + 1)).unwrap();
+        let big = "y\n".repeat(crate::diff::MAX_BYTES / 2 + 1);
+        std::fs::write(repo.join("big.txt"), &big).unwrap();
+        let open = |app: &mut App| {
+            app.reload().unwrap();
+            let before = git_commands();
+            app.set_diff("big.txt".to_string(), None);
+            assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
+            assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
+        };
 
+        // The worktree side, in `uncommitted`.
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
-        app.reload().unwrap();
-        let before = git_commands();
-        app.set_diff("big.txt".to_string(), None);
-
-        assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
-        assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
+        open(&mut app);
+        // A committed side, with the worktree shrunk.
+        git(&["commit", "-q", "-am", "grow"]);
+        std::fs::write(repo.join("big.txt"), "small\n").unwrap();
+        open(&mut app);
+        // Both sides committed, in a run of commits.
+        git(&["commit", "-q", "-am", "shrink"]);
+        app.commit_pick = Some(CommitPick::single(&git(&["rev-parse", "HEAD"])));
+        app.scope = Scope::Commits;
+        open(&mut app);
     }
 
     #[test]
@@ -6527,11 +6560,11 @@ mod tests {
         app.scope = Scope::Commits;
         app.reload().unwrap();
         let commits = cost(&mut app, "a.txt", None);
-        // Per tracked file, a rename included, one `cat-file` sizes the sides and one `git diff`
-        // reads them; an untracked file reads raw. Every scope's base rides the build it was
-        // named in, so none is named again.
-        assert_eq!(uncommitted, (2, 0, 2), "a CRLF edit, an untracked file, a pure rename");
-        assert_eq!((branch, last_turn, commits), (2, 2, 2));
+        // One `git diff` per tracked file, a rename included; an untracked file reads raw.
+        // The sides were sized by the build, and every scope's base rides the build it was
+        // named in, so neither is asked again.
+        assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
+        assert_eq!((branch, last_turn, commits), (1, 1, 1));
         let rows: Vec<String> = app
             .diff
             .rows

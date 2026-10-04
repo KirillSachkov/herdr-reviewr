@@ -45,13 +45,23 @@ pub struct Annotation {
     /// attribute. Carried for the read pane, not painted here:
     /// such a change has no countable lines, so it already shows no stats.
     pub binary: bool,
+    /// The sides' sizes as git stores them ([`ChangedFile::old_size`], [`ChangedFile::new_size`]).
+    pub old_size: u64,
+    pub new_size: Option<u64>,
 }
 
 impl From<&ChangedFile> for Annotation {
     /// The scope annotation a changed file carries — the one mapping, shared by the `Changes`
     /// entry build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
     fn from(f: &ChangedFile) -> Self {
-        Self { change: f.kind, additions: f.additions, deletions: f.deletions, binary: f.binary }
+        Self {
+            change: f.kind,
+            additions: f.additions,
+            deletions: f.deletions,
+            binary: f.binary,
+            old_size: f.old_size,
+            new_size: f.new_size,
+        }
     }
 }
 
@@ -239,6 +249,8 @@ mod tests {
             deletions: 0,
             previous_path: None,
             binary: false,
+            old_size: 0,
+            new_size: None,
         }
     }
 

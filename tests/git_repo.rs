@@ -8,10 +8,10 @@ use std::path::Path;
 use common::Repo;
 use herdr_reviewr::git::{
     DiffSides, Origin, ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
-    changed_files as changed_files_oid, checked_out_branch, default_branch_name, delete_base_pick,
-    diff_sides, file_content, list_branches, merge_base as merge_base_oid, read_base_pick,
-    read_baseline_ref, resolve_base, resolve_commit, snapshot_worktree, write_base_pick,
-    write_baseline_ref,
+    changed_between, changed_files as changed_files_oid, changed_from, checked_out_branch,
+    default_branch_name, delete_base_pick, diff_sides, file_content, list_branches,
+    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
+    snapshot_worktree, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 
@@ -909,33 +909,27 @@ fn rename_is_reported_at_the_new_path() {
 }
 
 #[test]
-fn a_side_past_the_render_budget_is_never_read_in_any_scope() {
+fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     let r = Repo::init();
-    let big = "a line of a vendored bundle, padded out to size\n".repeat(50_000);
-    assert!(big.len() > 2_000_000);
-    r.write("big.txt", &big);
-    r.write("b.bin", "\0\u{1}binary\n");
+    // Windows forbids a newline in a file name.
+    let odd = if cfg!(unix) { "line\nbreak.txt" } else { "odd: name.txt" };
+    r.write("a.txt", "four\n");
+    r.write(odd, "seven\n");
     r.commit_all("init");
-    r.write("big.txt", &big.replacen("a line", "A line", 1));
-    r.write("b.bin", "\0\u{2}binary\n");
+    r.write("a.txt", "twelve bytes\n");
+    r.write(odd, "ten bytes\n");
     r.commit_all("edit");
 
-    // Tree to tree, as `commits` and `last-turn` read: neither side is the worktree.
-    let sides = |old, new, path| diff_sides(r.path(), old, new, path, Origin::Same).unwrap();
-    assert_eq!(sides("HEAD~1", Some("HEAD"), "big.txt"), DiffSides::TooLarge);
-    // A binary change stays binary.
-    assert_eq!(sides("HEAD~1", Some("HEAD"), "b.bin"), DiffSides::Binary);
-    // Shrunk in the worktree, the old side is still past the budget.
-    r.write("big.txt", "small now\n");
-    assert_eq!(sides("HEAD", None, "big.txt"), DiffSides::TooLarge);
-    // A rename whose source is past the budget, with no line of its own to diff.
-    r.git(&["checkout", "--", "big.txt"]);
-    r.git(&["mv", "big.txt", "moved.txt"]);
-    let moved = diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("big.txt"));
-    assert_eq!(moved.unwrap(), DiffSides::TooLarge);
-    // A `diff` attribute forcing text changes nothing: the size is checked before git reads.
-    r.write(".gitattributes", "big.txt diff\n");
-    assert_eq!(sides("HEAD~1", Some("HEAD"), "big.txt"), DiffSides::TooLarge);
+    // Tree to tree, as `commits` and `last-turn` read: both sides are blobs, sized by id, so a
+    // path holding a newline sizes like any other.
+    let between = changed_between(r.path(), "HEAD~1", "HEAD").unwrap();
+    let sizes: Vec<_> = between.iter().map(|f| (f.path.as_str(), f.old_size, f.new_size)).collect();
+    assert_eq!(sizes, [("a.txt", 5, Some(13)), (odd, 6, Some(10))]);
+    // Against the worktree, the new side is the file itself, sized when it is read.
+    r.write("a.txt", "x\n");
+    let from = changed_from(r.path(), "HEAD").unwrap();
+    let sizes: Vec<_> = from.iter().map(|f| (f.path.as_str(), f.old_size, f.new_size)).collect();
+    assert_eq!(sizes, [("a.txt", 13, None)]);
 }
 
 #[test]

@@ -112,6 +112,11 @@ pub struct ChangedFile {
     /// `diff` attribute `.gitattributes` unsets. The pane reads it as the `binary` notice
     /// without reading either side.
     pub binary: bool,
+    /// The bytes git stores on the old side, 0 where there is none.
+    pub old_size: u64,
+    /// The bytes git stores on the new side, 0 where there is none, or `None` where the new
+    /// side is the worktree file, sized when it is read.
+    pub new_size: Option<u64>,
 }
 
 /// Which side of the diff a comment's lines live on.

@@ -1358,7 +1358,7 @@ pub enum DiffSides {
     },
     /// "Binary files … differ": binary content, or a path whose `diff` attribute is unset.
     Binary,
-    /// A side past the render budget ([`crate::diff::MAX_BYTES`]), which git never streamed.
+    /// Sides past the render budget ([`crate::diff::over_byte_budget`]), which nothing read.
     TooLarge,
 }
 
@@ -1404,14 +1404,6 @@ pub fn diff_sides(
         Origin::Same => path,
         Origin::Renamed(source) | Origin::Copied(source) => source,
     };
-    let blob = |rev: &str, at: &str| format!("{rev}:{at}");
-    // Every side is sized before anything reads it, so a side past the budget is never
-    // streamed, whatever the scope or the path's `diff` attribute.
-    let blobs: Vec<String> =
-        [blob(old, source)].into_iter().chain(new.map(|new| blob(new, path))).collect();
-    if over_budget(repo, &blobs, new.is_none().then_some(path)) {
-        return Ok(DiffSides::TooLarge);
-    }
     let context = format!("-U{}", crate::diff::MAX_BYTES);
     let mut args = vec![
         // An empty context line prints as a lone space, the form unified diff defines, whatever
@@ -1456,24 +1448,6 @@ pub fn diff_sides(
             None => same(old, source),
         },
     })
-}
-
-/// Whether any side holds more than the render budget: the blobs named `<rev>:<path>`, sized
-/// in one `cat-file` without reading them, and the `worktree` file, by its own stat (a symlink
-/// diffs as its target's path, never the target). A side git cannot name is no side, so it is
-/// not over.
-pub fn over_budget(repo: &Path, blobs: &[String], worktree: Option<&str>) -> bool {
-    let over = |len: u64| crate::diff::over_byte_budget(usize::try_from(len).unwrap_or(usize::MAX));
-    let stat = |at: &str| std::fs::symlink_metadata(repo.join(at));
-    if worktree.is_some_and(|at| stat(at).is_ok_and(|m| over(m.len()))) {
-        return true;
-    }
-    if blobs.is_empty() {
-        return false;
-    }
-    let input = blobs.join("\n") + "\n";
-    git_stdin(repo, &["cat-file", "--batch-check=%(objectsize)"], &input)
-        .is_ok_and(|out| out.lines().any(|line| line.parse().is_ok_and(over)))
 }
 
 /// A unified diff's hunk header, `@@ -l,s +l,s @@`: each side's (first line, line count),
@@ -1746,8 +1720,8 @@ pub fn diff_base(repo: &Path) -> String {
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
     let index = IndexCopy::of(repo)?;
     let numstat = index.git(repo, &["diff", base, "--numstat", "-z"])?;
-    let name_status = index.git(repo, &["diff", base, "--name-status", "-z"])?;
-    assemble(repo, &numstat, &name_status, true)
+    let raw = index.git(repo, &["diff", base, "--raw", "--no-abbrev", "-z"])?;
+    assemble(repo, &numstat, &raw, true)
 }
 
 /// The changed files for `scope`, sorted by path. `branch_base` is the resolved base OID
@@ -1781,8 +1755,8 @@ pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>>
 /// pass runs. `old` may be the empty tree for a root commit.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
     let numstat = git(repo, &["diff", old, new, "--numstat", "-z"])?;
-    let name_status = git(repo, &["diff", old, new, "--name-status", "-z"])?;
-    assemble(repo, &numstat, &name_status, false)
+    let raw = git(repo, &["diff", old, new, "--raw", "--no-abbrev", "-z"])?;
+    assemble(repo, &numstat, &raw, false)
 }
 
 /// `sha`'s first parent, or the empty tree when `sha` is a root commit: the old side of a
@@ -2024,34 +1998,41 @@ pub fn list_ignored_dir(repo: &Path, dir: &str) -> Vec<WorktreeEntry> {
     out
 }
 
-/// Build the sorted `ChangedFile` list from `git diff` numstat + name-status output,
-/// optionally appending untracked files (which a `git diff` never reports).
-fn assemble(
-    repo: &Path,
-    numstat: &str,
-    name_status: &str,
-    include_untracked: bool,
-) -> Result<Vec<ChangedFile>> {
+/// Build the sorted `ChangedFile` list from `git diff` numstat and raw output. A `worktree`
+/// diff's new side is the worktree, sized when it is read, and it appends the untracked files
+/// a `git diff` never reports. Every blob is sized here, on the world worker, by object id: a
+/// file's diff then knows whether its sides fit the render budget before reading either.
+fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec<ChangedFile>> {
     let counts = parse_numstat(numstat);
+    let rows = parse_raw(raw);
+    let blobs: Vec<&str> = rows
+        .iter()
+        .flat_map(|row| [Some(row.old_oid.as_str()), (!worktree).then_some(row.new_oid.as_str())])
+        .flatten()
+        .collect();
+    let sizes = blob_sizes(repo, &blobs)?;
+    let size = |oid: &str| sizes.get(oid).copied().unwrap_or(0);
     let mut seen = HashSet::new();
     let mut files = Vec::new();
-    for (kind, path, previous_path) in parse_name_status(name_status) {
-        if !seen.insert(path.clone()) {
+    for row in rows {
+        if !seen.insert(row.path.clone()) {
             continue;
         }
-        let verdict = counts.get(&path).copied().unwrap_or(Some((0, 0)));
+        let verdict = counts.get(&row.path).copied().unwrap_or(Some((0, 0)));
         let (additions, deletions) = verdict.unwrap_or((0, 0));
         files.push(ChangedFile {
-            path,
-            kind,
+            kind: row.kind,
             additions,
             deletions,
-            previous_path,
             binary: verdict.is_none(),
+            old_size: size(&row.old_oid),
+            new_size: (!worktree).then(|| size(&row.new_oid)),
+            path: row.path,
+            previous_path: row.previous_path,
         });
     }
 
-    if include_untracked {
+    if worktree {
         // Untracked-not-ignored files list as additions. One `ls-files --others` pass — the
         // same definition of untracked `all_files` uses, so the two views can't disagree.
         // `-z` keeps paths with spaces or special characters verbatim, and files inside a
@@ -2081,6 +2062,8 @@ fn assemble(
                 deletions: 0,
                 previous_path: None,
                 binary,
+                old_size: 0,
+                new_size: None,
             });
         }
     }
@@ -2157,7 +2140,7 @@ fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
 /// Under `-z` a non-rename record is `ADDS\tDELS\tPATH\0`; a rename/copy record is
 /// `ADDS\tDELS\t\0OLD\0NEW\0` — the counts ride the front, then old and new arrive as
 /// their own NUL fields (no `=>` arrow, no brace factoring). The counts key under the new
-/// path, matching `parse_name_status`.
+/// path, matching `parse_raw`.
 ///
 /// `-`/`-` is git's own no-text-diff verdict, and it already accounts for `.gitattributes`:
 /// binary content, an unset `diff` attribute (`-diff`, or the `binary` macro), and a driver
@@ -2195,40 +2178,74 @@ fn parse_numstat(out: &str) -> HashMap<String, Option<(u32, u32)>> {
     map
 }
 
-/// `(kind, path, previous_path)` from `git diff --name-status -z`. Under `-z` each record is
-/// `STATUS\0PATH\0`, except a rename/copy is `R<score>\0OLD\0NEW\0` (status, then old and new
-/// as separate fields). A rename or copy takes the new path and carries its old path; every
-/// other kind has `previous_path == None`.
-fn parse_name_status(out: &str) -> Vec<(ChangeKind, String, Option<String>)> {
+/// One record of `git diff --raw --no-abbrev -z`.
+#[derive(Debug, PartialEq, Eq)]
+struct RawRow {
+    kind: ChangeKind,
+    path: String,
+    /// The old path of a rename or copy, whose content is the old side.
+    previous_path: Option<String>,
+    /// Each side's blob, all zeros where the side is absent or is the worktree.
+    old_oid: String,
+    new_oid: String,
+}
+
+/// The records of `git diff --raw --no-abbrev -z`. Each is `:MODE MODE OID OID STATUS\0PATH\0`,
+/// except a rename or copy, `:… R<score>\0OLD\0NEW\0`, which takes the new path and carries
+/// its old one; every other kind has `previous_path == None`.
+fn parse_raw(out: &str) -> Vec<RawRow> {
     let mut rows = Vec::new();
     let mut it = out.split('\0');
-    while let Some(status) = it.next() {
-        let row = match status.chars().next() {
-            Some('A') => it.next().map(|p| (ChangeKind::Added, p.to_string(), None)),
-            Some('D') => it.next().map(|p| (ChangeKind::Deleted, p.to_string(), None)),
+    while let Some(meta) = it.next() {
+        let Some(meta) = meta.strip_prefix(':') else { continue };
+        let fields: Vec<&str> = meta.split(' ').collect();
+        let [_, _, old_oid, new_oid, status] = fields[..] else { continue };
+        let (kind, previous_path) = match status.chars().next() {
+            Some('A') => (ChangeKind::Added, None),
+            Some('D') => (ChangeKind::Deleted, None),
             Some(code @ ('R' | 'C')) => {
                 let kind = if code == 'R' { ChangeKind::Renamed } else { ChangeKind::Copied };
-                let old = it.next();
-                it.next().map(|new| (kind, new.to_string(), old.map(str::to_string)))
+                (kind, it.next().map(str::to_string))
             }
-            // Modified, type-changed, etc.; also skips the trailing empty record.
-            Some(_) => it.next().map(|p| (ChangeKind::Modified, p.to_string(), None)),
-            None => None,
+            // Modified, type-changed, etc.
+            _ => (ChangeKind::Modified, None),
         };
-        if let Some((kind, path, prev)) = row
-            && !path.is_empty()
-        {
-            rows.push((kind, path, prev));
+        if let Some(path) = it.next().filter(|path| !path.is_empty()) {
+            rows.push(RawRow {
+                kind,
+                path: path.to_string(),
+                previous_path,
+                old_oid: old_oid.to_string(),
+                new_oid: new_oid.to_string(),
+            });
         }
     }
     rows
+}
+
+/// The size of each blob in `oids`, in one `cat-file`, by object id: an id holds no
+/// whitespace, so any path is safe. An all-zeros id (no blob) is left out, and reads as none.
+fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
+    let named: Vec<&str> =
+        oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0')).collect();
+    if named.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let input = named.join("\n") + "\n";
+    let out = git_stdin(repo, &["cat-file", "--batch-check=%(objectname) %(objectsize)"], &input)
+        .map_err(|e| anyhow::anyhow!(e.0))?;
+    Ok(out
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter_map(|(oid, size)| Some((oid.to_string(), size.parse().ok()?)))
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         ChangeKind, Forge, ForgeHosts, RepoTarget, RepositoryIdentity, classify_remote,
-        parse_name_status, parse_numstat,
+        parse_numstat, parse_raw,
     };
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
@@ -2658,8 +2675,25 @@ mod tests {
 
     #[test]
     fn name_status_kinds_and_rename_target() {
-        let rows =
-            parse_name_status("M\0src/a.rs\0A\0src/b.rs\0D\0src/c.rs\0R100\0old.rs\0new.rs\0");
+        let meta =
+            |status: &str| format!(":100644 100644 {} {} {status}", "a".repeat(40), "0".repeat(40));
+        let raw = [
+            meta("M"),
+            "src/a.rs".into(),
+            meta("A"),
+            "src/b.rs".into(),
+            meta("D"),
+            "src/c.rs".into(),
+            meta("R100"),
+            "old.rs".into(),
+            "new.rs".into(),
+            meta("M"),
+            "with\nnewline".into(),
+            String::new(),
+        ]
+        .join("\0");
+        let rows: Vec<_> =
+            parse_raw(&raw).into_iter().map(|r| (r.kind, r.path, r.previous_path)).collect();
         assert_eq!(rows[0], (ChangeKind::Modified, "src/a.rs".to_string(), None));
         assert_eq!(rows[1], (ChangeKind::Added, "src/b.rs".to_string(), None));
         assert_eq!(rows[2], (ChangeKind::Deleted, "src/c.rs".to_string(), None));
@@ -2667,16 +2701,19 @@ mod tests {
             rows[3],
             (ChangeKind::Renamed, "new.rs".to_string(), Some("old.rs".to_string()))
         );
+        assert_eq!(rows[4], (ChangeKind::Modified, "with\nnewline".to_string(), None));
+        assert_eq!(parse_raw(&raw)[0].old_oid, "a".repeat(40));
     }
 
     #[test]
     fn name_status_copy_keeps_the_new_path() {
         // A copy carries old + new like a rename; it must key under the new path, not collapse
         // to a Modified entry on the source path.
-        let rows = parse_name_status("C75\0orig.rs\0copy.rs\0");
+        let raw = format!(":100644 100644 {0} {0} C75\0orig.rs\0copy.rs\0", "b".repeat(40));
+        let row = &parse_raw(&raw)[0];
         assert_eq!(
-            rows[0],
-            (ChangeKind::Copied, "copy.rs".to_string(), Some("orig.rs".to_string()))
+            (row.kind, row.path.as_str(), row.previous_path.as_deref()),
+            (ChangeKind::Copied, "copy.rs", Some("orig.rs"))
         );
     }
 
