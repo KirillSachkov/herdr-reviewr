@@ -202,8 +202,8 @@ const LOCK_POLL: Duration = Duration::from_millis(20);
 /// Take the action lock, or `None` when the event finds it held and yields.
 ///
 /// herdr spawns every action and event hook on its own thread with no per-plugin queue, so two
-/// quick toggles, or the two worktree hooks of one workspace birth, would both read "no
-/// reviewr pane" and both open. An explicit action waits, bounded, so a double press opens and
+/// quick toggles, or a toggle and an auto-open, would both read "no reviewr pane" and both
+/// open. An explicit action waits, bounded, so a double press opens and
 /// then closes. Past [`LOCK_BOUND`] it refuses rather than act unguarded. The event tries once
 /// and yields: whoever holds the lock is already acting on reviewr panes, and a second open
 /// is exactly what the lock exists to stop. This is the pattern of herdr-sidebar's launcher
