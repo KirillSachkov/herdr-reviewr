@@ -722,8 +722,8 @@ fn reply_outcome(reply: &str) -> Result<(), HerdrError> {
 /// a namespaced local socket name (herdr's `connect_local_stream`). herdr reads one request line
 /// per connection, answers it with one line, and closes.
 ///
-/// On unix every read and write ends at the send's deadline, so a herdr that accepts and never
-/// answers frees the worker thread and its descriptor once the send gives up. The connect itself
+/// On unix each read and write waits at most the time left at connect, so a herdr that accepts
+/// and never answers frees the worker thread and its descriptor shortly after the send gives up. The connect itself
 /// returns at once unless herdr stopped accepting with its whole backlog queued. A Windows named
 /// pipe takes no read or write timeout (`interprocess` reports them unsupported, and herdr's own
 /// client goes without), so there the deadline bounds only the wait for a free pipe instance. A
@@ -758,36 +758,19 @@ mod socket {
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "herdr did not answer in time"))
     }
 
+    /// Both timeouts are set once, here, while the connection is certainly open. Setting them
+    /// again before each read would race herdr: it answers and closes at once, and macOS fails
+    /// `setsockopt` on a socket whose peer has closed (EINVAL), which would turn a delivered
+    /// paste into "herdr didn't answer", and a retry into a second paste. Each read and write
+    /// then waits at most the time that was left at connect, and the frame loop's own wait is
+    /// bounded by [`SEND_BOUND`](super::SEND_BOUND) regardless.
     #[cfg(unix)]
-    fn connect(socket: &OsStr, deadline: Instant) -> io::Result<Bounded> {
-        Ok(Bounded { stream: std::os::unix::net::UnixStream::connect(socket)?, deadline })
-    }
-
-    /// A Unix socket connection whose every read and write waits only until the deadline.
-    #[cfg(unix)]
-    struct Bounded {
-        stream: std::os::unix::net::UnixStream,
-        deadline: Instant,
-    }
-
-    #[cfg(unix)]
-    impl io::Read for Bounded {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            self.stream.set_read_timeout(Some(left(self.deadline)?))?;
-            self.stream.read(buf)
-        }
-    }
-
-    #[cfg(unix)]
-    impl Write for Bounded {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.stream.set_write_timeout(Some(left(self.deadline)?))?;
-            self.stream.write(buf)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            self.stream.flush()
-        }
+    fn connect(socket: &OsStr, deadline: Instant) -> io::Result<std::os::unix::net::UnixStream> {
+        let stream = std::os::unix::net::UnixStream::connect(socket)?;
+        let left = left(deadline)?;
+        stream.set_read_timeout(Some(left))?;
+        stream.set_write_timeout(Some(left))?;
+        Ok(stream)
     }
 
     /// Connect the way herdr's own client does, waiting for a free pipe instance only until the
