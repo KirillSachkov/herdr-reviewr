@@ -13,8 +13,12 @@ env:
 
 jobs:
   check:
-    name: fmt · clippy · test
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} · fmt · clippy · test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
@@ -25,49 +29,23 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Formatting reads every file whatever the OS, so one runner checks it.
       - name: Format
+        if: runner.os != 'Windows'
         run: cargo fmt --all --check
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # On Windows the runner's git keeps its default core.autocrlf=true, as a Windows user's
+      # does.
       - name: Test
         run: cargo test --all-features
 
+      # The Windows release build is the packaged one, in windows-plugin.
       - name: Build (release)
+        if: runner.os != 'Windows'
         run: cargo build --release
-
-  windows:
-    name: windows · fmt · clippy · test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install toolchain (pinned via rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@1.97.0
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      # The runner's git keeps its default core.autocrlf=true, as a Windows user's does.
-      - name: Test
-        run: cargo test --all-features
-
-      - name: Build (release)
-        run: cargo build --release
-
-      # The build Windows QA runs: link a checkout with this in `bin\`.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: herdr-reviewr-x86_64-pc-windows-msvc
-          path: target/release/herdr-reviewr.exe
 
   windows-plugin:
     name: windows · install · herdr smoke
@@ -103,3 +81,9 @@ jobs:
       - name: Toggle reviewr in a headless herdr
         shell: powershell
         run: .\scripts\windows-herdr-smoke.ps1 -Reviewr target\x86_64-pc-windows-msvc\release\herdr-reviewr.exe
+
+      # The build Windows QA runs: link a checkout with this in `bin\`.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-reviewr-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/release/herdr-reviewr.exe
