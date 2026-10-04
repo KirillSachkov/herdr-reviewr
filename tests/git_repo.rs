@@ -908,6 +908,19 @@ fn rename_is_reported_at_the_new_path() {
     assert_eq!(renamed.previous_path.as_deref(), Some("old_name.rs"));
 }
 
+/// An untracked link to a device has no lines: counting would read it without end.
+#[cfg(unix)]
+#[test]
+fn an_untracked_link_to_a_device_lists_without_reading_it() {
+    let r = Repo::init();
+    r.write("a.txt", "a\n");
+    r.commit_all("init");
+    std::os::unix::fs::symlink("/dev/zero", r.path().join("zero")).unwrap();
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let zero = files.iter().find(|f| f.path == "zero").expect("the link lists");
+    assert_eq!((zero.kind, zero.additions), (ChangeKind::Untracked, 0));
+}
+
 #[test]
 fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     let r = Repo::init();

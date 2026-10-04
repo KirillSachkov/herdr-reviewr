@@ -2116,20 +2116,37 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
 /// `git diff`, so no numstat speaks for it; [`diff_unset`] asks git for the attribute half
 ///.
 fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
-    let Ok(bytes) = std::fs::read(repo.join(path)) else { return Some(0) };
-    // git's own sniff: a NUL within the first 8000 bytes.
-    if bytes[..bytes.len().min(8000)].contains(&0) {
-        return None; // binary — git reports no line additions
-    }
-    if bytes.is_empty() {
+    use std::io::Read;
+    let at = repo.join(path);
+    // Only a regular file has lines: a link to a device would read without end.
+    if !std::fs::metadata(&at).is_ok_and(|m| m.is_file()) {
         return Some(0);
     }
-    // Lines = newline count, plus one for a final line with no trailing newline. A plain
-    // byte count is fine for one already-read file; no need for the bytecount crate.
-    #[allow(clippy::naive_bytecount)]
-    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
-    let trailing = usize::from(bytes.last() != Some(&b'\n'));
-    Some((newlines + trailing) as u32)
+    let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };
+    // Counted a buffer at a time, so a large file never sits in memory whole.
+    let mut buf = vec![0; 64 * 1024];
+    let (mut newlines, mut read, mut last) = (0usize, 0usize, None);
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Some(0),
+        };
+        let chunk = &buf[..n];
+        // git's own sniff: a NUL within the first 8000 bytes.
+        if read < 8000 && chunk[..n.min(8000 - read)].contains(&0) {
+            return None; // binary — git reports no line additions
+        }
+        #[allow(clippy::naive_bytecount)]
+        let count = chunk.iter().filter(|&&b| b == b'\n').count();
+        newlines += count;
+        read += n;
+        last = chunk.last().copied();
+    }
+    // Lines = newline count, plus one for a final line with no trailing newline.
+    let trailing = usize::from(last.is_some_and(|b| b != b'\n'));
+    Some(u32::try_from(newlines + trailing).unwrap_or(u32::MAX))
 }
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
@@ -2674,7 +2691,7 @@ mod tests {
     }
 
     #[test]
-    fn name_status_kinds_and_rename_target() {
+    fn raw_kinds_and_rename_target() {
         let meta =
             |status: &str| format!(":100644 100644 {} {} {status}", "a".repeat(40), "0".repeat(40));
         let raw = [
@@ -2706,7 +2723,7 @@ mod tests {
     }
 
     #[test]
-    fn name_status_copy_keeps_the_new_path() {
+    fn raw_copy_keeps_the_new_path() {
         // A copy carries old + new like a rename; it must key under the new path, not collapse
         // to a Modified entry on the source path.
         let raw = format!(":100644 100644 {0} {0} C75\0orig.rs\0copy.rs\0", "b".repeat(40));

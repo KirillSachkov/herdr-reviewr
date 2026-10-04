@@ -1957,10 +1957,11 @@ impl App {
     /// the file as it is read, so nothing streams a large file through the frame loop.
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
         let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
-        let annotation = self.changed.get(path);
-        let untracked = annotation.is_some_and(|a| a.change == ChangeKind::Untracked);
-        let (old_size, new_size) = annotation.map_or((0, None), |a| (a.old_size, a.new_size));
-        let new_size = new_size.unwrap_or_else(|| {
+        // A path outside the landed changeset, a row painted from an older build, has no diff
+        // at the landed ends. The next reconcile shows the right file.
+        let Some(annotation) = self.changed.get(path) else { return empty() };
+        let untracked = annotation.change == ChangeKind::Untracked;
+        let new_size = annotation.new_size.unwrap_or_else(|| {
             // git diffs a tracked symlink as its target's path; an untracked file reads raw,
             // through the link.
             let at = self.repo.join(path);
@@ -1968,7 +1969,7 @@ impl App {
                 if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
             stat.map_or(0, |m| m.len())
         });
-        let total = old_size.saturating_add(new_size);
+        let total = annotation.old_size.saturating_add(new_size);
         if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
             return git::DiffSides::TooLarge;
         }
@@ -1981,8 +1982,7 @@ impl App {
         // The ends the changeset came from, whatever moved since: a commit, a new merge base,
         // a promoted turn baseline. No ends means the scope lists nothing.
         let Some(ends) = &self.diff_ends else { return empty() };
-        let kind = self.changed.get(path).map_or(ChangeKind::Modified, |a| a.change);
-        let origin = git::Origin::of(kind, previous_path);
+        let origin = git::Origin::of(annotation.change, previous_path);
         let sides = git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, origin);
         sides.unwrap_or_else(|_| empty())
     }
@@ -5703,11 +5703,20 @@ fn is_markdown_path(path: &str) -> bool {
 }
 
 /// `path`'s worktree bytes as text, lossily, as the file has them: line endings included.
-/// Empty when the file is absent (a deletion) or unreadable.
+/// Empty when the file is absent (a deletion), unreadable, or no regular file (a link to a
+/// device never ends). The read stops past the render budget, which the callers check first.
 fn worktree_content(repo: &std::path::Path, path: &str) -> String {
-    std::fs::read(repo.join(path))
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default()
+    use std::io::Read;
+    let at = repo.join(path);
+    if !std::fs::metadata(&at).is_ok_and(|m| m.is_file()) {
+        return String::new();
+    }
+    let mut bytes = Vec::new();
+    let cap = crate::diff::MAX_BYTES as u64 + 1;
+    match std::fs::File::open(at).and_then(|f| f.take(cap).read_to_end(&mut bytes)) {
+        Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
 }
 
 /// The current-content line source row `i` stands for: its own, else — a deletion or a fold
@@ -6511,6 +6520,12 @@ mod tests {
         app.commit_pick = Some(CommitPick::single(&git(&["rev-parse", "HEAD"])));
         app.scope = Scope::Commits;
         open(&mut app);
+        // A row painted from an older build names a path the landed changeset lacks: it has
+        // no diff at the landed ends, so nothing reads it.
+        app.reload().unwrap();
+        let before = git_commands();
+        app.set_diff("gone.txt".to_string(), None);
+        assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
     }
 
     #[test]
