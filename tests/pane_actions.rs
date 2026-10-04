@@ -845,6 +845,51 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(fs::read_link(&bin_link).unwrap(), root.path().join("bin/herdr-reviewr"));
 
+    // A link that already names the live binary is left in place.
+    let inode =
+        |path: &Path| std::os::unix::fs::MetadataExt::ino(&fs::symlink_metadata(path).unwrap());
+    let before = inode(&bin_link);
+    let output = run_close();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(inode(&bin_link), before, "a current link was replaced");
+
+    // A re-point swaps the link in one step: a launch through it never finds the path
+    // missing, and the swap leaves nothing else beside it.
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir_all(other.path().join("bin")).unwrap();
+    fs::copy(root.path().join("bin/herdr-reviewr"), other.path().join("bin/herdr-reviewr"))
+        .unwrap();
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let missing = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut missing = 0;
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                if fs::symlink_metadata(&bin_link).is_err() {
+                    missing += 1;
+                }
+            }
+            missing
+        });
+        for round in 0..20 {
+            let live = if round % 2 == 0 { other.path() } else { root.path() };
+            let output = action("close", dir.path())
+                .env("HERDR_PLUGIN_ROOT", live)
+                .env("HOME", home.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{}", stderr(&output));
+            assert_eq!(fs::read_link(&bin_link).unwrap(), live.join("bin/herdr-reviewr"));
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().unwrap()
+    });
+    assert_eq!(missing, 0, "the link was missing mid-swap");
+    let names: Vec<_> = fs::read_dir(home.path().join(".local/bin"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["herdr-reviewr"]);
+
     // Anything but a symlink at the path is a user's own, and survives.
     fs::remove_file(&bin_link).unwrap();
     fs::write(&bin_link, "mine").unwrap();

@@ -501,12 +501,22 @@ fn repoint_launch_links() {
         let link = dir.join("herdr-reviewr");
         match std::fs::symlink_metadata(&link) {
             Ok(meta) if meta.file_type().is_symlink() => {
-                let _ = std::fs::remove_file(&link);
+                if std::fs::read_link(&link).is_ok_and(|target| target == binary) {
+                    continue;
+                }
             }
             Ok(_) => continue,
             Err(_) => {}
         }
-        let _ = std::os::unix::fs::symlink(&binary, &link);
+        // A layout may launch through the link at any moment, so the swap never leaves the
+        // path missing: a fresh link beside it renames over the old one in one step.
+        let fresh = dir.join(format!(".herdr-reviewr.{}", std::process::id()));
+        let _ = std::fs::remove_file(&fresh);
+        if std::os::unix::fs::symlink(&binary, &fresh).is_ok()
+            && std::fs::rename(&fresh, &link).is_err()
+        {
+            let _ = std::fs::remove_file(&fresh);
+        }
     }
 }
 
