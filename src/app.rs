@@ -650,10 +650,6 @@ struct LastClick {
 #[derive(Debug)]
 pub struct App {
     pub repo: PathBuf,
-    /// git's `core.editor` for this repo, read once on the first `e` that needs it: a
-    /// session-fixed value, so no later press spawns git on the frame loop
-    /// (`policies/ux-responsiveness.md`).
-    pub core_editor: std::cell::OnceCell<Option<String>>,
     pub base: Option<String>,
     /// The `branch` scope's base outcome, carried by the latest landed snapshot — the
     /// header names its winner (or the skip) and the diff builds against the winner's OID
@@ -881,8 +877,9 @@ pub struct App {
     /// `&App`; cleared with the diff cache on a theme switch.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
-    /// The worker-owned turn baseline, mirrored from completions so the sync `last-turn`
-    /// paths (the diff's old side, the scope-switch rebuild) read it without a round-trip.
+    /// The worker-owned turn baseline, mirrored from completions so the next build's input
+    /// carries it and the `last-turn` empty state reads it without a round-trip. A file's diff
+    /// reads [`Self::diff_ends`] instead.
     turn_baseline: Option<String>,
     /// The two ends the landed changeset was diffed between, so a file's diff reads the same
     /// trees its counts came from ([`crate::world::DiffEnds`]).
@@ -938,7 +935,6 @@ impl App {
         let theme = theme::resolve(None);
         Self {
             repo,
-            core_editor: std::cell::OnceCell::new(),
             base,
             branch_base: git::BaseStatus::default(),
             commit_pick: None,

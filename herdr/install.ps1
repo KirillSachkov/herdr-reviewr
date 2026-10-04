@@ -11,7 +11,6 @@
 # herdr runs the build without the runtime env. Windows gets no stable launch links (symlinks
 # need Developer Mode or admin), so this only installs the binary.
 
-
 $ErrorActionPreference = 'Stop'
 # 5.1 draws a progress bar per downloaded chunk, which slows a download severalfold.
 $ProgressPreference = 'SilentlyContinue'

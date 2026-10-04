@@ -125,8 +125,6 @@ mod tests {
         );
     }
 
-    /// Windows opens a link through its shell, so nothing has to be on `PATH`.
-
     #[test]
     fn the_opener_template_splits_like_editor_and_places_the_url() {
         let url = "https://example.com/pr?a=1&b=2";

@@ -227,7 +227,9 @@ fn run_editor(
         configured,
         std::env::var("VISUAL").ok().as_deref(),
         std::env::var("EDITOR").ok().as_deref(),
-        || app.core_editor.get_or_init(|| git::core_editor(&app.repo)).clone(),
+        // Read on every press that reaches it: the reviewer may fix their git config between
+        // two presses, and the press hands the pane to an editor anyway.
+        || git::core_editor(&app.repo),
         &path,
         target.line,
     ) {

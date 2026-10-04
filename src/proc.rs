@@ -21,15 +21,18 @@ fn host_path() -> &'static OsString {
     PATH.get_or_init(|| prepended_path(env::var_os("PATH").as_deref()))
 }
 
-/// `name` resolved on the host PATH, a bare name's hit kept for the session. Every spawn,
-/// a file build's git on the frame loop included, would otherwise search the PATH again, and on
-/// Windows each directory once per PATHEXT extension. A miss is asked again next time, so a
-/// tool installed meanwhile is found.
+/// `name` resolved on the host PATH, a bare name's hit kept while it is still there. Every
+/// spawn, a file build's git on the frame loop included, would otherwise search the PATH again,
+/// and on Windows each directory once per PATHEXT extension; a kept hit costs one stat. A miss,
+/// or a hit since moved, is asked again, so a tool installed or moved meanwhile is found.
 fn resolve_on_host(name: &OsStr) -> Option<PathBuf> {
     static FOUND: OnceLock<Mutex<HashMap<OsString, PathBuf>>> = OnceLock::new();
     let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
     let found = FOUND.get_or_init(Mutex::default);
-    if bare && let Some(hit) = found.lock().unwrap_or_else(PoisonError::into_inner).get(name) {
+    if bare
+        && let Some(hit) = found.lock().unwrap_or_else(PoisonError::into_inner).get(name)
+        && hit.is_file()
+    {
         return Some(hit.clone());
     }
     let hit = resolve_on(host_path(), name)?;

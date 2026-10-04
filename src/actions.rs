@@ -219,9 +219,18 @@ fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
     let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
-    // A workspace id names the file: anything but a letter, digit, `-` or `_` becomes `_`.
-    let name: String =
-        ws.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    // A workspace id names the file, one-to-one so two workspaces never share a lock: an ASCII
+    // letter, digit or `-` stays, and every other byte is `_` and its two hex digits.
+    let name: String = ws
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' {
+                char::from(b).to_string()
+            } else {
+                format!("_{b:02x}")
+            }
+        })
+        .collect();
     let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
     // Read and write without truncation: Windows locks need a handle with access, and the
