@@ -7,7 +7,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use common::fake_herdr;
@@ -65,6 +65,12 @@ fn calls(dir: &Path) -> String {
     fs::read_to_string(dir.join("herdr.log")).unwrap_or_default()
 }
 
+/// Forget every call the fake logged and close the pane it opened, for the next run in `dir`.
+fn reset(dir: &Path) {
+    let _ = fs::remove_file(dir.join("herdr.log"));
+    let _ = fs::remove_file(dir.join("opened"));
+}
+
 fn herdr_called(dir: &Path) -> bool {
     dir.join("herdr.log").exists()
 }
@@ -95,13 +101,14 @@ fn stderr(output: &Output) -> String {
 }
 
 /// The action `mode`, run the way herdr runs it from workspace `workspace-1`, with `dir` as
-/// both the plugin config dir and the fake's fixture dir. Every other herdr variable is
-/// cleared, so the run sees exactly what the test sets.
+/// the plugin config dir, the plugin state dir, and the fake's fixture dir. Every other herdr
+/// variable is cleared, so the run sees exactly what the test sets.
 fn action(mode: &str, dir: &Path) -> Command {
     let mut command = Command::new(reviewr_bin());
     command
         .args(["--action", mode])
         .env("HERDR_PLUGIN_CONFIG_DIR", dir)
+        .env("HERDR_PLUGIN_STATE_DIR", dir)
         .env("HERDR_BIN_PATH", fake_herdr())
         .env("FAKE_HERDR_DIR", dir)
         .env("HERDR_WORKSPACE_ID", "workspace-1");
@@ -124,17 +131,23 @@ fn run(mode: &str, dir: &Path) -> Output {
 /// An `open` with the workspace context a focused pane provides, so the run reaches the
 /// placement and `plugin pane open` stages.
 fn run_open(dir: &Path) -> Output {
-    let context = json!({"focused_pane_cwd": env!("CARGO_MANIFEST_DIR")}).to_string();
-    run_with_context("open", dir, &context)
+    run_with_context("open", dir, &repo_context())
+}
+
+/// The action context of a focused pane in this crate's repo, so an open can proceed.
+fn repo_context() -> String {
+    json!({"focused_pane_cwd": env!("CARGO_MANIFEST_DIR")}).to_string()
 }
 
 /// Any mode with a caller-shaped action context, invoked from pane `w1:p1`.
 fn run_with_context(mode: &str, dir: &Path, context: &str) -> Output {
-    action(mode, dir)
-        .env("HERDR_PANE_ID", "w1:p1")
-        .env("HERDR_PLUGIN_CONTEXT_JSON", context)
-        .output()
-        .unwrap()
+    with_context(mode, dir, context).output().unwrap()
+}
+
+fn with_context(mode: &str, dir: &Path, context: &str) -> Command {
+    let mut command = action(mode, dir);
+    command.env("HERDR_PANE_ID", "w1:p1").env("HERDR_PLUGIN_CONTEXT_JSON", context);
+    command
 }
 
 /// The event hook, as herdr fires it: no workspace or pane of its own, only the payload.
@@ -316,7 +329,7 @@ fn auto_open_birth_events_follow_shared_policy() {
                 format!("toggle_placement = \"{placement}\"\n"),
             )
             .unwrap();
-            let _ = fs::remove_file(dir.path().join("herdr.log"));
+            reset(dir.path());
             let workspace = format!("workspace-{event_name}-{placement}");
             let event =
                 worktree_event(event_name, &workspace, env!("CARGO_MANIFEST_DIR"), already_open);
@@ -585,7 +598,7 @@ fn a_flag_run_never_counts_as_the_review_ui() {
     let flag_runs: [&[&str]; 2] =
         [&["herdr-reviewr", "--resolve-plugin-config"], &["herdr-reviewr", "--action", "toggle"]];
     for argv in flag_runs {
-        let _ = fs::remove_file(dir.path().join("herdr.log"));
+        reset(dir.path());
         procinfo(dir.path(), "w1:p1", &json!([process("herdr-reviewr", argv)]));
 
         let output = run_open(dir.path());
@@ -886,7 +899,7 @@ fn valid_non_default_placement_and_direction_reach_herdr_arguments() {
     ];
     for (text, placement, direction) in cases {
         fs::write(&config, text).unwrap();
-        let _ = fs::remove_file(dir.path().join("herdr.log"));
+        reset(dir.path());
         let output = run_open(dir.path());
         assert!(output.status.success(), "{}", stderr(&output));
         let open = open_call(dir.path());
@@ -912,7 +925,7 @@ fn zoomed_placement_attaches_to_the_focused_pane_else_the_first_pane() {
     assert!(open.contains("--placement zoomed --target-pane w1:p4 --cwd"), "{open}");
     assert!(!open.contains("--direction"), "only a split takes a direction: {open}");
 
-    let _ = fs::remove_file(dir.path().join("herdr.log"));
+    reset(dir.path());
     let output = action("open", dir.path())
         .env("HERDR_PANE_ID", "w1:p5")
         .env("HERDR_PLUGIN_CONTEXT_JSON", &context)
@@ -966,7 +979,7 @@ fn a_manual_open_passes_focus() {
     let context = json!({"focused_pane_cwd": env!("CARGO_MANIFEST_DIR")}).to_string();
 
     for mode in ["open", "toggle"] {
-        let _ = fs::remove_file(dir.path().join("herdr.log"));
+        reset(dir.path());
         let output = run_with_context(mode, dir.path(), &context);
         assert!(output.status.success(), "{mode}: {}", stderr(&output));
         let open = open_call(dir.path());
@@ -1012,6 +1025,149 @@ fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
     assert!(elapsed >= Duration::from_millis(900), "returned before the bound: {elapsed:?}");
     assert!(elapsed < Duration::from_secs(10), "the wait is bounded: {elapsed:?}");
     assert!(opened_pane_reads(dir.path()) > 1, "{}", calls(dir.path()));
+}
+
+// --- Actions serialize on the lock in the plugin state dir.
+
+/// The action lock, held by the test process as another action would hold it.
+fn hold_lock(dir: &Path) -> fs::File {
+    let file = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("action.lock"))
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+/// Start `mode` with a focused pane in this crate's repo, its output captured.
+fn start(mode: &str, dir: &Path) -> Child {
+    with_context(mode, dir, &repo_context())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn two_concurrent_toggles_open_then_close() {
+    let dir = tempfile::tempdir().unwrap();
+    // herdr's Windows process snapshot lags a fresh pane, so the opened pane first reads empty.
+    fs::write(dir.path().join("opened-empty-reads"), "2").unwrap();
+
+    let first = start("toggle", dir.path());
+    let second = start("toggle", dir.path());
+    let mut lines = [first, second].map(|child| {
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        stdout(&output)
+    });
+    lines.sort();
+
+    assert_eq!(
+        lines,
+        [
+            "reviewr: closed w1:p9 in workspace-1\n".to_owned(),
+            "reviewr: opened w1:p9 (split) in workspace-1\n".to_owned(),
+        ]
+    );
+    let effects: Vec<_> = calls(dir.path())
+        .lines()
+        .filter(|line| line.starts_with("plugin pane open") || line.starts_with("pane close"))
+        .map(|line| line.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
+        .collect();
+    assert_eq!(effects, ["plugin pane open", "pane close w1:p9"]);
+}
+
+#[test]
+fn an_explicit_action_waits_for_a_held_lock_and_proceeds_once_released() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = hold_lock(dir.path());
+
+    let mut child = start("toggle", dir.path());
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(child.try_wait().unwrap().is_none(), "the toggle did not wait for the lock");
+    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    drop(lock);
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
+}
+
+#[test]
+fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = hold_lock(dir.path());
+
+    let started = Instant::now();
+    let children = ["toggle", "open", "close"].map(|mode| (mode, start(mode, dir.path())));
+    for (mode, child) in children {
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{mode}");
+        assert_eq!(
+            stderr(&output),
+            "reviewr: another reviewr action is still running after 5s\n",
+            "{mode}"
+        );
+        assert!(output.stdout.is_empty(), "{mode}");
+    }
+    let elapsed = started.elapsed();
+
+    assert!(elapsed >= Duration::from_millis(4500), "refused before the bound: {elapsed:?}");
+    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+}
+
+#[test]
+fn auto_open_yields_silently_to_a_held_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let _lock = hold_lock(dir.path());
+    let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
+
+    let started = Instant::now();
+    let output = run_auto_open(dir.path(), &event, None);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{}", stdout(&output));
+    assert!(output.stderr.is_empty(), "{}", stderr(&output));
+    assert!(started.elapsed() < Duration::from_secs(3), "the event waited for the lock");
+    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+}
+
+#[test]
+fn a_lock_held_by_a_crashed_action_frees_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first toggle takes the lock, then hangs in its pane listing until it is killed.
+    fs::write(dir.path().join("list-hang"), "").unwrap();
+    let mut crashed = start("toggle", dir.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !calls(dir.path()).contains("pane list") {
+        assert!(Instant::now() < deadline, "the first toggle never listed panes");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crashed.kill().unwrap();
+    crashed.wait().unwrap();
+
+    let output = run_with_context("toggle", dir.path(), &repo_context());
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
+}
+
+#[test]
+fn an_action_without_a_plugin_state_dir_refuses_before_any_herdr_call() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = with_context("toggle", dir.path(), &repo_context())
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stderr(&output), "reviewr: no plugin state dir (invoke as a herdr plugin action)\n");
+    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
 }
 
 // --- Open cwd: the focused pane's live foreground cwd, then the context's launch cwd.

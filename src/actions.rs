@@ -6,12 +6,18 @@
 //! - `auto-open` is the worktree workspace-birth hook, gated by `auto_open` and placement.
 //!
 //! A reviewr pane is any pane whose foreground runs the review UI, read live per pane. The
-//! `reviewr` label is display only and never read. There is no state file. An action refuses
-//! loudly (exit 1, one `reviewr:` line on stderr) and reports a success on stdout. A refused
-//! event stays silent, except for a config error, which goes to stderr for herdr's plugin log.
+//! `reviewr` label is display only and never read. An action refuses loudly (exit 1, one
+//! `reviewr:` line on stderr) and reports a success on stdout. A refused event stays silent,
+//! except for a config error, which goes to stderr for herdr's plugin log.
+//!
+//! herdr runs plugin actions concurrently, so every action that reaches the workspace holds one
+//! exclusive OS lock on `$HERDR_PLUGIN_STATE_DIR/action.lock` from its pane listing to its end
+//! (see [`action_lock`]). The file holds no state: it is never written or deleted, and the OS
+//! releases the lock when a run exits or crashes.
 
 use std::env;
 use std::ffi::OsStr;
+use std::fs::{File, TryLockError};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -150,6 +156,11 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let Some(ws) = target.ws.as_deref() else {
         return Err(refused("no workspace context (invoke from inside herdr)"));
     };
+    // Held from the listing through the close or the open, so a concurrent action reads the
+    // workspace only after this one's effect is visible.
+    let Some(_lock) = action_lock(action)? else {
+        return Ok(None);
+    };
 
     // One pane-list snapshot serves the whole run. A failed or unreadable listing must not
     // read as "no reviewr pane": that would stack a duplicate on toggle and false-succeed a
@@ -172,6 +183,63 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let line = open(action, &config, &target, ws, &panes)?;
     // The event reports nothing on success either.
     Ok((action != Action::AutoOpen).then_some(line))
+}
+
+/// How long an explicit action waits for another action to release the lock. One action holds
+/// it for a few herdr round trips plus, for an open, up to [`VISIBLE_BOUND`]: about 2 s at
+/// worst. Five seconds lets a double press wait out one full open with room to spare, and still
+/// ends a wait on a wedged holder before the user gives up on the key.
+const LOCK_BOUND: Duration = Duration::from_secs(5);
+
+/// The pause between two lock attempts while an explicit action waits.
+const LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// Take the action lock, or `None` when the event finds it held and yields.
+///
+/// herdr spawns every action and event hook on its own thread with no per-plugin queue, so two
+/// quick toggles, or the two worktree hooks of one workspace birth, would both read "no
+/// reviewr pane" and both open. An explicit action waits, bounded, so a double press opens and
+/// then closes. Past [`LOCK_BOUND`] it refuses rather than act unguarded. The event tries once
+/// and yields: whoever holds the lock is already acting on reviewr panes, and a second open
+/// is exactly what the lock exists to stop. This is the pattern of herdr-sidebar's launcher
+/// lock.
+///
+/// The wait polls `try_lock` against a deadline instead of blocking in `lock`, because Windows
+/// can take a moment to release a crashed holder's lock. Without a usable state dir the action
+/// refuses: herdr sets and creates the dir for every action, so a run without it is not a herdr
+/// action, and an unguarded run is the race this lock closes.
+fn action_lock(action: Action) -> Result<Option<File>, Stop> {
+    let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
+        return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
+    };
+    let path = Path::new(&dir).join("action.lock");
+    let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
+    // Read and write without truncation: Windows locks need a handle with access, and the
+    // file's (empty) content is never touched.
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(unusable)?;
+    let deadline = Instant::now() + LOCK_BOUND;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(TryLockError::WouldBlock) if action == Action::AutoOpen => {
+                logln!("auto-open yielded: another reviewr action holds the lock");
+                return Ok(None);
+            }
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(LOCK_POLL),
+            Err(TryLockError::WouldBlock) => {
+                return Err(refused(format!(
+                    "another reviewr action is still running after {LOCK_BOUND:?}"
+                )));
+            }
+            Err(TryLockError::Error(error)) => return Err(unusable(error)),
+        }
+    }
 }
 
 /// A non-empty environment variable. herdr leaves context variables unset or empty alike.

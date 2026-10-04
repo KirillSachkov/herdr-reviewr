@@ -5,15 +5,19 @@
 //! It serves the fixture directory named by `FAKE_HERDR_DIR`, appending each invocation's
 //! arguments as one line to `herdr.log`:
 //!
-//! - `pane list` serves `panes.json`, else one plain pane `w1:p1`.
+//! - `pane list` serves `panes.json`, else one plain pane `w1:p1`, plus the pane `plugin pane
+//!   open` creates while it is open. It first hangs for 10 s when `list-hang` exists, deleting
+//!   that file, so only one listing hangs.
 //! - `pane process-info --pane <id>` fails with `procfail-<id>.json` on stderr, else serves
 //!   `procinfo-<id>.json`. Without either, the pane `plugin pane open` creates (`w1:p9`) runs
 //!   the review UI, after answering no processes for as many reads as `opened-empty-reads`
 //!   holds. Every other pane is a plain shell, which is not a reviewr pane.
-//! - `pane close <id>` fails with `closefail-<id>` on stderr, else succeeds.
+//! - `pane close <id>` fails with `closefail-<id>` on stderr, else succeeds, and closes the
+//!   opened pane when it names it.
 //! - `plugin config-dir` names the fixture directory itself, after a 5 s hang when
 //!   `configdir-hang` exists.
-//! - `plugin pane open` fails with `openfail` on stderr, else opens pane `w1:p9` in tab `w1:t9`.
+//! - `plugin pane open` fails with `openfail` on stderr, else opens pane `w1:p9` in tab `w1:t9`,
+//!   which then stays open (the `opened` file) until a `pane close` names it.
 //! - `agent list` fails with `agentsfail` on stderr, else serves `agents.json`, else no agents.
 //! - `tab list` serves `tabs.json`, else no tabs.
 //! - Everything else succeeds.
@@ -42,8 +46,16 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         ["pane", "list", ..] => {
-            let default = r#"{"result":{"panes":[{"pane_id":"w1:p1"}]}}"#;
-            answer(&read(&dir.join("panes.json")).unwrap_or_else(|| default.to_owned()))
+            if fs::remove_file(dir.join("list-hang")).is_ok() {
+                thread::sleep(Duration::from_secs(10));
+            }
+            let opened = if dir.join("opened").exists() {
+                format!(r#",{{"pane_id":"{OPENED}"}}"#)
+            } else {
+                String::new()
+            };
+            let default = format!(r#"{{"result":{{"panes":[{{"pane_id":"w1:p1"}}{opened}]}}}}"#);
+            answer(&read(&dir.join("panes.json")).unwrap_or(default))
         }
         ["pane", "process-info", "--pane", pane] => {
             if let Some(failure) = read(&fixture(&dir, "procfail", pane, ".json")) {
@@ -54,22 +66,30 @@ fn main() -> ExitCode {
                     .unwrap_or_else(|| process_info(&dir, pane, &line)),
             )
         }
-        ["pane", "close", pane] => match read(&fixture(&dir, "closefail", pane, "")) {
-            Some(failure) => fail(&failure),
-            None => answer(r#"{"result":{}}"#),
-        },
+        ["pane", "close", pane] => {
+            if let Some(failure) = read(&fixture(&dir, "closefail", pane, "")) {
+                return fail(&failure);
+            }
+            if *pane == OPENED {
+                let _ = fs::remove_file(dir.join("opened"));
+            }
+            answer(r#"{"result":{}}"#)
+        }
         ["plugin", "config-dir", ..] => {
             if dir.join("configdir-hang").exists() {
                 thread::sleep(Duration::from_secs(5));
             }
             answer(&dir.display().to_string())
         }
-        ["plugin", "pane", "open", ..] => match read(&dir.join("openfail")) {
-            Some(failure) => fail(&failure),
-            None => answer(&format!(
+        ["plugin", "pane", "open", ..] => {
+            if let Some(failure) = read(&dir.join("openfail")) {
+                return fail(&failure);
+            }
+            fs::write(dir.join("opened"), "").unwrap();
+            answer(&format!(
                 r#"{{"result":{{"type":"plugin_pane_opened","plugin_pane":{{"pane":{{"pane_id":"{OPENED}","tab_id":"w1:t9"}}}}}}}}"#
-            )),
-        },
+            ))
+        }
         ["agent", "list"] => match read(&dir.join("agentsfail")) {
             Some(failure) => fail(&failure),
             None => answer(

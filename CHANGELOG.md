@@ -16,6 +16,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 - **Diffs under `core.autocrlf`**: a file whose only difference is line endings no longer shows every line changed.
 - **Line numbers after a stray CR**: a carriage return inside a line no longer shifts the diff's rows off git's numbering.
+- **Quick double toggle**: two fast presses open reviewr and then close it, and never stack two panes.
 
 ## [0.42.0] — 2026-10-02
 
