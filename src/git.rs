@@ -1667,65 +1667,50 @@ pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
 /// git's well-known empty-tree object, used as the diff base when a repo has no commits.
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// `HEAD` when the repo has a commit, else the empty tree (a commitless repo has no HEAD).
-fn diff_base(repo: &Path) -> String {
-    if git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() {
-        "HEAD".to_string()
-    } else {
-        EMPTY_TREE.to_string()
-    }
+/// The commit `HEAD` names, else the empty tree in a repository with no commits: the old end
+/// of the `uncommitted` scope. An oid, never the name `HEAD`, so a file's diff reads the same
+/// tree its counts came from even after `HEAD` moves.
+pub fn diff_base(repo: &Path) -> String {
+    head_oid(repo).unwrap_or_else(|| EMPTY_TREE.to_string())
+}
+
+/// The changed files from the tree-ish `base` to the worktree, untracked files included,
+/// sorted by path: the changeset of the `uncommitted` and `branch` scopes.
+pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
+    let numstat = git(repo, &["diff", base, "--numstat", "-z"])?;
+    let name_status = git(repo, &["diff", base, "--name-status", "-z"])?;
+    assemble(repo, &numstat, &name_status, true)
 }
 
 /// The changed files for `scope`, sorted by path. `branch_base` is the resolved base OID
 /// for the `branch` scope ([`resolve_base`]'s winner); with none the scope lists nothing.
-/// `last-turn` is resolved separately by [`changed_against_tree`], so it lists nothing here.
+/// `last-turn` and `commits` diff through their own entry points, so they list nothing here.
 pub fn changed_files(
     repo: &Path,
     scope: Scope,
     branch_base: Option<&str>,
 ) -> Result<Vec<ChangedFile>> {
-    let (numstat, name_status) = match scope {
-        Scope::Uncommitted => {
-            // A repo with no commits has no HEAD; diff against the empty tree so a fresh
-            // `git init` lists its files instead of erroring (which would kill the process).
-            let base = diff_base(repo);
-            (
-                git(repo, &["diff", &base, "--numstat", "-z"])?,
-                git(repo, &["diff", &base, "--name-status", "-z"])?,
-            )
-        }
+    match scope {
+        Scope::Uncommitted => changed_from(repo, &diff_base(repo)),
         Scope::Branch => match branch_base.and_then(|b| merge_base(repo, b)) {
-            Some(r) => (
-                git(repo, &["diff", &r, "--numstat", "-z"])?,
-                git(repo, &["diff", &r, "--name-status", "-z"])?,
-            ),
-            None => return Ok(Vec::new()),
+            Some(base) => changed_from(repo, &base),
+            None => Ok(Vec::new()),
         },
-        // `last-turn` and `commits` diff through their own entry points.
-        Scope::LastTurn | Scope::Commits => return Ok(Vec::new()),
-    };
-    // Branch diffs against the worktree, so like uncommitted it carries untracked files
-    // that `git diff` never reports.
-    let include_untracked = matches!(scope, Scope::Uncommitted | Scope::Branch);
-    assemble(repo, &numstat, &name_status, include_untracked)
+        Scope::LastTurn | Scope::Commits => Ok(Vec::new()),
+    }
 }
 
 /// The changed files between the turn baseline `tree` and the live worktree, for
-/// `last-turn`. Snapshots the worktree now and diffs tree-against-tree, so staged,
-/// unstaged, untracked, and committed-this-turn changes all show, with no phantom
-/// deletion for a file that is untracked at both ends (which a tree-vs-worktree diff
-/// would mis-report). Untracked files ride in the current snapshot, so no separate
-/// untracked pass is needed. Returns the snapshot tree too: a file's diff reads its sides
-/// from the same two trees ([`diff_sides`]), so its rows match these counts.
-pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<(Vec<ChangedFile>, String)> {
-    let current = snapshot_worktree(repo)?;
-    let numstat = git(repo, &["diff", tree, &current, "--numstat", "-z"])?;
-    let name_status = git(repo, &["diff", tree, &current, "--name-status", "-z"])?;
-    Ok((assemble(repo, &numstat, &name_status, false)?, current))
+/// `last-turn`: the worktree snapshotted now, then diffed tree against tree. Staged,
+/// unstaged, untracked, and committed-this-turn changes all show, with no phantom deletion
+/// for a file untracked at both ends, which a tree-against-worktree diff would report.
+pub fn changed_against_tree(repo: &Path, tree: &str) -> Result<Vec<ChangedFile>> {
+    changed_between(repo, tree, &snapshot_worktree(repo)?)
 }
 
-/// The changed files between two commits, `old` against `new`, for the `commits` scope:
-/// both sides are committed trees, so no untracked pass runs. `old` may be the empty tree for a root commit.
+/// The changed files between two trees, `old` against `new`: the `commits` scope's run, and
+/// `last-turn`'s baseline against a worktree snapshot. Both sides are trees, so no untracked
+/// pass runs. `old` may be the empty tree for a root commit.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
     let numstat = git(repo, &["diff", old, new, "--numstat", "-z"])?;
     let name_status = git(repo, &["diff", old, new, "--name-status", "-z"])?;

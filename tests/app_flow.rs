@@ -9763,6 +9763,32 @@ fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
 }
 
 #[test]
+fn a_file_diff_reads_the_trees_its_counts_came_from() {
+    // A new turn's baseline lands from any completion, a superseded one included, ahead of
+    // the changeset built against it. Until that changeset lands, a file opened now still
+    // diffs the landed baseline against the landed snapshot, the trees its counts came from:
+    // never the new baseline against the old snapshot, which reads the turn backwards.
+    let r = Repo::init();
+    r.write("a.txt", "one\n");
+    r.write("b.txt", "one\n");
+    r.commit_all("init");
+    let first = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    r.write("a.txt", "two\n");
+    r.write("b.txt", "two\n");
+    let mut app = app_on(&r);
+    app.sync_turn_baseline(Some(first));
+    app.set_scope(Scope::LastTurn).unwrap();
+    assert_eq!(changed_paths(&app), ["a.txt", "b.txt"]);
+
+    r.write("b.txt", "three\n");
+    let second = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    app.sync_turn_baseline(Some(second));
+    app.select_file(1).unwrap();
+    assert_eq!(app.diff_path.as_deref(), Some("b.txt"));
+    assert_eq!(change_rows(&app), ["-one", "+two"]);
+}
+
+#[test]
 fn a_cr_marker_is_paint_never_text() {
     // `-text`: git keeps the CR, so the line gained an ending, painted `alpha^M`.
     let r = Repo::init();

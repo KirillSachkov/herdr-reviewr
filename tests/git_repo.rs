@@ -869,7 +869,7 @@ fn ignored_paths_never_enter_changes() {
     // baseline snapshot and the live snapshot both honor .gitignore.
     let base = snapshot_worktree(r.path()).unwrap();
     r.write("ignored/note.md", "scratch v2\n");
-    assert!(!has_ignored(&changed_against_tree(r.path(), &base).unwrap().0), "last-turn");
+    assert!(!has_ignored(&changed_against_tree(r.path(), &base).unwrap()), "last-turn");
 }
 
 #[test]
@@ -1015,7 +1015,7 @@ fn changed_against_tree_shows_edits_creates_and_deletes_since_the_snapshot() {
     r.write("created.rs", "new\n");
     r.remove("doomed.rs");
 
-    let files = changed_against_tree(r.path(), &base).unwrap().0;
+    let files = changed_against_tree(r.path(), &base).unwrap();
     let files = by_path(&files);
     assert_eq!(files["tracked.rs"].kind, ChangeKind::Modified);
     assert_eq!(files["created.rs"].kind, ChangeKind::Added);
@@ -1035,7 +1035,7 @@ fn changed_against_tree_sees_an_untracked_only_turn() {
     r.commit_all("init");
     let base = snapshot_worktree(r.path()).unwrap();
     r.write("fresh.rs", "x\n");
-    let files = changed_against_tree(r.path(), &base).unwrap().0;
+    let files = changed_against_tree(r.path(), &base).unwrap();
     assert_eq!(by_path(&files)["fresh.rs"].kind, ChangeKind::Added);
 }
 
@@ -1061,7 +1061,7 @@ fn a_snapshot_sees_a_same_size_edit_made_in_the_index_writes_own_tick() {
     set_mtime(".git/index");
     assert_eq!(r.git(&["diff", "--name-only", "HEAD"]), "a.txt\n", "git sees the edit");
 
-    let files = changed_against_tree(r.path(), &base).unwrap().0;
+    let files = changed_against_tree(r.path(), &base).unwrap();
     assert_eq!(by_path(&files)["a.txt"].kind, ChangeKind::Modified);
 }
 

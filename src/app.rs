@@ -880,9 +880,9 @@ pub struct App {
     /// The worker-owned turn baseline, mirrored from completions so the sync `last-turn`
     /// paths (the diff's old side, the scope-switch rebuild) read it without a round-trip.
     turn_baseline: Option<String>,
-    /// The worktree snapshot the landed `last-turn` changeset diffs the baseline to, so a
-    /// file's diff reads the same two trees its counts came from. `None` on other scopes.
-    turn_snapshot: Option<String>,
+    /// The two ends the landed changeset was diffed between, so a file's diff reads the same
+    /// trees its counts came from ([`crate::world::DiffEnds`]).
+    diff_ends: Option<crate::world::DiffEnds>,
     /// Whether any agent is in this worktree — the one home for the answer, held here
     /// because this is what paints it. `None` until a sample observes it, so a frame that
     /// has seen nothing waits instead of asserting an emptiness nobody looked for: stale is
@@ -1028,7 +1028,7 @@ impl App {
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
             snippet_cache: std::cell::RefCell::new(crate::snippet::SnippetRowCache::default()),
             turn_baseline,
-            turn_snapshot: None,
+            diff_ends: None,
             agents_present: None,
         }
     }
@@ -1170,7 +1170,7 @@ impl App {
                 // a fresh app would paint `no base` beside a populated frame
                 self.branch_base = std::mem::take(&mut old.branch_base);
                 self.pick_status = old.pick_status.take();
-                self.turn_snapshot = old.turn_snapshot.take();
+                self.diff_ends = old.diff_ends.take();
                 self.diff = std::mem::take(&mut old.diff);
                 self.visible = std::mem::take(&mut old.visible);
                 self.expanded_folds = std::mem::take(&mut old.expanded_folds);
@@ -1381,7 +1381,7 @@ impl App {
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
         self.adopt_pick_status(snapshot.pick_status);
-        self.turn_snapshot = snapshot.turn_snapshot;
+        self.diff_ends = snapshot.ends;
         self.rebuild_file_rows();
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
@@ -1956,32 +1956,11 @@ impl App {
                 new: String::from_utf8_lossy(&new).into_owned(),
             };
         }
-        let sides = |old: &str, new: Option<&str>| {
-            git::diff_sides(&self.repo, old, new, path, previous_path)
-        };
-        let sides = match self.scope {
-            // A repository with no commits has no `HEAD`: its changeset diffs against the
-            // empty tree, and so does its file.
-            Scope::Uncommitted => sides("HEAD", None).or_else(|_| sides(git::EMPTY_TREE, None)),
-            Scope::Branch => {
-                let Some(base) = self.branch_base.winner.as_ref() else { return empty() };
-                let Some(mb) = git::merge_base(&self.repo, base.oid()) else { return empty() };
-                sides(&mb, None)
-            }
-            Scope::LastTurn => {
-                let (Some(baseline), Some(now)) = (&self.turn_baseline, &self.turn_snapshot) else {
-                    return empty();
-                };
-                sides(baseline, Some(now))
-            }
-            Scope::Commits => {
-                let Some(pick) = &self.commit_pick else { return empty() };
-                let Some(parent) = git::parent_or_empty(&self.repo, &pick.oldest) else {
-                    return empty();
-                };
-                sides(&parent, Some(&pick.newest))
-            }
-        };
+        // The ends the changeset came from, whatever moved since: a commit, a new merge base,
+        // a promoted turn baseline. No ends means the scope lists nothing.
+        let Some(ends) = &self.diff_ends else { return empty() };
+        let sides =
+            git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, previous_path);
         sides.unwrap_or_else(|_| empty())
     }
 
@@ -2714,7 +2693,7 @@ impl App {
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
-            self.turn_snapshot = build.turn_snapshot;
+            self.diff_ends = build.ends;
             self.changed = crate::world::annotate(&build.changed);
             // Re-mark the tree in place — the rows are base-independent, only their
             // badges move, so the switch frame never shows the old base's badges
@@ -6475,7 +6454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_build_spends_one_git_diff_and_only_what_its_scope_needs_to_name_a_base() {
+    fn a_file_build_spends_one_git_diff_in_every_scope() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         let git = |args: &[&str]| {
@@ -6522,9 +6501,9 @@ mod tests {
         app.reload().unwrap();
         let commits = cost(&mut app, "a.txt", None);
         // One `git diff` per tracked file, a rename included; an untracked file reads raw.
-        // `branch` also names its merge-base and `commits` the run's parent, as before.
+        // Every scope's base rides the build it was named in, so none is named again.
         assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
-        assert_eq!((branch, last_turn, commits), (2, 1, 2));
+        assert_eq!((branch, last_turn, commits), (1, 1, 1));
         let rows: Vec<String> = app
             .diff
             .rows
