@@ -277,11 +277,13 @@ socket request is the same call without the argv.
   with the same `error` envelope the CLI prints. A transport error closes without a reply.
 - **The cap is 1 MiB per request line, newline excluded** (`MAX_INITIAL_REQUEST_BYTES`). Past it
   the server stops reading and drops the connection unanswered. It applies to the first line of
-  a connection, which for `pane.send_text` is the only one, so it caps the whole send. reviewr
-  checks the serialized request against it before connecting and refuses a review over it.
-- The server gives up reading a request 5 s after the connection opens
-  (`INITIAL_REQUEST_TIMEOUT`). It reads one byte per call, so a large request takes a while.
-  reviewr waits 7 s for the reply: herdr's 5 s, plus 2 s for the answer. On unix every read and
+  a connection, which for `pane.send_text` is the only one, so it caps the whole send.
+- The cap that binds is time. The server gives up reading a request 5 s after the connection
+  opens (`INITIAL_REQUEST_TIMEOUT`), reads one byte per call, and sleeps 100 ms whenever the
+  socket is momentarily empty. On macOS's 8 KB socket buffers about 660 KB got through in the
+  window. reviewr checks the serialized request against 512 KiB before connecting and refuses
+  a review over it.
+- reviewr waits 7 s for the reply: herdr's 5 s, plus 2 s for the answer. On unix every read and
   write on the connection ends at that deadline too. A Windows pipe takes no I/O timeout, so a
   herdr that accepts and never answers holds reviewr's worker thread until it closes the pipe.
 

@@ -596,7 +596,7 @@ impl std::fmt::Display for Refusal {
             Refusal::Unanswered => write!(f, "herdr did not answer"),
             Refusal::NoAgent => write!(f, "no agent in the workspace"),
             Refusal::TooLarge => {
-                write!(f, "the review is over herdr's {MAX_REQUEST_BYTES}-byte request cap")
+                write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap")
             }
         }
     }
@@ -645,10 +645,13 @@ fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
     }
 }
 
-/// herdr's cap on one socket request line, newline excluded: past it herdr stops reading and
-/// drops the connection unanswered (`MAX_INITIAL_REQUEST_BYTES` in herdr's `src/api/server.rs`).
-/// A connection carries exactly one request, so this caps the whole send.
-const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+/// The largest request line a send writes, JSON escaping included. herdr caps a request at
+/// 1 MiB (`MAX_INITIAL_REQUEST_BYTES` in its `src/api/server.rs`), but the cap that binds is
+/// time: herdr reads the line one byte at a time, sleeps 100 ms whenever the socket is
+/// momentarily empty, and gives up 5 s after the connection opens. On macOS's 8 KB socket
+/// buffers that moved about 660 KB in the window, so a larger request would read as "herdr
+/// didn't answer" while every retry failed the same way. Half a MiB leaves that margin.
+const MAX_REQUEST_BYTES: usize = 512 * 1024;
 
 /// How long a send waits for herdr's reply. herdr gives up reading a request 5 s after the
 /// connection opens (`INITIAL_REQUEST_TIMEOUT`), and its write into the pane is a channel push,

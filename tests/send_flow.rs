@@ -466,12 +466,17 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
         )
     );
 
-    write_comment(&mut app, &"x".repeat(1024 * 1024));
-    let sent = socket.requests().len();
-    press(&mut app, KeyCode::Char('s'), area, &keymap);
-    assert_eq!(app.status, "review too large to send, press y to copy");
-    assert_eq!(app.store.len(), 1, "an over-cap review keeps every comment");
-    assert_eq!(socket.requests().len(), sent, "nothing reached herdr");
+    // The cap counts the request herdr reads, escaping included: 300 KB of quotes is under
+    // half a MiB as text and over it as JSON, where each `"` is two bytes.
+    for review in ["x".repeat(1024 * 1024), "\"".repeat(300 * 1024)] {
+        write_comment(&mut app, &review);
+        let sent = socket.requests().len();
+        press(&mut app, KeyCode::Char('s'), area, &keymap);
+        assert_eq!(app.status, "review too large to send, press y to copy");
+        assert_eq!(app.store.len(), 1, "an over-cap review keeps every comment");
+        assert_eq!(socket.requests().len(), sent, "nothing reached herdr");
+        app.store = herdr_reviewr::model::CommentStore::default();
+    }
 }
 
 /// A pane without `HERDR_SOCKET_PATH` has no herdr to send to, the same refusal as a missing
