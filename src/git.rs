@@ -1595,6 +1595,15 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // a fresh repo may have no index yet, so start empty in that case.
     if real_index.exists() {
         std::fs::copy(&real_index, &tmp_index).context("seeding the snapshot index")?;
+        // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
+        // older than its index gets its content compared, since a same-size edit in that
+        // tick matches every stat field. A copy stamped now (Linux's copy does) would pass
+        // that edit as clean. macOS and Windows copies keep the mtime already.
+        let modified = std::fs::metadata(&real_index).and_then(|m| m.modified());
+        let tmp = std::fs::File::options().write(true).open(&tmp_index);
+        if let (Ok(modified), Ok(tmp)) = (modified, tmp) {
+            tmp.set_modified(modified).context("dating the snapshot index")?;
+        }
     }
     git_with_index(repo, &tmp_index, &["add", "-A"])?;
     let tree = git_with_index(repo, &tmp_index, &["write-tree"])?;

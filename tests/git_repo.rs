@@ -1040,6 +1040,32 @@ fn changed_against_tree_sees_an_untracked_only_turn() {
 }
 
 #[test]
+fn a_snapshot_sees_a_same_size_edit_made_in_the_index_writes_own_tick() {
+    // One clock tick holds the add, the index write, and a same-size rewrite: every stat
+    // field git compares matches the index entry, and only the index's own mtime (no older
+    // than the entry) tells git to compare content. `core.trustctime=false` stands in for a
+    // ctime that landed in the same tick too.
+    let r = Repo::init();
+    r.git(&["config", "core.trustctime", "false"]);
+    let tick = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    let set_mtime = |rel: &str| {
+        let file = std::fs::File::options().write(true).open(r.path().join(rel)).unwrap();
+        file.set_modified(tick).unwrap();
+    };
+    r.write("a.txt", "one\n");
+    set_mtime("a.txt");
+    r.commit_all("init");
+    let base = snapshot_worktree(r.path()).unwrap();
+    r.write("a.txt", "ONE\n");
+    set_mtime("a.txt");
+    set_mtime(".git/index");
+    assert_eq!(r.git(&["diff", "--name-only", "HEAD"]), "a.txt\n", "git sees the edit");
+
+    let files = changed_against_tree(r.path(), &base).unwrap().0;
+    assert_eq!(by_path(&files)["a.txt"].kind, ChangeKind::Modified);
+}
+
+#[test]
 fn snapshot_worktree_never_mutates_the_repo() {
     let r = Repo::init();
     r.write("a.rs", "x\n");
