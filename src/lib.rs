@@ -227,8 +227,8 @@ fn run_editor(
         configured,
         std::env::var("VISUAL").ok().as_deref(),
         std::env::var("EDITOR").ok().as_deref(),
-        // Read on every press that reaches it: the reviewer may fix their git config between
-        // two presses, and the press hands the pane to an editor anyway.
+        // Read on every press that reaches it, so a reviewer who fixes their git config between
+        // two presses is heard. One `git config` on a keypress the reviewer makes by hand.
         || git::core_editor(&app.repo),
         &path,
         target.line,

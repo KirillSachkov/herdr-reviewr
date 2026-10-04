@@ -456,10 +456,10 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     let keymap = Keymap::default();
     let area = Rect::new(0, 0, 80, 24);
 
-    let long = "x".repeat(40_000);
+    let long = "x".repeat(250 * 1024);
     write_comment(&mut app, &long);
     press(&mut app, KeyCode::Char('s'), area, &keymap);
-    assert!(app.store.is_empty(), "a 40k-character review sends");
+    assert!(app.store.is_empty(), "a review just under the cap sends");
     assert_eq!(app.status, "sent 1 comment to claude");
     assert_eq!(
         socket.requests().last().unwrap(),

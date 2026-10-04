@@ -962,6 +962,7 @@ dependencies = [
  "crossterm_winapi",
  "dirs 7.0.0",
  "fff-search",
+ "hex",
  "interprocess",
  "neo_frizbee",
  "opener",

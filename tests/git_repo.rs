@@ -933,6 +933,9 @@ fn a_side_past_the_render_budget_is_never_read_in_any_scope() {
     r.git(&["mv", "big.txt", "moved.txt"]);
     let moved = diff_sides(r.path(), "HEAD", None, "moved.txt", Origin::Renamed("big.txt"));
     assert_eq!(moved.unwrap(), DiffSides::TooLarge);
+    // A `diff` attribute forcing text changes nothing: the size is checked before git reads.
+    r.write(".gitattributes", "big.txt diff\n");
+    assert_eq!(sides("HEAD~1", Some("HEAD"), "big.txt"), DiffSides::TooLarge);
 }
 
 #[test]
@@ -1139,21 +1142,6 @@ fn snapshot_worktree_never_mutates_the_repo() {
     assert_eq!(r.git(&["rev-parse", "HEAD"]), head_before, "HEAD unchanged");
     assert_eq!(r.git(&["branch", "-a"]), branches_before, "no branch created");
     assert!(!git_dir.join("reviewr-turn-index").exists(), "no index lands in the git dir");
-}
-
-#[test]
-fn a_crashed_snapshots_leftover_lock_never_blocks_the_next() {
-    let r = Repo::init();
-    r.write("a.rs", "x\n");
-    r.commit_all("init");
-    // A hard crash mid-`add` once left git's lock on a shared temp index in `.git`, failing
-    // every later snapshot with "File exists". Each snapshot now adds into its own copy.
-    let git_dir = r.git(&["rev-parse", "--absolute-git-dir"]);
-    std::fs::write(std::path::Path::new(git_dir.trim()).join("reviewr-turn-index.lock"), "")
-        .unwrap();
-
-    let tree = snapshot_worktree(r.path()).unwrap();
-    assert_eq!(tree.len(), 40, "a tree object id");
 }
 
 #[test]

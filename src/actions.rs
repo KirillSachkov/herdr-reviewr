@@ -11,7 +11,7 @@
 //! except for a config error, which goes to stderr for herdr's plugin log.
 //!
 //! herdr runs plugin actions concurrently, so every action that reaches a workspace holds that
-//! workspace's exclusive OS lock, `$HERDR_PLUGIN_STATE_DIR/action-<workspace>.lock`, from its
+//! workspace's exclusive OS lock, `$HERDR_PLUGIN_STATE_DIR/action-<workspace id in hex>.lock`, from its
 //! pane listing to its end (see [`action_lock`]). The file holds no state: it is never written
 //! or deleted, and the OS releases the lock when a run exits or crashes.
 
@@ -219,18 +219,9 @@ fn action_lock(action: Action, ws: &str) -> Result<Option<File>, Stop> {
     let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
-    // A workspace id names the file, one-to-one so two workspaces never share a lock: an ASCII
-    // letter, digit or `-` stays, and every other byte is `_` and its two hex digits.
-    let name: String = ws
-        .bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b == b'-' {
-                char::from(b).to_string()
-            } else {
-                format!("_{b:02x}")
-            }
-        })
-        .collect();
+    // A workspace id names the file in hex, one-to-one even where file names ignore case
+    // (herdr's ids mix it), so two workspaces never share a lock.
+    let name = hex::encode(ws);
     let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
     // Read and write without truncation: Windows locks need a handle with access, and the

@@ -1400,12 +1400,20 @@ pub fn diff_sides(
     // Context as wide as the byte budget holds every line of a file the diff can render
     // (each line is at least a byte), so the one hunk is the whole file. A file past the
     // budget renders its too-large notice, whatever part of it this reads.
+    let source = match origin {
+        Origin::Same => path,
+        Origin::Renamed(source) | Origin::Copied(source) => source,
+    };
+    let blob = |rev: &str, at: &str| format!("{rev}:{at}");
+    // Every side is sized before anything reads it, so a side past the budget is never
+    // streamed, whatever the scope or the path's `diff` attribute.
+    let blobs: Vec<String> =
+        [blob(old, source)].into_iter().chain(new.map(|new| blob(new, path))).collect();
+    if over_budget(repo, &blobs, new.is_none().then_some(path)) {
+        return Ok(DiffSides::TooLarge);
+    }
     let context = format!("-U{}", crate::diff::MAX_BYTES);
-    // A side past the budget diffs as binary, sized but never read whole, in every scope.
-    let threshold = format!("core.bigFileThreshold={}", crate::diff::MAX_BYTES);
     let mut args = vec![
-        "-c",
-        &threshold,
         // An empty context line prints as a lone space, the form unified diff defines, whatever
         // the user set; the parser reads a bare newline too.
         "-c",
@@ -1432,38 +1440,15 @@ pub fn diff_sides(
     }
     args.push(path);
     let out = git(repo, &args)?;
-    let blob = |rev: &str, at: &str| format!("{rev}:{at}");
     let same = |rev: &str, at: &str| {
-        if over_budget(repo, &[blob(rev, at)], None) {
-            return DiffSides::TooLarge;
-        }
         let text = file_content(repo, rev, at);
         DiffSides::Text { old: text.clone(), new: text }
     };
-    let source = match origin {
-        Origin::Same => path,
-        Origin::Renamed(source) | Origin::Copied(source) => source,
-    };
     Ok(match (parse_sides(&out), origin) {
-        // Binary, or a side past the threshold: sized apart, since git says the same of both.
-        (Some(DiffSides::Binary), _) => {
-            let new_blob = new.map(|new| blob(new, path));
-            let worktree = new.is_none().then_some(path);
-            let blobs: Vec<String> = [blob(old, source)].into_iter().chain(new_blob).collect();
-            if over_budget(repo, &blobs, worktree) {
-                DiffSides::TooLarge
-            } else {
-                DiffSides::Binary
-            }
-        }
         // A copy's source is still there, in a section of its own if it changed too, so its
         // old side is read rather than diffed.
         (Some(DiffSides::Text { new: text, .. }), Origin::Copied(source)) => {
-            if over_budget(repo, &[blob(old, source)], None) {
-                DiffSides::TooLarge
-            } else {
-                DiffSides::Text { old: file_content(repo, old, source), new: text }
-            }
+            DiffSides::Text { old: file_content(repo, old, source), new: text }
         }
         (Some(sides), _) => sides,
         (None, _) => match new {
@@ -1474,12 +1459,17 @@ pub fn diff_sides(
 }
 
 /// Whether any side holds more than the render budget: the blobs named `<rev>:<path>`, sized
-/// in one `cat-file` without reading them, and the `worktree` file, by its stat. A side git
-/// cannot name is no side, so it is not over.
-fn over_budget(repo: &Path, blobs: &[String], worktree: Option<&str>) -> bool {
+/// in one `cat-file` without reading them, and the `worktree` file, by its own stat (a symlink
+/// diffs as its target's path, never the target). A side git cannot name is no side, so it is
+/// not over.
+pub fn over_budget(repo: &Path, blobs: &[String], worktree: Option<&str>) -> bool {
     let over = |len: u64| crate::diff::over_byte_budget(usize::try_from(len).unwrap_or(usize::MAX));
-    if worktree.is_some_and(|at| std::fs::metadata(repo.join(at)).is_ok_and(|m| over(m.len()))) {
+    let stat = |at: &str| std::fs::symlink_metadata(repo.join(at));
+    if worktree.is_some_and(|at| stat(at).is_ok_and(|m| over(m.len()))) {
         return true;
+    }
+    if blobs.is_empty() {
+        return false;
     }
     let input = blobs.join("\n") + "\n";
     git_stdin(repo, &["cat-file", "--batch-check=%(objectsize)"], &input)
@@ -1671,40 +1661,46 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     Ok(index.git(repo, &["write-tree"])?.trim().to_string())
 }
 
-/// A private copy of the worktree's index, in the OS temp dir, named to git by
-/// `GIT_INDEX_FILE` for the runs that write an index: a snapshot's `add`, and the refresh a
-/// worktree diff needs to tell a touched file from a changed one. git writes only the copy
-/// (the **No writes** invariant). Each copy is its own file, so two panes on one worktree
-/// never share one, and dropping it removes it along with any `.lock` git left beside it.
-struct IndexCopy(tempfile::TempPath);
+/// A private copy of the worktree's index, in a private directory of the OS temp dir, named to
+/// git by `GIT_INDEX_FILE` for the runs that write an index: a snapshot's `add`, and the
+/// refresh a worktree diff needs to tell a touched file from a changed one. git writes only
+/// the copy (the **No writes** invariant). Each copy is its own, so two panes on one worktree
+/// never share one, and dropping it removes the directory with everything git left in it.
+struct IndexCopy(tempfile::TempDir);
 
 impl IndexCopy {
     fn of(repo: &Path) -> Result<Self> {
         let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
         let real = git_dir.join("index");
-        let copy = tempfile::Builder::new()
+        let dir = tempfile::Builder::new()
             .prefix("reviewr-index-")
-            .tempfile()
-            .context("creating the index copy")?
-            .into_temp_path();
+            .tempdir()
+            .context("creating the index copy")?;
+        let copy = Self(dir);
         // The copy keeps the index's mtime, which git's racy-clean check reads: an entry no
         // older than its index gets its content compared, since a same-size edit in that tick
-        // matches every stat field. A copy stamped now (Linux's copy does) would pass that edit
-        // as clean. Read before the copy: an index the agent swaps in meanwhile is newer, so
-        // the stamp errs old, the safe side, never new.
-        match std::fs::metadata(&real).and_then(|m| m.modified()) {
-            Ok(modified) => {
-                std::fs::copy(&real, &copy).context("copying the index")?;
-                // Best effort: an undated copy costs the racy-clean edge case, never the run.
-                if let Ok(file) = std::fs::File::options().write(true).open(&copy) {
-                    let _ = file.set_modified(modified);
-                }
-            }
-            // A fresh repository has no index yet. git reads a missing one as empty, and an
-            // empty file as corrupt.
-            Err(_) => std::fs::remove_file(&copy).context("clearing the index copy")?,
-        }
-        Ok(Self(copy))
+        // matches every stat field. A copy stamped now would pass that edit as clean. Read
+        // before the copy: an index the agent swaps in meanwhile is newer, so the stamp errs
+        // old, the safe side, never new.
+        let modified = match std::fs::metadata(&real).and_then(|m| m.modified()) {
+            Ok(modified) => modified,
+            // A fresh repository has no index yet, and git reads a missing one as empty.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(copy),
+            // Any other failure is no answer: an empty index would list every file deleted.
+            Err(e) => return Err(e).context("reading the index"),
+        };
+        // Read through a handle that shares delete, so the agent's git can still rename a new
+        // index over the real one while this copies it.
+        let mut from = std::fs::File::open(&real).context("opening the index")?;
+        let mut to = std::fs::File::create(copy.path()).context("creating the index copy")?;
+        std::io::copy(&mut from, &mut to).context("copying the index")?;
+        // Best effort: an undated copy costs the racy-clean edge case, never the run.
+        let _ = to.set_modified(modified);
+        Ok(copy)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.path().join("index")
     }
 
     /// Like [`git`], on the copy, with the diff refresh on: a stat-dirty entry whose content
@@ -1713,21 +1709,13 @@ impl IndexCopy {
         let out = git_command(repo)
             .args(["-c", "diff.autoRefreshIndex=true", "-c", "core.quotepath=false"])
             .args(args)
-            .env("GIT_INDEX_FILE", &*self.0)
+            .env("GIT_INDEX_FILE", self.path())
             .output()
             .map_err(|e| anyhow::anyhow!(git_error(args, "could not run", e)))?;
         if !out.status.success() {
             bail!(git_error(args, "failed", String::from_utf8_lossy(&out.stderr).trim()));
         }
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-}
-
-impl Drop for IndexCopy {
-    fn drop(&mut self) {
-        let mut lock = self.0.as_os_str().to_owned();
-        lock.push(".lock");
-        let _ = std::fs::remove_file(Path::new(&lock));
     }
 }
 

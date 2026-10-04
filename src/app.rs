@@ -1502,8 +1502,6 @@ impl App {
         // change that turned binary since the changeset landed.
         let sides = if self.changed.get(&path).is_some_and(|a| a.binary) {
             git::DiffSides::Binary
-        } else if self.worktree_over_budget(&path) {
-            git::DiffSides::TooLarge
         } else {
             self.content_sides(&path, previous_path.as_deref())
         };
@@ -1529,15 +1527,6 @@ impl App {
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
         self.rebuild_visible();
         self.settle_read();
-    }
-
-    /// Whether `path`'s diff would read a worktree file past the render budget, known by a stat
-    /// before any git runs. A fast path for the scopes whose new end is the worktree:
-    /// [`git::diff_sides`] sizes every other side itself, and never streams one past the budget.
-    fn worktree_over_budget(&self, path: &str) -> bool {
-        self.diff_ends.as_ref().is_some_and(|ends| ends.new.is_none())
-            && std::fs::metadata(self.repo.join(path))
-                .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize))
     }
 
     /// Build the File view for `path`: its current worktree content as `Context` rows, no
@@ -1965,6 +1954,9 @@ impl App {
     fn content_sides(&self, path: &str, previous_path: Option<&str>) -> git::DiffSides {
         let empty = || git::DiffSides::Text { old: String::new(), new: String::new() };
         if self.changed.get(path).is_some_and(|a| a.change == ChangeKind::Untracked) {
+            if git::over_budget(&self.repo, &[], Some(path)) {
+                return git::DiffSides::TooLarge;
+            }
             return git::DiffSides::Text {
                 old: String::new(),
                 new: worktree_content(&self.repo, path),
@@ -3179,12 +3171,8 @@ impl App {
             if entry.annotation.as_ref().is_some_and(|a| a.additions + a.deletions == 0) {
                 continue;
             }
-            // An over-budget file renders a notice, so it holds no hunk either. Check the size
-            // before reading, as `set_file_view` does: pulling a vendored bundle in whole would
-            // spike the UI thread for a file the reviewer only crosses over.
-            if self.worktree_over_budget(&entry.path) {
-                continue;
-            }
+            // An over-budget file reads as its notice, sized before anything is read, so it
+            // holds no hunk either.
             let git::DiffSides::Text { old, new } =
                 self.content_sides(&entry.path, entry.previous_path.as_deref())
             else {
@@ -6539,10 +6527,11 @@ mod tests {
         app.scope = Scope::Commits;
         app.reload().unwrap();
         let commits = cost(&mut app, "a.txt", None);
-        // One `git diff` per tracked file, a rename included; an untracked file reads raw.
-        // Every scope's base rides the build it was named in, so none is named again.
-        assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
-        assert_eq!((branch, last_turn, commits), (1, 1, 1));
+        // Per tracked file, a rename included, one `cat-file` sizes the sides and one `git diff`
+        // reads them; an untracked file reads raw. Every scope's base rides the build it was
+        // named in, so none is named again.
+        assert_eq!(uncommitted, (2, 0, 2), "a CRLF edit, an untracked file, a pure rename");
+        assert_eq!((branch, last_turn, commits), (2, 2, 2));
         let rows: Vec<String> = app
             .diff
             .rows

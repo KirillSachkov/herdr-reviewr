@@ -1145,7 +1145,7 @@ fn hold_lock(dir: &Path, ws: &str) -> fs::File {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(dir.join(format!("action-{ws}.lock")))
+        .open(dir.join(format!("action-{}.lock", hex::encode(ws))))
         .unwrap();
     file.lock().unwrap();
     file
