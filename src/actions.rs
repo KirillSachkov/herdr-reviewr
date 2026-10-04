@@ -407,8 +407,7 @@ fn open(
         .focused
         .as_deref()
         .and_then(|focused| panes.pane(focused))
-        .and_then(|entry| entry.foreground_cwd.clone())
-        .filter(|cwd| !cwd.is_empty());
+        .and_then(|entry| entry.foreground_cwd.clone());
     let cwd = match (&live, &target.cwd) {
         (Some(live), _) if has_worktree(live) => live,
         (_, Some(cwd)) if has_worktree(cwd) => cwd,
@@ -459,7 +458,7 @@ fn open(
     // plugin so the tab bar reads "reviewr". Cosmetic, so a failed rename never fails an open
     // that already succeeded.
     if placement == TogglePlacement::Tab
-        && let Some(tab) = opened.tab_id.as_deref().filter(|tab| !tab.is_empty())
+        && let Some(tab) = opened.tab_id.as_deref()
     {
         let _ = herdr::rename_tab(tab, herdr::LABEL);
     }

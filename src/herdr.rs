@@ -27,6 +27,12 @@ struct AgentList {
     agents: Vec<AgentPane>,
 }
 
+/// An optional string herdr may send empty: null, absent (with `default`), and `""` all read
+/// as `None`, so no reader has to tell them apart.
+fn non_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.filter(|text| !text.is_empty()))
+}
+
 /// One entry of `herdr agent list`. The picker-facing fields are optional: herdr 0.7.5 omits
 /// `name`, `display_agent`, and `state_labels` entirely until something sets them, and
 /// `herdr agent rename --clear` leaves `name` present and null. Both parse to `None`. The
@@ -38,6 +44,7 @@ struct AgentList {
 /// round trip reviewr does not understand.
 #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
 struct AgentPane {
+    #[serde(default, deserialize_with = "non_empty")]
     agent: Option<String>,
     agent_status: String,
     pane_id: String,
@@ -46,7 +53,9 @@ struct AgentPane {
     /// Where the agent works. Turn tracking resolves it to a git top level to decide which
     /// worktree the agent belongs to.
     cwd: Option<String>,
+    #[serde(default, deserialize_with = "non_empty")]
     name: Option<String>,
+    #[serde(default, deserialize_with = "non_empty")]
     display_agent: Option<String>,
     state_labels: Option<HashMap<String, String>>,
 }
@@ -195,9 +204,9 @@ pub(crate) struct PaneEntry {
     pub(crate) pane_id: String,
     /// The live foreground process's cwd, which can differ from the pane's launch cwd
     /// (`docs/herdr-api-notes.md`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "non_empty")]
     pub(crate) foreground_cwd: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "non_empty")]
     label: Option<String>,
 }
 
@@ -215,7 +224,7 @@ impl PaneList {
     /// The `label` of pane `pane`. An absent key, an empty label, and an unknown pane all read
     /// as no label.
     fn label(&self, pane: &str) -> Option<&str> {
-        self.pane(pane)?.label.as_deref().filter(|label| !label.is_empty())
+        self.pane(pane)?.label.as_deref()
     }
 }
 
@@ -264,7 +273,7 @@ impl ProcessInfo {
 #[derive(Debug, Deserialize)]
 pub(crate) struct OpenedPane {
     pub(crate) pane_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "non_empty")]
     pub(crate) tab_id: Option<String>,
 }
 
@@ -475,13 +484,14 @@ impl AgentPane {
     }
 
     /// The agent's `name`, else its `display_agent`, else its kind.
-    /// A cleared name arrives as null and falls through like an absent one. The pane id is a
-    /// last resort no live agent reaches, so the row and the success line always name something.
+    /// A cleared name arrives as null or empty and falls through like an absent one. The pane id
+    /// is a last resort no live agent reaches, so the row and the success line always name
+    /// something.
     fn row_name(&self) -> String {
         [&self.name, &self.display_agent, &self.agent]
             .into_iter()
             .flatten()
-            .find(|part| !part.is_empty())
+            .next()
             .cloned()
             .unwrap_or_else(|| self.pane_id.clone())
     }
@@ -540,7 +550,7 @@ struct TabList {
 #[derive(Debug, Deserialize)]
 struct TabInfo {
     tab_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "non_empty")]
     label: Option<String>,
 }
 
@@ -989,6 +999,9 @@ mod tests {
             ..agent("w8:p1", "w8:t1", "w8")
         };
         assert_eq!(displayed.row_name(), "Claude");
+        // An empty name parses as no name, so it falls through too.
+        let emptied = r#"{"result":{"agents":[{"agent":"codex","agent_status":"idle","pane_id":"w8:p2","tab_id":"w8:t1","workspace_id":"w8","name":"","display_agent":""}]}}"#;
+        assert_eq!(super::parse_agents(emptied).unwrap()[0].row_name(), "codex");
     }
 
     #[test]
