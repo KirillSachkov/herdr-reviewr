@@ -1,8 +1,4 @@
-//! Mouse text selection: the drag state and the copied text.
-//!
-//! The gesture lives here as pure data plus the extraction
-//! that turns spanned rows into clipboard text; hit-testing and painting live in `ui.rs`,
-//! routing in `lib.rs`.
+//! Mouse text selection as pure data, and the clipboard text of what it spans.
 
 use crate::diff::Row;
 use crate::file_list::{self, RowKind};
@@ -10,13 +6,11 @@ use crate::file_list::{self, RowKind};
 /// Where a text drag lives, locked at mouse-down (`TS-ONE-SURFACE`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
-    /// The read pane's rows (Diff, File, or rendered markdown view): character-precise row
-    /// text.
+    /// The read pane's rows, character-precise.
     Read,
     /// The `PR` read pane's painted lines: character-precise painted text.
     Painted,
-    /// A spliced comment card in the read pane: character-precise card text, confined to the
-    /// card it started on (`TS-ONE-SURFACE`).
+    /// One comment card's text, character-precise, confined to the card it started on.
     Card { comment: usize },
     /// The file navigator: row-granular, a row copies its repo-relative path.
     Files,
@@ -24,8 +18,7 @@ pub enum Surface {
     PrNav,
 }
 
-/// One endpoint: a logical row in its surface plus a character offset into that row's text.
-/// Row-granular surfaces keep `chr` at 0.
+/// One endpoint: a row and a char offset into it, 0 on a row-granular surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
     pub row: usize,
@@ -40,9 +33,7 @@ pub struct TextDrag {
     pub extent: Point,
 }
 
-/// The one live mouse gesture. A text gesture carries its drag; a release whose point never
-/// left the anchor's resolves into the click or the double's action, so a head cannot exist
-/// without its origin.
+/// The one live mouse gesture.
 #[derive(Clone, Copy, Debug, Default)]
 pub enum Gesture {
     /// No live gesture.
@@ -51,8 +42,7 @@ pub enum Gesture {
     /// A text gesture over a selectable surface.
     Text {
         drag: TextDrag,
-        /// The mouse-down's multi-click count: 1 = single, 2 = double, 3 = triple, and
-        /// further clicks within the window stay 3.
+        /// The multi-click count, capped at 3.
         count: u8,
     },
     /// A gutter comment gesture: line selection by drag, the composer on release
@@ -60,8 +50,7 @@ pub enum Gesture {
 }
 
 impl TextDrag {
-    /// The selection's endpoints in document order. Both ends are inclusive: the character
-    /// under the pointer is part of the selection.
+    /// The endpoints in document order, both inclusive.
     #[must_use]
     pub fn ordered(&self) -> (Point, Point) {
         if self.anchor <= self.extent {
@@ -72,9 +61,7 @@ impl TextDrag {
     }
 }
 
-/// The clipboard text for a `Read`-surface selection over `rows`: each spanned content row
-/// contributes its source line once (a wrapped line is one row), the first and last rows cut
-/// at the endpoints, folds contribute nothing.
+/// A `Read` selection's text: each spanned line once, cut at the ends, folds skipped.
 #[must_use]
 pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
     let hi_row = b.row.min(rows.len().saturating_sub(1));
@@ -91,8 +78,7 @@ pub fn read_text(rows: &[Row], a: Point, b: Point) -> String {
     out.join("\n")
 }
 
-/// The clipboard text for a selection over prebuilt line texts (painted surfaces and cards):
-/// whole lines between the endpoints, the first and last cut at them.
+/// A selection's text over prebuilt lines, the first and last cut at the endpoints.
 #[must_use]
 pub fn lines_text(lines: &[String], a: Point, b: Point) -> String {
     let hi_row = b.row.min(lines.len().saturating_sub(1));
@@ -105,9 +91,7 @@ pub fn lines_text(lines: &[String], a: Point, b: Point) -> String {
     out.join("\n")
 }
 
-/// The clipboard text for a `Files`-surface selection: each spanned row contributes its
-/// full repo-relative path, directories included, as the tree nests it (a directory row its
-/// directory path), one per line, without the tree glyphs and annotations
+/// A `Files` selection's text: each spanned row's repo-relative path, one per line.
 #[must_use]
 pub fn files_text(
     rows: &[file_list::Row],
@@ -126,8 +110,7 @@ pub fn files_text(
         .join("\n")
 }
 
-/// The chars of `text` from `from` up to and including `to` (to the end when `to` is `None`),
-/// clamped to the text.
+/// The chars of `text` in `from..=to`, to the end when `to` is `None`, clamped.
 fn slice_chars(text: &str, from: usize, to: Option<usize>) -> String {
     let iter = text.chars().skip(from);
     match to {
@@ -136,9 +119,7 @@ fn slice_chars(text: &str, from: usize, to: Option<usize>) -> String {
     }
 }
 
-/// The word at char `chr` of `text`: the inclusive char range of the unbroken run of
-/// letters, digits, and underscores covering it. Whitespace, punctuation, and offsets past
-/// the text yield `None`, so the double falls back to the click.
+/// The word (letters, digits, `_`) covering char `chr`, as an inclusive range; `None` off one.
 #[must_use]
 pub fn token_at(text: &str, chr: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
@@ -273,8 +254,7 @@ mod tests {
                 ignored: false,
             },
         ];
-        // A directory row contributes its own path; a file row its entry's full
-        // repo-relative path, never the displayed basename.
+        // Full repo-relative paths, never the displayed basenames.
         assert_eq!(files_text(&rows, &entries, 0, 1), "sub\nsub/two.rs");
         assert_eq!(files_text(&rows, &entries, 1, 1), "sub/two.rs");
     }
