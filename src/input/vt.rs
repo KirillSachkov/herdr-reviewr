@@ -1,14 +1,29 @@
 //! The console's VT byte stream parsed into crossterm's unix events, via `terminput`.
 
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::io;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::Event;
 
 /// How long an open paste may wait for a byte before it closes as a paste of what arrived.
 pub(super) const PASTE_IDLE: Duration = Duration::from_millis(500);
 
-const PASTE_START: &[u8] = crate::herdr::PASTE_START.as_bytes();
+const PASTE_START: &[u8] = super::PASTE_START.as_bytes();
+
+/// One console record the reader takes: a key's UTF-16 unit, or a resize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Record {
+    Unit(u16),
+    Resize(u16, u16),
+}
+
+/// The console the reader polls: its clock, a wait for input, and a read of what is queued.
+pub(super) trait Console {
+    fn now(&self) -> Instant;
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool>;
+    fn read(&mut self) -> io::Result<Vec<Record>>;
+}
 
 /// The parser state between console reads.
 #[derive(Debug, Default)]
@@ -47,15 +62,56 @@ impl VtInput {
         }
     }
 
-    /// End of one console read: a lone ESC with nothing queued is the Esc key.
+    /// Nothing more is queued: a lone ESC is the Esc key, and the paste's wait starts over.
     pub(super) fn settle(&mut self) {
         self.parse(false);
         self.waited = Duration::ZERO;
     }
 
-    /// Count `time` spent waiting on the console.
-    pub(super) fn waited(&mut self, time: Duration) {
-        self.waited += time;
+    /// Read `console` until an event parses or `deadline` passes.
+    pub(super) fn poll(
+        &mut self,
+        console: &mut impl Console,
+        deadline: Option<Instant>,
+    ) -> io::Result<bool> {
+        loop {
+            // Everything queued is read, and settled, before an open paste's bound can close it.
+            let mut fed = false;
+            while console.wait(Some(Duration::ZERO))? {
+                fed |= self.take(console.read()?);
+            }
+            if fed {
+                self.settle();
+            }
+            self.expire();
+            if self.has_events() {
+                return Ok(true);
+            }
+            // Only the wait counts toward an open paste's bound, never a frame's draw.
+            let started = console.now();
+            let left = deadline.map(|deadline| deadline.saturating_duration_since(started));
+            let input = console.wait(left.into_iter().chain(self.paste_left()).min())?;
+            self.waited += console.now().saturating_duration_since(started);
+            if !input && deadline.is_some_and(|deadline| console.now() >= deadline) {
+                self.expire();
+                return Ok(self.has_events());
+            }
+        }
+    }
+
+    /// Feed one read's records; whether any carried a byte.
+    fn take(&mut self, records: Vec<Record>) -> bool {
+        let mut fed = false;
+        for record in records {
+            match record {
+                Record::Unit(unit) => {
+                    self.feed(unit);
+                    fed = true;
+                }
+                Record::Resize(cols, rows) => self.events.push_back(Event::Resize(cols, rows)),
+            }
+        }
+        fed
     }
 
     /// The wait an open paste has left before it counts as complete, if one is open.
@@ -78,11 +134,6 @@ impl VtInput {
 
     pub(super) fn pop(&mut self) -> Option<Event> {
         self.events.pop_front()
-    }
-
-    /// Queue an event that did not come through the byte stream: a resize.
-    pub(super) fn push(&mut self, event: Event) {
-        self.events.push_back(event);
     }
 
     /// Try the pending bytes as one event, the step crossterm's unix reader runs per byte.
@@ -218,22 +269,88 @@ mod tests {
         );
     }
 
+    /// A console whose input arrives in `batches`, each queued at its time, on a clock the test
+    /// moves: a wait with nothing queued sleeps until the next batch or its timeout.
+    struct FakeConsole {
+        now: Instant,
+        batches: VecDeque<(Instant, Vec<Record>)>,
+    }
+
+    impl FakeConsole {
+        fn new() -> Self {
+            Self { now: Instant::now(), batches: VecDeque::new() }
+        }
+
+        /// Queue `text` to arrive `after` from now, as one read.
+        fn queue(&mut self, after: Duration, text: &str) {
+            let units = text.encode_utf16().map(Record::Unit).collect();
+            self.batches.push_back((self.now + after, units));
+        }
+    }
+
+    impl Console for FakeConsole {
+        fn now(&self) -> Instant {
+            self.now
+        }
+
+        fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
+            let limit = timeout.map(|t| self.now + t);
+            match self.batches.front() {
+                Some((at, _)) if limit.is_none_or(|limit| *at <= limit) => {
+                    self.now = self.now.max(*at);
+                    Ok(true)
+                }
+                _ => {
+                    self.now = limit.expect("an endless wait with nothing queued");
+                    Ok(false)
+                }
+            }
+        }
+
+        fn read(&mut self) -> io::Result<Vec<Record>> {
+            Ok(self.batches.pop_front().map(|(_, units)| units).unwrap_or_default())
+        }
+    }
+
+    fn drain(vt: &mut VtInput) -> Vec<Event> {
+        std::iter::from_fn(|| vt.pop()).collect()
+    }
+
     #[test]
-    fn an_unterminated_paste_closes_as_a_paste_after_its_bound() {
-        let mut vt = VtInput::default();
-        assert_eq!(events(&mut vt, &["\x1b[200~abc\rx"]), vec![]);
-        vt.waited(PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
-        vt.expire();
-        assert_eq!(vt.pop(), None, "still inside the bound");
+    fn an_unterminated_paste_closes_as_a_paste_after_its_bound_of_waiting() {
+        let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
+        console.queue(Duration::ZERO, "\x1b[200~abc\rx");
+        let tick = Some(console.now + PASTE_IDLE / 2);
+        assert!(!vt.poll(&mut console, tick).unwrap(), "still inside the bound");
         // More input restarts the bound.
-        assert_eq!(events(&mut vt, &["y"]), vec![]);
-        vt.waited(PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
-        vt.expire();
-        assert_eq!(vt.pop(), None, "the bound counts from the last input");
-        vt.waited(Duration::from_millis(1));
-        vt.expire();
-        assert_eq!(vt.pop(), Some(Event::Paste("abc\rxy".into())));
-        // Input reads as keys again.
-        assert_eq!(events(&mut vt, &["x"]), vec![key(KeyCode::Char('x'), NONE)]);
+        console.queue(Duration::ZERO, "y");
+        let tick = Some(console.now + PASTE_IDLE.saturating_sub(Duration::from_millis(1)));
+        assert!(!vt.poll(&mut console, tick).unwrap(), "the bound counts from the last input");
+        assert!(vt.poll(&mut console, None).unwrap());
+        assert_eq!(drain(&mut vt), [Event::Paste("abc\rxy".into())]);
+    }
+
+    #[test]
+    fn a_frames_draw_time_never_closes_an_open_paste() {
+        let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
+        console.queue(Duration::ZERO, "\x1b[200~ab");
+        let at = Some(console.now);
+        assert!(!vt.poll(&mut console, at).unwrap());
+        // A second's draw between polls, the rest of the paste queued meanwhile.
+        console.now += Duration::from_secs(1);
+        console.queue(Duration::ZERO, "cd\x1b[201~");
+        let at = Some(console.now);
+        assert!(vt.poll(&mut console, at).unwrap());
+        assert_eq!(drain(&mut vt), [Event::Paste("abcd".into())]);
+    }
+
+    #[test]
+    fn a_sequence_split_across_queued_reads_is_one_key() {
+        let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
+        console.queue(Duration::ZERO, "\x1b");
+        console.queue(Duration::ZERO, "[A");
+        let at = Some(console.now);
+        assert!(vt.poll(&mut console, at).unwrap());
+        assert_eq!(drain(&mut vt), [key(KeyCode::Up, NONE)]);
     }
 }

@@ -11,7 +11,7 @@ use ratatui::crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 
-use super::vt::VtInput;
+use super::vt::{Console as VtConsole, Record, VtInput};
 
 use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
@@ -19,9 +19,14 @@ use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
 
 struct Reader {
+    console: WinConsole,
+    vt: VtInput,
+}
+
+/// The console input handle, waited on and read as [`Record`]s.
+struct WinConsole {
     handle: Handle,
     console: Console,
-    vt: VtInput,
 }
 
 /// VT input, plus SGR mouse reports and disambiguated keys, after crossterm's own claims.
@@ -46,7 +51,7 @@ pub(crate) fn release() {
 
 /// Whether an event is ready within `timeout`, as `crossterm::event::poll` answers it.
 pub(crate) fn poll(timeout: Duration) -> io::Result<bool> {
-    with_reader(|reader| reader.poll(Some(Instant::now() + timeout)))
+    with_reader(|reader| reader.vt.poll(&mut reader.console, Some(Instant::now() + timeout)))
 }
 
 /// The next event, blocking until there is one, as `crossterm::event::read` answers it.
@@ -56,7 +61,7 @@ pub(crate) fn read() -> io::Result<Event> {
             if let Some(event) = reader.vt.pop() {
                 return Ok(event);
             }
-            reader.poll(None)?;
+            reader.vt.poll(&mut reader.console, None)?;
         }
     })
 }
@@ -66,56 +71,37 @@ fn with_reader<T>(f: impl FnOnce(&mut Reader) -> io::Result<T>) -> io::Result<T>
     if guard.is_none() {
         let handle = Handle::current_in_handle()?;
         let console = Console::from(handle.clone());
-        *guard = Some(Reader { handle, console, vt: VtInput::default() });
+        *guard = Some(Reader { console: WinConsole { handle, console }, vt: VtInput::default() });
     }
     f(guard.as_mut().expect("opened above"))
 }
 
-impl Reader {
-    /// Read the console until an event parses or `deadline` passes.
-    fn poll(&mut self, deadline: Option<Instant>) -> io::Result<bool> {
-        loop {
-            // Queued input is read before an open paste's bound can close it.
-            while wait_for_input(&self.handle, Some(Duration::ZERO))? {
-                self.read_records()?;
-            }
-            self.vt.expire();
-            if self.vt.has_events() {
-                return Ok(true);
-            }
-            // Only the wait counts toward an open paste's bound, never a frame's draw.
-            let started = Instant::now();
-            let left = deadline.map(|deadline| deadline.saturating_duration_since(started));
-            let input =
-                wait_for_input(&self.handle, left.into_iter().chain(self.vt.paste_left()).min())?;
-            self.vt.waited(started.elapsed());
-            if input {
-                self.read_records()?;
-            } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                self.vt.expire();
-                return Ok(self.vt.has_events());
-            }
-        }
+impl VtConsole for WinConsole {
+    fn now(&self) -> Instant {
+        Instant::now()
     }
 
-    fn read_records(&mut self) -> io::Result<()> {
-        for record in self.console.read_console_input()? {
-            match record {
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
+        wait_for_input(&self.handle, timeout)
+    }
+
+    fn read(&mut self) -> io::Result<Vec<Record>> {
+        let records = self.console.read_console_input()?;
+        Ok(records
+            .into_iter()
+            .filter_map(|record| match record {
                 // A zero unit is a key the terminal sent no byte for, such as a bare modifier.
                 InputRecord::KeyEvent(key) if key.key_down && key.u_char != 0 => {
-                    self.vt.feed(key.u_char);
+                    Some(Record::Unit(key.u_char))
                 }
                 // The buffer size counts from zero, and crossterm adds one to match unix.
-                InputRecord::WindowBufferSizeEvent(size) => self.vt.push(Event::Resize(
+                InputRecord::WindowBufferSizeEvent(size) => Some(Record::Resize(
                     (i32::from(size.size.x) + 1) as u16,
                     (i32::from(size.size.y) + 1) as u16,
                 )),
-                // Mouse input arrives as SGR bytes in VT mode. reviewr never asks for focus.
-                _ => {}
-            }
-        }
-        self.vt.settle();
-        Ok(())
+                _ => None,
+            })
+            .collect())
     }
 }
 

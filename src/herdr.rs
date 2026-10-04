@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::input::{PASTE_END, PASTE_START};
 use crate::logln;
 use crate::turn::Status;
 use anyhow::{Context, Result};
@@ -698,10 +699,6 @@ fn paste_payload(text: &str) -> String {
 pub(crate) fn crlf_line_breaks(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }
-
-/// The bracketed-paste markers.
-pub(crate) const PASTE_START: &str = "\x1b[200~";
-const PASTE_END: &str = "\x1b[201~";
 
 /// The batch as one bracketed paste, with every inner terminator stripped in one pass.
 fn pasted(text: &str) -> String {
