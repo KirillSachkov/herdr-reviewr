@@ -2042,6 +2042,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
             others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
         // A failed attribute read costs the verdict, never the whole changeset.
         let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
+        let threshold = if new_paths.is_empty() { 0 } else { big_file_threshold(repo) };
         for path in new_paths {
             let path = path.to_string();
             if !seen.insert(path.clone()) {
@@ -2052,7 +2053,7 @@ fn assemble(repo: &Path, numstat: &str, raw: &str, worktree: bool) -> Result<Vec
             let additions = if undiffable.contains(path.as_str()) {
                 None
             } else {
-                untracked_additions(repo, &path)
+                untracked_additions(repo, &path, threshold)
             };
             let binary = additions.is_none();
             files.push(ChangedFile {
@@ -2106,25 +2107,35 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
     Ok(unset)
 }
 
+/// The repository's `core.bigFileThreshold` in bytes, its suffixes read by git: past it git
+/// takes a file for binary without reading it. git's own default where unset or unreadable.
+fn big_file_threshold(repo: &Path) -> u64 {
+    const DEFAULT: u64 = 512 * 1024 * 1024;
+    git_line(repo, &["config", "--type=int", "--default", "536870912", "core.bigFileThreshold"])
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT)
+}
+
 /// Addition count of an untracked file: its line count, which is what `git diff` against
-/// nothing reports. `None` where git would report no countable diff — binary content —
-/// matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
+/// nothing reports. `None` where git would report no countable diff — binary content, or a
+/// file past `threshold` ([`big_file_threshold`]) — matching the `-`/`-` numstat record a tracked binary produces. Read locally rather than
 /// shelling `git diff --no-index` per file — with `--untracked-files=all` a large untracked
 /// tree would otherwise fork git once per file on every poll and freeze the UI.
 ///
 /// This is the content half of the untracked verdict only. An untracked path never reaches a
 /// `git diff`, so no numstat speaks for it; [`diff_unset`] asks git for the attribute half
 ///.
-fn untracked_additions(repo: &Path, path: &str) -> Option<u32> {
+fn untracked_additions(repo: &Path, path: &str, threshold: u64) -> Option<u32> {
     use std::io::Read;
     let at = repo.join(path);
     // Only a regular file has lines: a link to a device would read without end.
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
         return Some(0);
     };
-    // git takes a file past its default `core.bigFileThreshold` for binary without reading it,
-    // and so does this, so a huge log costs a build nothing.
-    if meta.len() > 512 * 1024 * 1024 {
+    // git takes a file past `threshold` for binary without reading it, and so does this, so a
+    // huge log costs a build nothing. A `diff` attribute set on the path would make git read
+    // it anyway; here it still reads as binary.
+    if meta.len() > threshold {
         return None;
     }
     let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };

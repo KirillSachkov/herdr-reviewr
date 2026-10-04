@@ -928,6 +928,25 @@ fn an_untracked_link_to_a_device_lists_without_reading_it() {
     assert!(files.iter().any(|f| f.path == "pipe" && f.additions == 0), "{files:?}");
 }
 
+/// An untracked file past `core.bigFileThreshold` is binary, as git takes it, and is never
+/// read to count its lines; one at the threshold counts.
+#[test]
+fn an_untracked_file_past_the_big_file_threshold_is_binary() {
+    let r = Repo::init();
+    r.write("a.txt", "a\n");
+    r.commit_all("init");
+    r.git(&["config", "core.bigFileThreshold", "1k"]);
+    r.write("at.txt", &"a\n".repeat(512));
+    r.write("past.txt", &"a\n".repeat(513));
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    let verdict = |path: &str| {
+        let f = files.iter().find(|f| f.path == path).unwrap();
+        (f.binary, f.additions)
+    };
+    assert_eq!(verdict("at.txt"), (false, 512));
+    assert_eq!(verdict("past.txt"), (true, 0));
+}
+
 #[test]
 fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     let r = Repo::init();
