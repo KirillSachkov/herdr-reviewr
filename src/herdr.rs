@@ -270,18 +270,19 @@ pub(crate) struct OpenedPane {
 }
 
 /// Where and how `plugin pane open` opens a plugin's pane.
+/// Where `plugin pane open` puts a pane, with what that placement needs.
+#[derive(Debug)]
+pub(crate) enum Spot<'a> {
+    Split { target: &'a str, direction: &'a str },
+    Zoomed { target: &'a str },
+    Tab { workspace: &'a str },
+    Overlay,
+}
+
 #[derive(Debug)]
 pub(crate) struct PaneOpen<'a> {
     pub plugin: &'a str,
-    pub entrypoint: &'a str,
-    /// `split`, `zoomed`, `tab`, or `overlay`.
-    pub placement: &'a str,
-    /// The pane a split or zoomed open attaches to.
-    pub target_pane: Option<&'a str>,
-    /// A split's direction.
-    pub direction: Option<&'a str>,
-    /// The workspace a tab opens in.
-    pub workspace: Option<&'a str>,
+    pub spot: Spot<'a>,
     pub cwd: &'a str,
     pub focus: bool,
 }
@@ -296,14 +297,21 @@ pub(crate) fn open_plugin_pane(open: &PaneOpen) -> Result<OpenedPane, HerdrError
     struct PluginPane {
         pane: OpenedPane,
     }
-    let mut args = vec!["plugin", "pane", "open", "--plugin", open.plugin, "--entrypoint"];
-    args.extend([open.entrypoint, "--placement", open.placement]);
-    for (flag, value) in [
-        ("--target-pane", open.target_pane),
-        ("--direction", open.direction),
-        ("--workspace", open.workspace),
-    ] {
-        args.extend(value.map(|value| [flag, value]).into_iter().flatten());
+    let mut args = vec!["plugin", "pane", "open", "--plugin", open.plugin, "--entrypoint", "pane"];
+    match open.spot {
+        Spot::Split { target, direction } => {
+            args.extend([
+                "--placement",
+                "split",
+                "--target-pane",
+                target,
+                "--direction",
+                direction,
+            ]);
+        }
+        Spot::Zoomed { target } => args.extend(["--placement", "zoomed", "--target-pane", target]),
+        Spot::Tab { workspace } => args.extend(["--placement", "tab", "--workspace", workspace]),
+        Spot::Overlay => args.extend(["--placement", "overlay"]),
     }
     args.extend(["--cwd", open.cwd, if open.focus { "--focus" } else { "--no-focus" }]);
     let opened = answer::<Result>(&call(&args)?)?.plugin_pane.pane;

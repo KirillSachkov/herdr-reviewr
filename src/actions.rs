@@ -159,6 +159,9 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     open(action, &config, &target, &panes).map(Some)
 }
 
+/// The review binary's name, which identifies a reviewr pane and names its launch links.
+const BINARY: &str = env!("CARGO_PKG_NAME");
+
 /// How long an explicit action waits for its workspace's lock: the slowest open, with room.
 const LOCK_BOUND: Duration = Duration::from_secs(15);
 
@@ -288,7 +291,7 @@ fn is_review_ui(process: &Process) -> bool {
         .argv0
         .iter()
         .chain(argv.first())
-        .any(|exe| program_name(exe).eq_ignore_ascii_case("herdr-reviewr"));
+        .any(|exe| program_name(exe).eq_ignore_ascii_case(BINARY));
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 
@@ -342,37 +345,26 @@ fn open(
 
     let plugin = var("HERDR_PLUGIN_ID").unwrap_or_else(|| herdr::PLUGIN_ID.to_owned());
     let placement = config.toggle_placement();
-    let mut spot = herdr::PaneOpen {
-        plugin: &plugin,
-        entrypoint: "pane",
-        placement: placement.as_str(),
-        target_pane: None,
-        direction: None,
-        workspace: None,
-        cwd,
-        // A manual open takes focus. The event never does.
-        focus: action != Action::AutoOpen,
-    };
     // A split or zoomed open attaches to the focused pane, else the workspace's first pane.
-    match placement {
-        TogglePlacement::Split | TogglePlacement::Zoomed => {
-            spot.target_pane = Some(
-                target
-                    .pane
-                    .as_deref()
-                    .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
-                    .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))?,
-            );
-            if placement == TogglePlacement::Split {
-                spot.direction = Some(config.toggle_direction().as_str());
-            }
+    let attach = || {
+        target
+            .pane
+            .as_deref()
+            .or_else(|| panes.panes.first().map(|entry| entry.pane_id.as_str()))
+            .ok_or_else(|| refused(format!("no pane to attach to in {ws}")))
+    };
+    let spot = match placement {
+        TogglePlacement::Split => {
+            herdr::Spot::Split { target: attach()?, direction: config.toggle_direction().as_str() }
         }
-        TogglePlacement::Tab => spot.workspace = Some(ws),
-        TogglePlacement::Overlay => {}
-    }
-
+        TogglePlacement::Zoomed => herdr::Spot::Zoomed { target: attach()? },
+        TogglePlacement::Tab => herdr::Spot::Tab { workspace: ws },
+        TogglePlacement::Overlay => herdr::Spot::Overlay,
+    };
+    // A manual open takes focus. The event never does.
+    let open = herdr::PaneOpen { plugin: &plugin, spot, cwd, focus: action != Action::AutoOpen };
     let opened =
-        herdr::open_plugin_pane(&spot).map_err(|_| refused("herdr plugin pane open failed"))?;
+        herdr::open_plugin_pane(&open).map_err(|_| refused("herdr plugin pane open failed"))?;
 
     // Name a fresh tab after the plugin; cosmetic, so its failure is ignored.
     if placement == TogglePlacement::Tab
@@ -416,7 +408,7 @@ fn repoint_launch_links() {
     if root.is_empty() {
         return;
     }
-    let binary = Path::new(&root).join("bin").join("herdr-reviewr");
+    let binary = Path::new(&root).join("bin").join(BINARY);
     let executable = std::fs::metadata(&binary)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
     if !executable {
@@ -430,7 +422,7 @@ fn repoint_launch_links() {
         if std::fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        let link = dir.join("herdr-reviewr");
+        let link = dir.join(BINARY);
         match std::fs::symlink_metadata(&link) {
             Ok(meta) if meta.file_type().is_symlink() => {
                 if std::fs::read_link(&link).is_ok_and(|target| target == binary) {
@@ -441,7 +433,7 @@ fn repoint_launch_links() {
             Err(_) => {}
         }
         // A fresh link renamed over the old one, so the path is never missing.
-        let fresh = dir.join(format!(".herdr-reviewr.{}", std::process::id()));
+        let fresh = dir.join(format!(".{BINARY}.{}", std::process::id()));
         let _ = std::fs::remove_file(&fresh);
         if std::os::unix::fs::symlink(&binary, &fresh).is_ok()
             && std::fs::rename(&fresh, &link).is_err()
