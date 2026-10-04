@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::fake_herdr;
+use common::{fake_herdr, herdr_calls, herdr_error};
 use serde_json::{Value, json};
 
 fn reviewr_bin() -> &'static str {
@@ -45,11 +45,6 @@ fn review_ui() -> Value {
     process("herdr-reviewr", &["/plugin/bin/herdr-reviewr"])
 }
 
-/// herdr's error envelope for `code`, as a failed call writes it to stderr.
-fn herdr_error(code: &str) -> String {
-    json!({"error": {"code": code, "message": "boom"}, "id": "cli:request"}).to_string()
-}
-
 /// One `pane list` answer holding `panes`.
 fn panes(dir: &Path, panes: &Value) {
     fs::write(dir.join("panes.json"), json!({"result": {"panes": panes}}).to_string()).unwrap();
@@ -58,11 +53,6 @@ fn panes(dir: &Path, panes: &Value) {
 /// One `pane list` answer: a single pane whose entry carries a live `foreground_cwd`.
 fn pane_with_cwd(dir: &Path, pane: &str, foreground_cwd: &Path) {
     panes(dir, &json!([{"pane_id": pane, "foreground_cwd": foreground_cwd}]));
-}
-
-/// Every herdr call the runs in `dir` made, one per line. Empty when herdr was never called.
-fn calls(dir: &Path) -> String {
-    fs::read_to_string(dir.join("herdr.log")).unwrap_or_default()
 }
 
 /// Forget every call the fake logged and close the pane it opened, for the next run in `dir`.
@@ -180,7 +170,7 @@ fn worktree_event(
 
 /// The `plugin pane open` call a run made.
 fn open_call(dir: &Path) -> String {
-    calls(dir)
+    herdr_calls(dir)
         .lines()
         .find(|line| line.starts_with("plugin pane open"))
         .expect("a plugin pane open call")
@@ -228,7 +218,7 @@ fn corrected_config_recovers_on_the_next_invocation() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
-    assert!(calls(dir.path()).contains("pane list --workspace workspace-1"));
+    assert!(herdr_calls(dir.path()).contains("pane list --workspace workspace-1"));
 }
 
 #[test]
@@ -285,7 +275,7 @@ fn auto_open_skips_placements_that_are_not_split_or_tab() {
         assert!(output.stdout.is_empty(), "{placement}");
         assert!(output.stderr.is_empty(), "{placement}");
     }
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -339,7 +329,7 @@ fn auto_open_birth_events_follow_shared_policy() {
             assert!(output.status.success(), "{event_name}/{placement}: {}", stderr(&output));
             // The event reports nothing on success either.
             assert!(output.stdout.is_empty(), "{event_name}/{placement}: {}", stdout(&output));
-            let calls = calls(dir.path());
+            let calls = herdr_calls(dir.path());
             assert!(calls.contains(&format!("pane list --workspace {workspace}")), "{calls}");
             let open = open_call(dir.path());
             let tokens = open.split_whitespace().collect::<Vec<_>>();
@@ -370,7 +360,7 @@ fn auto_open_without_its_payload_refuses_silently_before_any_herdr_call() {
         assert!(output.stdout.is_empty(), "{payload:?}: {}", stdout(&output));
         assert!(output.stderr.is_empty(), "{payload:?}: {}", stderr(&output));
     }
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -400,9 +390,9 @@ fn auto_open_reads_each_payload_field_on_its_own() {
         let open = open_call(dir.path());
         assert!(open.contains(&format!("--cwd {repo}")), "{payload}: {open}");
         assert!(
-            calls(dir.path()).contains("pane list --workspace workspace-9"),
+            herdr_calls(dir.path()).contains("pane list --workspace workspace-9"),
             "{payload}: {}",
-            calls(dir.path())
+            herdr_calls(dir.path())
         );
     }
 }
@@ -422,9 +412,9 @@ fn auto_open_falls_back_to_the_worktree_fields_of_the_payload() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        calls(dir.path()).contains("pane list --workspace workspace-7"),
+        herdr_calls(dir.path()).contains("pane list --workspace workspace-7"),
         "{}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
     let open = open_call(dir.path());
     assert!(open.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))), "{open}");
@@ -605,7 +595,7 @@ fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: already open (w1:p1) in workspace-1\n");
     assert!(
-        !calls(dir.path()).contains("plugin pane open"),
+        !herdr_calls(dir.path()).contains("plugin pane open"),
         "an open over a live pane must not stack another"
     );
 
@@ -613,7 +603,7 @@ fn a_pane_running_the_review_ui_counts_however_it_was_launched() {
     let output = run("close", dir.path());
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: closed w1:p1 in workspace-1\n");
-    let calls = calls(dir.path());
+    let calls = herdr_calls(dir.path());
     assert!(calls.lines().any(|l| l == "pane close w1:p1"), "{calls}");
 }
 
@@ -666,9 +656,9 @@ fn a_flag_run_never_counts_as_the_review_ui() {
 
         assert!(output.status.success(), "{argv:?}: {}", stderr(&output));
         assert!(
-            calls(dir.path()).contains("plugin pane open"),
+            herdr_calls(dir.path()).contains("plugin pane open"),
             "{argv:?}: a flag run must not read as open: {}",
-            calls(dir.path())
+            herdr_calls(dir.path())
         );
     }
 }
@@ -728,7 +718,7 @@ fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converge
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), "reviewr: closed w1:p1 w1:p3 in workspace-1\n");
-    let calls = calls(dir.path());
+    let calls = herdr_calls(dir.path());
     // Whole log lines, so a `plugin pane close` could not satisfy the plain-`pane close`
     // contract these assert.
     assert!(calls.lines().any(|l| l == "pane close w1:p1"), "{calls}");
@@ -768,7 +758,7 @@ fn a_close_that_fails_for_a_live_pane_sweeps_the_rest_then_refuses() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "reviewr: herdr pane close failed for w1:p1 in workspace-1\n");
     // The refusal comes after the sweep, so the panes herdr could close are closed.
-    let calls = calls(dir.path());
+    let calls = herdr_calls(dir.path());
     assert!(calls.lines().any(|l| l == "pane close w1:p3"), "{calls}");
 }
 
@@ -999,7 +989,7 @@ fn an_open_names_the_plugin_herdr_runs_it_as() {
     assert!(
         open_call(dir.path()).contains("--plugin someone.reviewr-fork "),
         "{}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 
@@ -1051,7 +1041,7 @@ fn zoomed_placement_attaches_to_the_focused_pane_else_the_first_pane() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(open_call(dir.path()).contains("--target-pane w1:p5"), "{}", calls(dir.path()));
+    assert!(open_call(dir.path()).contains("--target-pane w1:p5"), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1065,7 +1055,7 @@ fn a_split_with_no_pane_to_attach_to_refuses() {
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "reviewr: no pane to attach to in workspace-1\n");
-    assert!(!calls(dir.path()).contains("plugin pane open"), "{}", calls(dir.path()));
+    assert!(!herdr_calls(dir.path()).contains("plugin pane open"), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1077,7 +1067,7 @@ fn tab_placement_open_names_its_fresh_tab() {
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(open_call(dir.path()).contains("--placement tab --workspace workspace-1"));
-    let calls = calls(dir.path());
+    let calls = herdr_calls(dir.path());
     assert!(calls.lines().any(|l| l == "tab rename w1:t9 reviewr"), "{calls}");
 }
 
@@ -1089,7 +1079,7 @@ fn split_placement_open_renames_no_tab() {
     let output = run_open(dir.path());
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(!calls(dir.path()).contains("tab rename"), "{}", calls(dir.path()));
+    assert!(!herdr_calls(dir.path()).contains("tab rename"), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1112,7 +1102,7 @@ fn a_manual_open_passes_focus() {
 
 /// The reads of the opened pane `w1:p9` a run made.
 fn opened_pane_reads(dir: &Path) -> usize {
-    calls(dir).lines().filter(|l| *l == "pane process-info --pane w1:p9").count()
+    herdr_calls(dir).lines().filter(|l| *l == "pane process-info --pane w1:p9").count()
 }
 
 #[test]
@@ -1127,7 +1117,7 @@ fn an_open_waits_until_its_pane_reads_as_reviewr() {
     assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
     // Two empty reads (few enough to fit the bound on a slow runner), then the read that
     // sees reviewr, and no read after it.
-    assert_eq!(opened_pane_reads(dir.path()), 3, "{}", calls(dir.path()));
+    assert_eq!(opened_pane_reads(dir.path()), 3, "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1143,7 +1133,7 @@ fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
     assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
     assert!(elapsed >= Duration::from_millis(5900), "returned before the bound: {elapsed:?}");
     assert!(elapsed < Duration::from_secs(15), "the wait is bounded: {elapsed:?}");
-    assert!(opened_pane_reads(dir.path()) > 1, "{}", calls(dir.path()));
+    assert!(opened_pane_reads(dir.path()) > 1, "{}", herdr_calls(dir.path()));
 }
 
 // --- Actions serialize on the lock in the plugin state dir.
@@ -1192,7 +1182,7 @@ fn two_concurrent_toggles_open_then_close() {
             "reviewr: opened w1:p9 (split) in workspace-1\n".to_owned(),
         ]
     );
-    let effects: Vec<_> = calls(dir.path())
+    let effects: Vec<_> = herdr_calls(dir.path())
         .lines()
         .filter(|line| line.starts_with("plugin pane open") || line.starts_with("pane close"))
         .map(|line| line.split_whitespace().take(3).collect::<Vec<_>>().join(" "))
@@ -1208,7 +1198,7 @@ fn an_explicit_action_waits_for_a_held_lock_and_proceeds_once_released() {
     let mut child = start("toggle", dir.path());
     std::thread::sleep(Duration::from_millis(500));
     assert!(child.try_wait().unwrap().is_none(), "the toggle did not wait for the lock");
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
     drop(lock);
     let output = child.wait_with_output().unwrap();
 
@@ -1236,7 +1226,7 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
     let elapsed = started.elapsed();
 
     assert!(elapsed >= Duration::from_millis(14500), "refused before the bound: {elapsed:?}");
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1252,7 +1242,7 @@ fn auto_open_yields_silently_to_a_held_lock() {
     assert!(output.stdout.is_empty(), "{}", stdout(&output));
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
     assert!(started.elapsed() < Duration::from_secs(3), "the event waited for the lock");
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1272,7 +1262,7 @@ fn a_held_lock_holds_back_only_its_own_workspace() {
     assert_eq!(stdout(&toggle), "reviewr: opened w1:p9 (split) in workspace-1\n");
     assert!(born.status.success(), "{}", stderr(&born));
     // The event read its own workspace instead of yielding to the held lock.
-    let log = calls(dir.path());
+    let log = herdr_calls(dir.path());
     assert!(log.contains("pane list --workspace workspace-9"), "{log}");
 }
 
@@ -1289,7 +1279,7 @@ fn auto_open_over_an_open_reviewr_pane_does_nothing_and_says_nothing() {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(output.stdout.is_empty(), "{}", stdout(&output));
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
-    let log = calls(dir.path());
+    let log = herdr_calls(dir.path());
     assert!(!log.contains("plugin pane open") && !log.contains("pane close"), "{log}");
 }
 
@@ -1300,7 +1290,7 @@ fn a_lock_held_by_a_crashed_action_frees_the_next_one() {
     fs::write(dir.path().join("list-hang"), "").unwrap();
     let mut crashed = start("toggle", dir.path());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while !calls(dir.path()).contains("pane list") {
+    while !herdr_calls(dir.path()).contains("pane list") {
         assert!(Instant::now() < deadline, "the first toggle never listed panes");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -1324,7 +1314,7 @@ fn an_action_without_a_plugin_state_dir_refuses_before_any_herdr_call() {
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "reviewr: no plugin state dir (invoke as a herdr plugin action)\n");
-    assert!(!herdr_called(dir.path()), "{}", calls(dir.path()));
+    assert!(!herdr_called(dir.path()), "{}", herdr_calls(dir.path()));
 }
 
 // --- Open cwd: the focused pane's live foreground cwd, then the context's launch cwd.
@@ -1343,7 +1333,7 @@ fn open_prefers_the_focused_panes_live_foreground_cwd() {
     let output = run_with_context("open", dir.path(), &context);
 
     assert!(output.status.success(), "{}", stderr(&output));
-    let calls = calls(dir.path());
+    let calls = herdr_calls(dir.path());
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "the open must use the live foreground cwd: {calls}"
@@ -1373,7 +1363,7 @@ fn open_prefers_the_live_cwd_when_the_launch_cwd_is_also_a_repo() {
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "the live cwd must win over a launch cwd that is also a repo: {}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 
@@ -1392,7 +1382,7 @@ fn open_keeps_the_context_cwd_without_a_live_foreground_cwd() {
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "the open must fall back to the context cwd: {}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 
@@ -1408,7 +1398,7 @@ fn open_falls_back_to_the_workspace_cwd_without_a_focused_pane_cwd() {
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "{}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 
@@ -1430,7 +1420,7 @@ fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "a non-repo live cwd must fall back to the context cwd: {}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 
@@ -1456,7 +1446,7 @@ fn open_takes_the_focused_panes_cwd_not_another_panes() {
     assert!(
         open_call(dir.path()).contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))),
         "the open must use the focused pane's cwd, not the decoy's: {}",
-        calls(dir.path())
+        herdr_calls(dir.path())
     );
 }
 

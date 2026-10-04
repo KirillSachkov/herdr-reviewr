@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use common::{Repo, app_on, fake_herdr};
+use common::{Repo, app_on, fake_herdr, herdr_calls, herdr_error};
 use herdr_reviewr::app::{App, Focus, Mode};
 use herdr_reviewr::keymap::Keymap;
 use herdr_reviewr::ui;
@@ -186,15 +186,10 @@ fn agents(dir: &Path, json: &str) {
 fn agent_list_fails(dir: &Path, fails: bool) {
     let path = dir.join("agentsfail");
     if fails {
-        let envelope = r#"{"error":{"code":"internal","message":"boom"},"id":"cli:request"}"#;
-        fs::write(path, envelope).unwrap();
+        fs::write(path, herdr_error("internal")).unwrap();
     } else {
         let _ = fs::remove_file(path);
     }
-}
-
-fn log(dir: &Path) -> String {
-    fs::read_to_string(dir.join("herdr.log")).unwrap_or_default()
 }
 
 /// The one-file repo every send runs over: the first added line is `a.rs:2`, `+beta`.
@@ -225,7 +220,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     if !in_child() {
         let dir =
             run_in_child("send_dispatches_one_agent_directly_and_several_through_the_picker", true);
-        assert!(log(dir.path()).contains("agent focus"), "the child delivered no send");
+        assert!(herdr_calls(dir.path()).contains("agent focus"), "the child delivered no send");
         return;
     }
 
@@ -304,7 +299,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
             r#"{{"id":"reviewr:send","method":"pane.send_text","params":{{"pane_id":"w8:p2","text":"\u001b[200~a.rs:2{NL}+beta{NL}two\u001b[201~"}}}}"#
         )
     );
-    assert!(log(&fake_dir).contains("agent focus w8:p2"), "a send focuses its pane");
+    assert!(herdr_calls(&fake_dir).contains("agent focus w8:p2"), "a send focuses its pane");
 
     // Several again: the last-sent agent outranks the first row, and a first click on that
     // armed row sends immediately.
@@ -409,7 +404,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
 fn a_send_consumes_the_comments_only_on_a_result_reply() {
     if !in_child() {
         let dir = run_in_child("a_send_consumes_the_comments_only_on_a_result_reply", true);
-        assert!(log(dir.path()).contains("agent focus"), "the child delivered no send");
+        assert!(herdr_calls(dir.path()).contains("agent focus"), "the child delivered no send");
         return;
     }
 
@@ -451,7 +446,7 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
 fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
     if !in_child() {
         let dir = run_in_child("a_long_review_sends_whole_and_one_over_the_cap_refuses", true);
-        assert!(log(dir.path()).contains("agent focus"), "the child delivered no send");
+        assert!(herdr_calls(dir.path()).contains("agent focus"), "the child delivered no send");
         return;
     }
 
@@ -492,7 +487,7 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
 fn a_send_without_a_socket_refuses_as_herdr_not_answering() {
     if !in_child() {
         let dir = run_in_child("a_send_without_a_socket_refuses_as_herdr_not_answering", false);
-        assert!(log(dir.path()).contains("agent list"), "the child asked herdr nothing");
+        assert!(herdr_calls(dir.path()).contains("agent list"), "the child asked herdr nothing");
         return;
     }
 

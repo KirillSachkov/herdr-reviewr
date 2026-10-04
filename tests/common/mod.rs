@@ -36,6 +36,16 @@ pub fn fake_herdr() -> &'static Path {
     })
 }
 
+/// Every herdr call the fake in `dir` logged, one per line. Empty when herdr was never called.
+pub fn herdr_calls(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join("herdr.log")).unwrap_or_default()
+}
+
+/// herdr's error envelope for `code`, as a failed CLI call writes it to stderr.
+pub fn herdr_error(code: &str) -> String {
+    serde_json::json!({"error": {"code": code, "message": "boom"}, "id": "cli:request"}).to_string()
+}
+
 pub struct Repo {
     dir: TempDir,
 }
