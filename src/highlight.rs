@@ -105,7 +105,7 @@ impl Highlighter {
 
     /// Highlight `content` line by line.
     pub fn highlight(&self, content: &str, language: Option<&str>) -> Vec<Vec<Span>> {
-        self.highlight_lines(&crate::diff::lines(content), language)
+        self.highlight_lines(&crate::text::lines(content), language)
     }
 
     /// Highlight `lines` into spans per line, plain with no known language or theme.
@@ -119,7 +119,7 @@ impl Highlighter {
                 .iter()
                 .map(|l| {
                     vec![Span {
-                        text: crate::diff::line_body(l).0.to_string(),
+                        text: crate::text::line_body(l).0.to_string(),
                         color: self.default_fg,
                     }]
                 })
@@ -129,7 +129,7 @@ impl Highlighter {
         let mut out = Vec::new();
         for &line in lines {
             // A CR-ended line highlights as its LF form.
-            let (text, cr) = crate::diff::line_body(line);
+            let (text, cr) = crate::text::line_body(line);
             let line: Cow<'_, str> =
                 if cr { Cow::Owned(format!("{text}\n")) } else { Cow::Borrowed(line) };
             let spans = match h.highlight_line(&line, syntaxes) {

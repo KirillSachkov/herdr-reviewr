@@ -5208,7 +5208,7 @@ struct LineMap {
 
 impl LineMap {
     fn new(old: &str, new: &str) -> Self {
-        let (old, new) = (crate::diff::lines(old), crate::diff::lines(new));
+        let (old, new) = (crate::text::lines(old), crate::text::lines(new));
         let ops = similar::TextDiff::from_slices(&old, &new).ops().to_vec();
         Self { ops, new_len: new.len() }
     }

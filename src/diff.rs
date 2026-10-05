@@ -7,6 +7,7 @@ use std::path::Path;
 use similar::{ChangeTag, TextDiff};
 
 use crate::highlight::Highlighter;
+use crate::text::{line_body, lines};
 
 /// An 8-bit RGB color.
 pub type Rgb = (u8, u8, u8);
@@ -337,20 +338,6 @@ impl FileDiff {
     /// A notice for a file the caller declines, or failed, to read.
     pub fn notice(path: String, previous_path: Option<String>, notice: Notice, view: View) -> Self {
         Self::rowless(path, previous_path, notice.into(), view)
-    }
-}
-
-/// `text`'s lines with their endings, split on `\n` alone, as git counts them.
-pub(crate) fn lines(text: &str) -> Vec<&str> {
-    text.split_inclusive('\n').collect()
-}
-
-/// A line without its ending, and whether that ending carried a CR.
-pub(crate) fn line_body(line: &str) -> (&str, bool) {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    match line.strip_suffix('\r') {
-        Some(body) => (body, true),
-        None => (line, false),
     }
 }
 

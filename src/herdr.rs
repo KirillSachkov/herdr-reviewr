@@ -7,7 +7,6 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::input::{PASTE_END, PASTE_START};
 use crate::logln;
 use crate::turn::Status;
 use anyhow::{Context, Result};
@@ -678,8 +677,20 @@ mod socket {
     }
 }
 
-/// The batch as one bracketed paste, with every inner terminator stripped in one pass.
+/// The bracketed-paste markers.
+const PASTE_START: &str = "\x1b[200~";
+const PASTE_END: &str = "\x1b[201~";
+
+/// The batch as one bracketed paste, line breaks as herdr's own paste encodes them on this OS,
+/// every inner terminator stripped in one pass.
 fn pasted(text: &str) -> String {
+    let crlf;
+    let text = if cfg!(windows) {
+        crlf = crate::text::crlf_line_breaks(text);
+        crlf.as_str()
+    } else {
+        text
+    };
     let mut body = String::with_capacity(text.len());
     for ch in text.chars() {
         body.push(ch);

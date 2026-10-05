@@ -29,6 +29,7 @@ pub mod selection;
 pub mod snippet;
 #[cfg(test)]
 mod test_support;
+mod text;
 pub mod theme;
 pub mod turn;
 pub mod ui;

@@ -22,10 +22,6 @@ pub(crate) use ratatui::crossterm::event::{poll, read};
 #[cfg(windows)]
 pub(crate) use windows::{poll, read};
 
-/// The bracketed-paste markers.
-pub(crate) const PASTE_START: &str = "\x1b[200~";
-pub(crate) const PASTE_END: &str = "\x1b[201~";
-
 /// Whether the terminal speaks the kitty protocol, asked once; it reports Ctrl/Alt+arrows.
 #[cfg(not(windows))]
 fn kitty() -> bool {
