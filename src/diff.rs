@@ -297,8 +297,11 @@ impl FileDiff {
             }
         }
         // Pair on text alone, then mark endings, so an ending-only change pairs with its twin.
-        let pairs = compute_emphasis(&mut rows);
-        mark_crs(&mut rows, &old_lines, &new_lines, &pairs);
+        let paired = compute_emphasis(&mut rows);
+        mark_crs(&mut rows, &old_lines, &new_lines, &paired);
+        let mut pairs: Vec<(u32, u32)> =
+            paired.iter().filter_map(|&(d, i)| rows[d].old_no().zip(rows[i].new_no())).collect();
+        pairs.sort_unstable();
         Self {
             path,
             previous_path,
@@ -350,21 +353,13 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
 }
 
 /// Mark the CR of each edited line whose ending changed: on its exact twin first, else its pair.
-fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) {
+fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(usize, usize)]) {
     if !old.iter().chain(new).any(|line| line.contains('\r')) {
         return;
     }
     let ends_cr = |lines: &[&str], no: u32| line_body(lines[no as usize - 1]).1;
-    let (mut dels, mut inss) = (HashMap::new(), HashMap::new());
-    for (i, row) in rows.iter().enumerate() {
-        match row {
-            Row::Deletion { .. } => dels.extend(row.old_no().map(|o| (o, i))),
-            Row::Insertion { .. } => inss.extend(row.new_no().map(|n| (n, i))),
-            _ => {}
-        }
-    }
-    for &(o, n) in pairs {
-        let (Some(&d), Some(&i)) = (dels.get(&o), inss.get(&n)) else { continue };
+    for &(d, i) in pairs {
+        let (Some(o), Some(n)) = (rows[d].old_no(), rows[i].new_no()) else { continue };
         let marked = match (ends_cr(old, o), ends_cr(new, n)) {
             (true, false) => d,
             (false, true) => i,
@@ -376,8 +371,8 @@ fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) 
     }
 }
 
-/// Word emphasis on each change block's homolog pairs; returns the pairs' line numbers.
-pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(u32, u32)> {
+/// Word emphasis on each change block's homolog pairs; returns the pairs' row indices.
+pub(crate) fn compute_emphasis(rows: &mut [Row]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for (dels, inss) in change_blocks(rows) {
         pair_homologs(rows, dels, inss, &mut pairs);
@@ -420,9 +415,8 @@ fn pair_homologs(
     rows: &mut [Row],
     dels: std::ops::Range<usize>,
     inss: std::ops::Range<usize>,
-    pairs: &mut Vec<(u32, u32)>,
+    pairs: &mut Vec<(usize, usize)>,
 ) {
-    let first = pairs.len();
     let old_texts: Vec<String> = dels.clone().map(|d| rows[d].text()).collect();
     let new_texts: Vec<String> = inss.clone().map(|p| rows[p].text()).collect();
     let mut claimed = vec![false; inss.len()];
@@ -436,7 +430,7 @@ fn pair_homologs(
         if let Some(j) = twins.get_mut(old_texts[k].as_str()).and_then(VecDeque::pop_front) {
             claimed[j] = true;
             twinned[k] = true;
-            pairs.extend(rows[d].old_no().zip(rows[inss.start + j].new_no()));
+            pairs.push((d, inss.start + j));
         }
     }
     // Then each remaining line's first similar unclaimed successor within a window, in order.
@@ -456,13 +450,12 @@ fn pair_homologs(
                     *emphasis = new_e;
                 }
                 claimed[p - inss.start] = true;
-                pairs.extend(rows[d].old_no().zip(rows[p].new_no()));
+                pairs.push((d, p));
                 next_ins = p + 1;
                 break;
             }
         }
     }
-    pairs[first..].sort_unstable();
 }
 
 /// How many unclaimed insertions a deletion tries, so a rewrite block costs linear, not square.

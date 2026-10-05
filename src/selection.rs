@@ -249,7 +249,7 @@ mod tests {
             FileRow {
                 depth: 1,
                 name: "two.rs".into(),
-                kind: RowKind::File { index: 0, annotation: None },
+                kind: RowKind::File { index: 0 },
                 ignored: false,
             },
         ];

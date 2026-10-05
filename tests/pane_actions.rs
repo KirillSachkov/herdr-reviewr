@@ -641,6 +641,17 @@ fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
 }
 
 #[test]
+fn an_action_makes_a_state_dir_herdr_named_but_never_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let output =
+        action("close", dir.path()).env("HERDR_PLUGIN_STATE_DIR", &state).output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
+    assert!(state.is_dir());
+}
+
+#[test]
 fn close_sweeps_every_reviewr_pane_and_a_close_that_lost_the_race_still_converges() {
     let dir = tempfile::tempdir().unwrap();
     // A plain shell with a stale `reviewr` label: the label is never read.
@@ -1157,14 +1168,14 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
         assert_eq!(output.status.code(), Some(1), "{mode}");
         assert_eq!(
             stderr(&output),
-            "reviewr: another reviewr action in workspace-1 is still running after 47s\n",
+            "reviewr: another reviewr action in workspace-1 is still running after 49s\n",
             "{mode}"
         );
         assert!(output.stdout.is_empty(), "{mode}");
     }
     let elapsed = started.elapsed();
 
-    assert!(elapsed >= Duration::from_millis(46500), "refused before the bound: {elapsed:?}");
+    assert!(elapsed >= Duration::from_millis(48500), "refused before the bound: {elapsed:?}");
     assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 

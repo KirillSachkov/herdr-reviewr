@@ -1523,13 +1523,14 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     }
                     selectable_row(p, spans, width, on)
                 }
-                RowKind::File { annotation, .. } => {
+                RowKind::File { index } => {
+                    let annotation = app.entries[*index].annotation.as_ref();
                     // No marker: two spaces align the name with sibling folders.
                     let indent = if annotation.is_some() { nest } else { format!("{nest}  ") };
                     file_row_item(
                         &FileRowSpec {
                             indent: &indent,
-                            annotation: annotation.as_ref(),
+                            annotation,
                             name: &row.name,
                             ignored: row.ignored,
                             emphasis: &[],

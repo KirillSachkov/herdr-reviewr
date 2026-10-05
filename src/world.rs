@@ -247,16 +247,16 @@ pub struct TurnHost {
     root: PathBuf,
     /// Each agent `cwd` with a resolved top level, mapped to whether it is a member.
     resolved: HashMap<String, bool>,
-    /// The worktree tree the last sample wrote, which that job's `last-turn` build reuses.
-    written: Option<String>,
 }
 
 /// One sample's outcome: whether a turn ended, and whether agents are present.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TurnReport {
     pub ended: bool,
     /// `None` when the enumeration failed or a member didn't resolve, so the reader keeps what it knew.
     pub agents_present: Option<bool>,
+    /// The worktree tree the sample wrote, which its job's `last-turn` build reuses.
+    pub written: Option<String>,
 }
 
 /// An agent's place in the worktree; `Unknown` holds the poll instead of counting it out.
@@ -296,7 +296,7 @@ impl TurnHost {
     /// Resume the persisted baseline of `repo`, which must be the git top level.
     pub fn open(repo: PathBuf) -> Self {
         let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
-        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new(), written: None }
+        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new() }
     }
 
     pub fn baseline(&self) -> Option<&str> {
@@ -310,17 +310,16 @@ impl TurnHost {
 
     /// Advance the baseline from one enumeration; `None`, a failed one, holds the last state.
     pub fn observe_agents(&mut self, samples: Option<&[AgentSample]>) -> TurnReport {
-        self.written = None;
         let Some(samples) = samples else {
-            return TurnReport { ended: false, agents_present: None };
+            return TurnReport::default();
         };
         // An unresolved member holds the sample, as a failed enumeration does.
         let Some((present, state)) = classify(samples, |s| self.membership(s.cwd.as_deref()))
         else {
-            return TurnReport { ended: false, agents_present: None };
+            return TurnReport::default();
         };
-        let ended = self.observe(state);
-        TurnReport { ended, agents_present: Some(present) }
+        let (ended, written) = self.observe(state);
+        TurnReport { ended, agents_present: Some(present), written }
     }
 
     /// An agent's place by git top level: a subdirectory is a member, a sibling worktree is not.
@@ -345,23 +344,22 @@ impl TurnHost {
         }
     }
 
-    /// Advance the baseline from one worktree state, returning whether a turn ended.
-    fn observe(&mut self, state: WorktreeState) -> bool {
+    /// Advance the baseline from one worktree state: whether a turn ended, and the tree written.
+    fn observe(&mut self, state: WorktreeState) -> (bool, Option<String>) {
         let transition = self.tracker.observe(state);
         if transition.started {
             match git::snapshot_worktree(&self.repo) {
                 // A fresh candidate cannot have diverged yet; the next poll checks.
                 Ok(sha) => {
-                    self.written = Some(sha.clone());
-                    self.tracker.set_candidate(sha);
-                    return transition.ended;
+                    self.tracker.set_candidate(sha.clone());
+                    return (transition.ended, Some(sha));
                 }
                 Err(e) => logln!("turn snapshot failed: {e}"),
             }
         }
         // Full snapshots compare, so a new untracked file counts as a change.
         let Some(candidate) = self.tracker.candidate().map(str::to_string) else {
-            return transition.ended;
+            return (transition.ended, None);
         };
         match git::snapshot_worktree(&self.repo) {
             Ok(now) => {
@@ -371,11 +369,13 @@ impl TurnHost {
                         logln!("turn baseline ref write failed: {e}");
                     }
                 }
-                self.written = Some(now);
+                (transition.ended, Some(now))
             }
-            Err(e) => logln!("turn divergence check failed: {e}"),
+            Err(e) => {
+                logln!("turn divergence check failed: {e}");
+                (transition.ended, None)
+            }
         }
-        transition.ended
     }
 }
 
@@ -428,7 +428,7 @@ pub fn spawn(
                     };
                 }
                 let turn = job.sample_turn.then(|| host.sample());
-                if tx.send(complete(&mut host, job, turn)).is_err() {
+                if tx.send(complete(&host, job, turn)).is_err() {
                     break;
                 }
             }
@@ -437,9 +437,9 @@ pub fn spawn(
 }
 
 /// Finish `job` after its sample, `turn`: the build reuses the worktree tree that sample wrote.
-fn complete(host: &mut TurnHost, mut job: WorldJob, turn: Option<TurnReport>) -> WorldCompletion {
+fn complete(host: &TurnHost, mut job: WorldJob, turn: Option<TurnReport>) -> WorldCompletion {
     job.input.turn_baseline = host.baseline().map(str::to_string);
-    let written = host.written.take();
+    let written = turn.as_ref().and_then(|t| t.written.clone());
     let snapshot = job.input.tab.is_file_tab().then(|| build_at(&job.input, written));
     WorldCompletion {
         generation: job.generation,
@@ -491,9 +491,9 @@ mod tests {
         let paths = |done: super::WorldCompletion| -> Vec<String> {
             done.snapshot.unwrap().unwrap().changeset.files.into_keys().collect()
         };
-        assert_eq!(paths(super::complete(&mut host, job(1), Some(turn))), ["a.txt"]);
+        assert_eq!(paths(super::complete(&host, job(1), Some(turn))), ["a.txt"]);
         // A job without a sample has no tree to reuse, so it snapshots the worktree now.
-        assert_eq!(paths(super::complete(&mut host, job(2), None)), ["a.txt", "b.txt"]);
+        assert_eq!(paths(super::complete(&host, job(2), None)), ["a.txt", "b.txt"]);
     }
 
     fn working_at(cwd: &str) -> AgentSample {

@@ -5625,13 +5625,13 @@ mod tests {
             ListRow {
                 depth: 1,
                 name: "lib.rs".into(),
-                kind: RowKind::File { index: 0, annotation: None },
+                kind: RowKind::File { index: 0 },
                 ignored: false,
             },
             ListRow {
                 depth: 1,
                 name: "other.rs".into(),
-                kind: RowKind::File { index: 1, annotation: None },
+                kind: RowKind::File { index: 1 },
                 ignored: false,
             },
         ];

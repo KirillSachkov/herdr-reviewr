@@ -161,11 +161,11 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
 /// How long an action waits for its workspace's lock: a holder's five herdr calls all wedged, its
-/// visibility wait, and a second for its last poll pause and local git reads.
+/// visibility wait, and three seconds for its last poll pause and two git reads on a cold disk.
 const LOCK_BOUND: Duration = herdr::CALL_BOUND
     .saturating_mul(5)
     .saturating_add(VISIBLE_BOUND)
-    .saturating_add(Duration::from_secs(1));
+    .saturating_add(Duration::from_secs(3));
 
 /// The pause between two lock attempts.
 const LOCK_POLL: Duration = Duration::from_millis(20);
@@ -179,6 +179,8 @@ fn action_lock(ws: &str) -> Result<File, Stop> {
     let name = hex::encode(ws);
     let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
+    // herdr names the dir but may not have made it yet.
+    std::fs::create_dir_all(&dir).map_err(unusable)?;
     // Windows locks need a handle with access; the content is never touched.
     let file = File::options()
         .read(true)

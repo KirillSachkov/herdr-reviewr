@@ -22,8 +22,8 @@ pub struct Row {
 pub enum RowKind {
     /// A directory, keyed by its path; `has_change` marks a collapsed folder holding a change.
     Dir { path: String, expanded: bool, has_change: bool },
-    /// A file: its index into the source `&[Entry]`, plus its change in the active scope.
-    File { index: usize, annotation: Option<ChangedFile> },
+    /// A file: its index into the source `&[Entry]`, which holds its change.
+    File { index: usize },
 }
 
 /// A navigator entry: a path, and its change in the active scope.
@@ -162,12 +162,7 @@ fn lone_file(node: &Dir) -> Option<(&String, &usize)> {
 }
 
 fn file_row(depth: usize, name: String, index: usize, entries: &[Entry]) -> Row {
-    Row {
-        depth,
-        name,
-        kind: RowKind::File { index, annotation: entries[index].annotation.clone() },
-        ignored: entries[index].ignored,
-    }
+    Row { depth, name, kind: RowKind::File { index }, ignored: entries[index].ignored }
 }
 
 fn join(prefix: &str, name: &str) -> String {
@@ -251,10 +246,6 @@ mod tests {
         // Sorted alphabetically: a.rs first → source index 1, then z.rs → index 0.
         assert_eq!(rows[0].file_index(), Some(1));
         assert_eq!(rows[1].file_index(), Some(0));
-        assert!(matches!(
-            &rows[0].kind,
-            RowKind::File { annotation: Some(ChangedFile { kind: ChangeKind::Modified, .. }), .. }
-        ));
     }
 
     #[test]
@@ -268,14 +259,6 @@ mod tests {
             shape_rows(&build(&entries(&files), &toggled, false)),
             ["0:dir:src", "1:file:app.rs", "1:file:ui.rs"]
         );
-    }
-
-    #[test]
-    fn an_unannotated_entry_renders_without_a_marker() {
-        // An `All files` entry from a bare path renders without a marker or stats.
-        let entry = Entry { path: "a.rs".into(), annotation: None, ignored: false, is_dir: false };
-        let rows = build(&[entry], &HashSet::new(), false);
-        assert!(matches!(rows[0].kind, RowKind::File { annotation: None, .. }));
     }
 
     fn plain(path: &str) -> Entry {

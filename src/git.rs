@@ -1693,14 +1693,16 @@ fn git_dir(repo: &Path) -> Result<PathBuf> {
     Ok(session(repo)?.git_dir.clone())
 }
 
-/// What reviewr keeps about one worktree for the session: its git dir, its index copy, and its
-/// last build's untracked counts.
+/// What reviewr keeps about one worktree for the session: its git dir, its index copy, its last
+/// build's untracked counts, and the blob sizes it has asked for.
+#[derive(Default)]
 struct RepoSession {
     /// What `<repo>/.git` held when the git dir was read: a linked worktree's pointer, else `None`.
     pointer: Option<String>,
     git_dir: PathBuf,
     copy: Mutex<Option<IndexCopy>>,
     counts: Mutex<Arc<Counts>>,
+    sizes: Mutex<HashMap<String, u64>>,
 }
 
 /// Every live session by worktree.
@@ -1721,7 +1723,7 @@ fn session(repo: &Path) -> Result<Arc<RepoSession>> {
     if let Some(found) = sessions.get(repo).filter(current) {
         return Ok(Arc::clone(found));
     }
-    let made = RepoSession { pointer, git_dir, copy: Mutex::default(), counts: Mutex::default() };
+    let made = RepoSession { pointer, git_dir, ..RepoSession::default() };
     let made = Arc::new(made);
     sessions.insert(repo.to_path_buf(), Arc::clone(&made));
     Ok(made)
@@ -2259,8 +2261,8 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
 
 /// Each blob's size by id, asked once while the cache holds it.
 fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
-    static KNOWN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    let known = KNOWN.get_or_init(Mutex::default);
+    let session = session(repo)?;
+    let known = &session.sizes;
     // The result is this call's own: the cache hits now, then what git answers, so another
     // thread clearing the cache never drops a size from it.
     let mut sizes = HashMap::new();

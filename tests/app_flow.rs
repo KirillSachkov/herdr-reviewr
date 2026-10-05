@@ -3020,8 +3020,8 @@ fn changed_count_and_staleness_stay_scope_based_on_all_files() {
 fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_reviewr::model::ChangedFile>> {
     use herdr_reviewr::file_list::RowKind;
     app.file_rows.iter().find_map(|row| match &row.kind {
-        RowKind::File { index, annotation } if app.entries[*index].path == path => {
-            Some(annotation.clone())
+        RowKind::File { index } if app.entries[*index].path == path => {
+            Some(app.entries[*index].annotation.clone())
         }
         _ => None,
     })
@@ -4505,7 +4505,11 @@ fn a_superseded_completion_syncs_the_baseline_but_paints_nothing() {
     r.write("d.rs", "d\n");
     let mut stale = completion_for(&app, 3);
     stale.input.turn_baseline = Some("cafe".into());
-    stale.turn = Some(herdr_reviewr::world::TurnReport { ended: true, agents_present: Some(true) });
+    stale.turn = Some(herdr_reviewr::world::TurnReport {
+        ended: true,
+        agents_present: Some(true),
+        written: None,
+    });
     let before = app.entries.clone();
     assert!(
         !herdr_reviewr::land_world_completion(&mut app, stale, 4),
