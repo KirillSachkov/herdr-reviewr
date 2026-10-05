@@ -27,7 +27,7 @@ pub enum Row {
         new_no: u32,
         spans: Vec<Span>,
     },
-    /// `cr`: the line's kept CR changed, painted as [`CR_MARKER`], never part of the text.
+    /// `cr`: the line's kept CR changed, painted as a marker, never part of the text.
     Deletion {
         old_no: u32,
         spans: Vec<Span>,
@@ -112,7 +112,7 @@ impl Row {
         }
     }
 
-    /// Whether the paint ends this line in [`CR_MARKER`]: its ending changed.
+    /// Whether the paint ends this line in a CR marker: its ending changed.
     pub fn cr_marker(&self) -> bool {
         matches!(self, Row::Deletion { cr: true, .. } | Row::Insertion { cr: true, .. })
     }
@@ -349,9 +349,6 @@ pub(crate) fn set_row_spans(row: &mut Row, next: Vec<Span>) {
         Row::Rendered { .. } | Row::Fold { .. } => {}
     }
 }
-
-/// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
-pub const CR_MARKER: &str = "^M";
 
 /// Mark the CR of each edited line whose ending changed: on its exact twin first, else its pair.
 fn mark_crs(rows: &mut [Row], old: &[&str], new: &[&str], pairs: &[(u32, u32)]) {

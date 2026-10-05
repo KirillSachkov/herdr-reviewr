@@ -1729,6 +1729,9 @@ fn truncate_width(s: &str, max: usize) -> String {
 /// The notice for a file git failed to read.
 const UNREADABLE: &str = "git couldn't read this file";
 
+/// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
+pub const CR_MARKER: &str = "^M";
+
 fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let mut title = match (&app.diff_path, &app.diff.previous_path) {
@@ -2328,7 +2331,7 @@ fn code_cells(row: &Row, emph_on: bool, hl_ranges: &[(u32, u32)], marker_fg: Col
     if row.cr_marker() {
         // The marker stands at the text's last char, so past the end still selects that char.
         let src = (idx as usize).saturating_sub(1);
-        cells.extend(crate::diff::CR_MARKER.chars().map(|ch| Cell {
+        cells.extend(CR_MARKER.chars().map(|ch| Cell {
             ch,
             w: 1,
             fg: marker_fg,

@@ -212,11 +212,6 @@ impl PaneList {
     pub(crate) fn pane(&self, pane: &str) -> Option<&PaneEntry> {
         self.panes.iter().find(|entry| entry.pane_id == pane)
     }
-
-    /// Pane `pane`'s label; absent, empty and unknown all read as none.
-    fn label(&self, pane: &str) -> Option<&str> {
-        self.pane(pane)?.label.as_deref()
-    }
 }
 
 /// The processes herdr reports in a pane's foreground: the group on unix, one process on Windows.
@@ -368,7 +363,7 @@ pub fn clear_pane_label() {
 
 /// Our pane's label, `None` when unset or unreadable; blocking, so never on the frame loop.
 fn current_label(ws: &str, pane: &str) -> Option<String> {
-    PaneList::of(ws).ok()?.label(pane).map(str::to_owned)
+    PaneList::of(ws).ok()?.pane(pane)?.label.clone()
 }
 
 /// This plugin's config directory from herdr, `None` when herdr cannot say.
@@ -395,7 +390,7 @@ pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
 }
 
 /// This pane's (workspace, pane) ids; no tab, since neither the send nor turn tracking scopes to one.
-fn agent_env() -> (Option<String>, Option<String>) {
+pub(crate) fn agent_env() -> (Option<String>, Option<String>) {
     (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID"))
 }
 
@@ -534,36 +529,22 @@ fn candidates<'a>(
         .collect()
 }
 
-/// Whether an agent pane can take a send right now.
-#[derive(Debug, PartialEq, Eq)]
-enum Readiness {
-    /// The agent's input takes the paste.
-    Ready,
-    /// The agent is at a prompt. Holds its name, as the picker row shows it.
-    Busy(String),
-    /// The pane is no longer an agent herdr lists.
-    Gone,
-}
-
 /// Refuse a send to an agent at a prompt, read fresh; herdr offers no atomic send-if-ready.
 fn ensure_ready(pane: &str) -> Result<(), HerdrError> {
-    match readiness_in(&agent_list()?, pane) {
-        Readiness::Ready => Ok(()),
-        Readiness::Busy(name) => Err(HerdrError::AtPrompt(name)),
-        // Gone from the agent list is the same verdict herdr's own send would return.
-        Readiness::Gone => {
+    readiness_in(&agent_list()?, pane)
+}
+
+/// Only an agent at a prompt refuses, since a prompt drops a paste; one no longer listed is gone.
+fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), HerdrError> {
+    match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
+        None => {
             logln!("agent pane {pane} is gone");
             Err(HerdrError::PaneGone)
         }
-    }
-}
-
-/// Only an agent at a prompt refuses: a prompt drops a paste.
-fn readiness_in(agents: &[AgentPane], pane: &str) -> Readiness {
-    match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
-        None => Readiness::Gone,
-        Some(agent) if agent.status() == Status::Blocked => Readiness::Busy(agent.row_name()),
-        Some(_) => Readiness::Ready,
+        Some(agent) if agent.status() == Status::Blocked => {
+            Err(HerdrError::AtPrompt(agent.row_name()))
+        }
+        Some(_) => Ok(()),
     }
 }
 
@@ -748,28 +729,22 @@ mod tests {
 
     #[test]
     fn a_send_refuses_only_an_agent_at_a_prompt() {
-        use super::Readiness::{Busy, Gone, Ready};
         let at = |status: &str| AgentPane {
             agent_status: status.into(),
             state_labels: Some(HashMap::from([("compacting".into(), "Compacting".into())])),
             ..agent("w8:p1", "w8:t1", "w8")
         };
-        for (status, want) in [
-            ("idle", Ready),
-            ("done", Ready),
-            // A working agent takes typing mid-turn: the paste waits in its input.
-            ("working", Ready),
-            ("unknown", Ready),
-            ("compacting", Ready),
-            // A prompt drops a paste.
-            ("blocked", Busy("claude".into())),
-        ] {
-            assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), want, "{status}");
+        // A working agent takes typing mid-turn: the paste waits in its input.
+        for status in ["idle", "done", "working", "unknown", "compacting"] {
+            assert_eq!(super::readiness_in(&[at(status)], "w8:p1"), Ok(()), "{status}");
         }
-        assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), Gone);
+        // A prompt drops a paste.
+        let blocked = super::readiness_in(&[at("blocked")], "w8:p1");
+        assert_eq!(blocked, Err(HerdrError::AtPrompt("claude".into())));
+        assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), Err(HerdrError::PaneGone));
         // A pane whose agent exited is listed without one: the send goes nowhere near it.
         let shell = AgentPane { agent: None, ..at("idle") };
-        assert_eq!(super::readiness_in(&[shell], "w8:p1"), Gone);
+        assert_eq!(super::readiness_in(&[shell], "w8:p1"), Err(HerdrError::PaneGone));
     }
 
     #[test]
@@ -951,10 +926,11 @@ mod tests {
         // `label` appears only on labelled panes.
         let json = r#"{"result":{"panes":[{"pane_id":"w1:p1","label":"build"},{"pane_id":"w1:p2"},{"pane_id":"w1:p3","label":""}]}}"#;
         let list: super::PaneList = super::answer(json).unwrap();
-        assert_eq!(list.label("w1:p1"), Some("build"));
-        assert_eq!(list.label("w1:p2"), None);
-        assert_eq!(list.label("w1:p3"), None, "empty label reads as none");
-        assert_eq!(list.label("w9:p9"), None, "unknown pane reads as none");
+        let label = |pane: &str| list.pane(pane).and_then(|p| p.label.as_deref());
+        assert_eq!(label("w1:p1"), Some("build"));
+        assert_eq!(label("w1:p2"), None);
+        assert_eq!(label("w1:p3"), None, "empty label reads as none");
+        assert_eq!(label("w9:p9"), None, "unknown pane reads as none");
     }
 
     #[test]

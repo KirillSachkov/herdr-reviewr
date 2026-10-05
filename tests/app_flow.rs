@@ -9390,7 +9390,7 @@ fn git_changed_lines(r: &Repo, rev: &str, path: &str) -> Vec<String> {
         .skip_while(|l| !l.starts_with("@@"))
         .filter(|l| l.starts_with('-') || l.starts_with('+'))
         .map(|l| match l.strip_suffix('\r') {
-            Some(body) => format!("{body}{}", herdr_reviewr::diff::CR_MARKER),
+            Some(body) => format!("{body}{}", herdr_reviewr::ui::CR_MARKER),
             None => l.to_string(),
         })
         .collect()
@@ -9398,7 +9398,7 @@ fn git_changed_lines(r: &Repo, rev: &str, path: &str) -> Vec<String> {
 
 /// The open diff's change rows, marker-prefixed, a painted CR marker spelled after the text.
 fn change_rows(app: &App) -> Vec<String> {
-    let marker = |r: &Row| if r.cr_marker() { herdr_reviewr::diff::CR_MARKER } else { "" };
+    let marker = |r: &Row| if r.cr_marker() { herdr_reviewr::ui::CR_MARKER } else { "" };
     app.diff
         .rows
         .iter()
@@ -9414,7 +9414,7 @@ fn loose_objects(r: &Repo) -> String {
 
 /// Whether reviewr's change rows say what `git diff` says.
 fn rows_agree_with_git(rows: &[String], git: &[String]) -> bool {
-    let cr = herdr_reviewr::diff::CR_MARKER;
+    let cr = herdr_reviewr::ui::CR_MARKER;
     rows.len() == git.len()
         && rows.iter().zip(git).all(|(row, git)| row == git || format!("{row}{cr}") == *git)
 }

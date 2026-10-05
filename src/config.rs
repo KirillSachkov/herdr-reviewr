@@ -322,17 +322,15 @@ impl std::error::Error for PluginConfigError {}
 
 /// The config directory: `$HERDR_PLUGIN_CONFIG_DIR`, else what `cli` reports, else none.
 pub fn resolve_config_dir(cli: impl FnOnce() -> Option<String>) -> Option<PathBuf> {
-    config_dir_from(std::env::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
+    config_dir_from(crate::herdr::var_os("HERDR_PLUGIN_CONFIG_DIR"), cli)
 }
 
-/// [`resolve_config_dir`]'s rule; an empty value names no directory, never the cwd.
+/// [`resolve_config_dir`]'s rule; an empty CLI answer names no directory, never the cwd.
 fn config_dir_from(
     env: Option<std::ffi::OsString>,
     cli: impl FnOnce() -> Option<String>,
 ) -> Option<PathBuf> {
-    env.filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| cli().filter(|dir| !dir.is_empty()).map(PathBuf::from))
+    env.map(PathBuf::from).or_else(|| cli().filter(|dir| !dir.is_empty()).map(PathBuf::from))
 }
 
 /// Read the plugin config from `dir`; no directory means every default.
@@ -751,10 +749,8 @@ mod tests {
         let dir =
             super::config_dir_from(Some("/tmp/cfg".into()), || panic!("cli asked despite the env"));
         assert_eq!(dir, Some(PathBuf::from("/tmp/cfg")));
-        // An unset or empty env falls through to the CLI's directory.
+        // An unset env (`herdr::var_os` reads empty as unset) falls through to the CLI's directory.
         let dir = super::config_dir_from(None, || Some("/tmp/from-cli".to_string()));
-        assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
-        let dir = super::config_dir_from(Some("".into()), || Some("/tmp/from-cli".to_string()));
         assert_eq!(dir, Some(PathBuf::from("/tmp/from-cli")));
         // An empty CLI answer names no directory either.
         assert_eq!(super::config_dir_from(None, || Some(String::new())), None);

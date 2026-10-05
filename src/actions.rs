@@ -238,9 +238,10 @@ impl Target {
         let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
+        let (ws, pane) = herdr::agent_env();
         Ok(Self {
-            ws: var("HERDR_WORKSPACE_ID").ok_or_else(no_workspace)?,
-            pane: var("HERDR_PANE_ID"),
+            ws: ws.ok_or_else(no_workspace)?,
+            pane,
             cwd: text(&context, "/focused_pane_cwd").or_else(|| text(&context, "/workspace_cwd")),
             focused: text(&context, "/focused_pane_id"),
         })
@@ -424,7 +425,7 @@ fn repoint_launch_links() {
         return;
     }
     // The installer's own path, which it writes without herdr's environment.
-    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::PLUGIN_ID).join("bin");
+    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::plugin_id()).join("bin");
     let local_bin = home.join(".local/bin");
     // `~/.local/bin` only when it already exists: reviewr never creates a PATH directory.
     let dirs = [Some(state_bin), local_bin.is_dir().then_some(local_bin)];
