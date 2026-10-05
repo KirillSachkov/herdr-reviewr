@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context, Result, bail};
 
@@ -1565,19 +1565,11 @@ struct IndexCopy {
 impl IndexCopy {
     /// Run `f` on `repo`'s session-long diff copy, re-copied only when the real index changed.
     fn with<T>(repo: &Path, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
-        type Slot = std::sync::Arc<std::sync::Mutex<Option<IndexCopy>>>;
-        static COPIES: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
-        let real = git_dir(repo)?.join("index");
-        let slot = COPIES
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(real.clone())
-            .or_default()
-            .clone();
+        let session = session(repo)?;
+        let real = session.git_dir.join("index");
         // A panic mid-use leaves the copy suspect, so a poisoned slot starts over.
-        let mut kept = slot.lock().unwrap_or_else(|poisoned| {
-            slot.clear_poison();
+        let mut kept = session.copy.lock().unwrap_or_else(|poisoned| {
+            session.copy.clear_poison();
             let mut kept = poisoned.into_inner();
             *kept = None;
             kept
@@ -1688,14 +1680,28 @@ pub fn sweep_dead_copies(repo: &Path) {
 
 /// `repo`'s git dir, asked once per worktree: it is fixed for the session.
 fn git_dir(repo: &Path) -> Result<PathBuf> {
-    static DIRS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
-    let dirs = DIRS.get_or_init(Mutex::default);
-    if let Some(dir) = dirs.lock().unwrap_or_else(PoisonError::into_inner).get(repo) {
-        return Ok(dir.clone());
+    Ok(session(repo)?.git_dir.clone())
+}
+
+/// What reviewr keeps about one worktree for the session: its git dir, its index copy, and its
+/// last build's untracked counts.
+struct RepoSession {
+    git_dir: PathBuf,
+    copy: Mutex<Option<IndexCopy>>,
+    counts: Mutex<Arc<Counts>>,
+}
+
+/// `repo`'s session, made on first use.
+fn session(repo: &Path) -> Result<Arc<RepoSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<PathBuf, Arc<RepoSession>>>> = OnceLock::new();
+    let sessions = SESSIONS.get_or_init(Mutex::default);
+    if let Some(found) = sessions.lock().unwrap_or_else(PoisonError::into_inner).get(repo) {
+        return Ok(Arc::clone(found));
     }
-    let dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
-    dirs.lock().unwrap_or_else(PoisonError::into_inner).insert(repo.to_path_buf(), dir.clone());
-    Ok(dir)
+    let git_dir = PathBuf::from(git(repo, &["rev-parse", "--absolute-git-dir"])?.trim());
+    let made = RepoSession { git_dir, copy: Mutex::default(), counts: Mutex::default() };
+    let mut sessions = sessions.lock().unwrap_or_else(PoisonError::into_inner);
+    Ok(Arc::clone(sessions.entry(repo.to_path_buf()).or_insert_with(|| Arc::new(made))))
 }
 
 /// The persisted turn baseline tree for this worktree, if a baseline exists.
@@ -1984,9 +1990,8 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
         let mut buf = vec![0; 64 * 1024];
         // Counts carry from the last build to this one, read without taking them from a build
         // running beside this one.
-        let last_counts = COUNTS.get_or_init(Mutex::default);
-        let known = last_counts.lock().unwrap_or_else(PoisonError::into_inner).get(repo).cloned();
-        let known = known.unwrap_or_default();
+        let session = session(repo)?;
+        let known = Arc::clone(&session.counts.lock().unwrap_or_else(PoisonError::into_inner));
         let mut fresh = Counts::new();
         for path in new_paths {
             let path = path.to_string();
@@ -2011,11 +2016,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
                 new_size: None,
             });
         }
-        let fresh = std::sync::Arc::new(fresh);
-        last_counts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(repo.to_path_buf(), fresh);
+        *session.counts.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(fresh);
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2049,9 +2050,6 @@ const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
 /// Line counts by repo-relative path, size, and mtime: what an untracked file held when counted.
 type Counts = HashMap<(String, u64, Option<std::time::SystemTime>), Option<u32>>;
-
-/// Each repo's counts from its last build.
-static COUNTS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Counts>>>> = OnceLock::new();
 
 /// An untracked file's line count, `None` where git would call it binary; a count `known` from the
 /// last build is reused, and every count read lands in `fresh`.
