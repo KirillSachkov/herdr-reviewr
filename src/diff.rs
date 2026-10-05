@@ -1,6 +1,6 @@
 //! The diff model: a file's changes as highlighted rows, terminal-free.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
@@ -440,16 +440,20 @@ fn pair_homologs(
     pairs: &mut Vec<(u32, u32)>,
 ) {
     let first = pairs.len();
+    let old_texts: Vec<String> = dels.clone().map(|d| rows[d].text()).collect();
+    let new_texts: Vec<String> = inss.clone().map(|p| rows[p].text()).collect();
     let mut claimed = vec![false; inss.len()];
     let mut twinned = vec![false; dels.len()];
     // Exact twins first, anywhere in the block: a line whose ending alone changed is that line.
+    let mut twins: HashMap<&str, VecDeque<usize>> = HashMap::new();
+    for (j, text) in new_texts.iter().enumerate() {
+        twins.entry(text).or_default().push_back(j);
+    }
     for (k, d) in dels.clone().enumerate() {
-        let old = rows[d].text();
-        let twin = inss.clone().find(|&p| !claimed[p - inss.start] && rows[p].text() == old);
-        if let Some(p) = twin {
-            claimed[p - inss.start] = true;
+        if let Some(j) = twins.get_mut(old_texts[k].as_str()).and_then(VecDeque::pop_front) {
+            claimed[j] = true;
             twinned[k] = true;
-            pairs.extend(rows[d].old_no().zip(rows[p].new_no()));
+            pairs.extend(rows[d].old_no().zip(rows[inss.start + j].new_no()));
         }
     }
     // Then each remaining line's first similar unclaimed successor, in order.
@@ -458,12 +462,11 @@ fn pair_homologs(
         if twinned[k] {
             continue;
         }
-        let old = rows[d].text();
         for p in next_ins..inss.end {
             if claimed[p - inss.start] {
                 continue;
             }
-            let (ratio, old_e, new_e) = word_emphasis(&old, &rows[p].text());
+            let (ratio, old_e, new_e) = word_emphasis(&old_texts[k], &new_texts[p - inss.start]);
             if ratio >= MIN_SIMILARITY {
                 if let Row::Deletion { emphasis, .. } = &mut rows[d] {
                     *emphasis = old_e;
