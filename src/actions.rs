@@ -354,7 +354,7 @@ fn open(
     };
     let spot = match placement {
         TogglePlacement::Split => {
-            herdr::Spot::Split { target: attach()?, direction: config.toggle_direction().as_str() }
+            herdr::Spot::Split { target: attach()?, direction: config.toggle_direction() }
         }
         TogglePlacement::Zoomed => herdr::Spot::Zoomed { target: attach()? },
         TogglePlacement::Tab => herdr::Spot::Tab { workspace: ws },

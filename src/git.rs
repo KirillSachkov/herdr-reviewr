@@ -2139,7 +2139,7 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
     (rows, rest)
 }
 
-/// Each blob's size by id, asked once per session.
+/// Each blob's size by id, asked once while the cache holds it.
 fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
     static KNOWN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Mutex::default);
@@ -2153,6 +2153,10 @@ fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
         let args = ["cat-file", "--batch-check=%(objectname) %(objectsize)"];
         let out = git_stdin(repo, &args, &input)?;
         let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        // A turn's snapshots mint new blobs every poll, so the cache stays bounded.
+        if known.len() >= 100_000 {
+            known.clear();
+        }
         for (oid, size) in out.lines().filter_map(|line| line.split_once(' ')) {
             if let Ok(size) = size.parse() {
                 known.insert(oid.to_string(), size);

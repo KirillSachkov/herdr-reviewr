@@ -94,8 +94,9 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
             head: None,
         });
     }
-    let ScopeBuild { branch_base, pick_status, ends, changed } = build_changed(input)?;
+    // One read of HEAD serves the snapshot and the uncommitted diff's old end.
     let head = git::head_oid(&input.repo);
+    let ScopeBuild { branch_base, pick_status, ends, changed } = scope_build(input, head.clone())?;
     let changed_map = annotate(&changed);
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
@@ -108,6 +109,11 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
 
 /// The active scope's changeset and, on `branch`, its base.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
+    scope_build(input, git::head_oid(&input.repo))
+}
+
+/// [`build_changed`] against `head`, as the caller read it.
+fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
     let plain = |changed| ScopeBuild {
         branch_base: git::BaseStatus::default(),
         pick_status: None,
@@ -128,7 +134,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             None => Ok(plain(Vec::new())),
         },
         Scope::Uncommitted => {
-            let base = git::diff_base(&input.repo);
+            let base = head.unwrap_or_else(|| git::EMPTY_TREE.to_string());
             let changed = git::changed_from(&input.repo, &base)?;
             Ok(ScopeBuild { ends: Some(DiffEnds { old: base, new: None }), ..plain(changed) })
         }

@@ -283,7 +283,7 @@ pub(crate) struct OpenedPane {
 /// Where `plugin pane open` puts a pane, with what that placement needs.
 #[derive(Debug)]
 pub(crate) enum Spot<'a> {
-    Split { target: &'a str, direction: &'a str },
+    Split { target: &'a str, direction: crate::config::ToggleDirection },
     Zoomed { target: &'a str },
     Tab { workspace: &'a str },
     Overlay,
@@ -317,7 +317,7 @@ pub(crate) fn open_plugin_pane(open: &PaneOpen) -> Result<OpenedPane, HerdrError
                 "--target-pane",
                 target,
                 "--direction",
-                direction,
+                direction.as_str(),
             ]);
         }
         Spot::Zoomed { target } => args.extend(["--placement", "zoomed", "--target-pane", target]),
