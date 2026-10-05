@@ -20,7 +20,8 @@ fn main() -> ExitCode {
     let line = args.join(" ");
     let mut log =
         fs::OpenOptions::new().create(true).append(true).open(dir.join("herdr.log")).unwrap();
-    writeln!(log, "{line}").unwrap();
+    // One append write per call, so concurrent calls never interleave a line.
+    log.write_all(format!("{line}\n").as_bytes()).unwrap();
     drop(log);
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

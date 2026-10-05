@@ -68,6 +68,11 @@ pub(crate) fn var(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+/// A herdr path variable, which need not be UTF-8; unset or empty alike.
+pub(crate) fn var_os(name: &str) -> Option<OsString> {
+    env::var_os(name).filter(|value| !value.is_empty())
+}
+
 /// The plugin id herdr runs this as, else the published one.
 pub(crate) fn plugin_id() -> String {
     var("HERDR_PLUGIN_ID").unwrap_or_else(|| PLUGIN_ID.to_owned())
@@ -191,11 +196,6 @@ fn error_code(stderr: &str) -> Option<String> {
         .lines()
         .find_map(|line| serde_json::from_str::<Envelope>(line.trim()).ok())
         .map(|envelope| envelope.error.code)
-}
-
-/// [`call`] for the review UI, where any failure is just a failure.
-fn herdr(args: &[&str]) -> Result<String> {
-    Ok(call(args)?)
 }
 
 /// The `result` of a herdr JSON answer as `T`, else [`HerdrError::Unreadable`].
@@ -356,37 +356,33 @@ const ANSWER_BOUND: Duration = Duration::from_secs(2);
 const SIGNAL_DELAY: Duration = Duration::from_millis(150);
 
 /// Run a herdr subcommand on its own thread; drop the receiver to fire and forget.
-fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String>> {
+fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String, HerdrError>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let _ = tx.send(herdr(&refs));
+        let _ = tx.send(call(&refs));
     });
     rx
 }
 
 /// Stamp our pane's `reviewr` label unless the user named it; best effort, never waited on.
 pub fn label_pane() {
-    let (Some(ws), Some(pane)) = (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID")) else {
-        return;
-    };
+    let (Some(ws), Some(pane)) = agent_env() else { return };
     thread::spawn(move || {
         // An unreadable listing stamps anyway: the rename fails too, and both log.
         if current_label(&ws, &pane).is_none() {
-            let _ = herdr(&["pane", "rename", &pane, LABEL]);
+            let _ = call(&["pane", "rename", &pane, LABEL]);
         }
     });
 }
 
 /// Clear our `reviewr` label on exit, waiting at most a bound.
 pub fn clear_pane_label() {
-    let (Some(ws), Some(pane)) = (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID")) else {
-        return;
-    };
+    let (Some(ws), Some(pane)) = agent_env() else { return };
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         if current_label(&ws, &pane).as_deref() == Some(LABEL) {
-            let _ = herdr(&["pane", "rename", &pane, "--clear"]);
+            let _ = call(&["pane", "rename", &pane, "--clear"]);
         }
         let _ = tx.send(());
     });
@@ -429,21 +425,14 @@ fn agent_env() -> (Option<String>, Option<String>) {
 }
 
 /// The agents herdr lists: the one `agent list` call.
-fn agent_list() -> Result<Vec<AgentPane>> {
-    parse_agents(&herdr(&["agent", "list"])?)
+fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
+    parse_agents(&call(&["agent", "list"])?)
 }
 
 /// What `Send` does: one agent sends, several open the picker, none refuses.
 pub fn send_target() -> Result<SendTarget> {
     let (ws, me) = agent_env();
-    let agents = match agent_list() {
-        Ok(agents) => agents,
-        Err(e) => {
-            // The status line names the clipboard; the cause is in the log.
-            logln!("agent list failed: {e:#}");
-            return Err(HerdrError::Unanswered.into());
-        }
-    };
+    let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
@@ -502,7 +491,7 @@ impl AgentPane {
 /// Tab id to label for one workspace; best effort, never failing the send.
 fn tab_labels(ws: Option<&str>) -> HashMap<String, String> {
     let Some(ws) = ws else { return HashMap::new() };
-    let Ok(json) = herdr(&["tab", "list", "--workspace", ws]) else {
+    let Ok(json) = call(&["tab", "list", "--workspace", ws]) else {
         return HashMap::new();
     };
     parse_tab_labels(&json).unwrap_or_default()
@@ -531,8 +520,8 @@ struct TabInfo {
 }
 
 /// The documented `result.agents` array from `herdr agent list`.
-fn parse_agents(json: &str) -> Result<Vec<AgentPane>> {
-    Ok(answer::<AgentList>(json).context("parsing agent list")?.agents)
+fn parse_agents(json: &str) -> Result<Vec<AgentPane>, HerdrError> {
+    answer::<AgentList>(json).map(|list| list.agents)
 }
 
 /// One agent as turn tracking sees it; membership is the caller's to decide.
@@ -544,8 +533,7 @@ pub struct AgentSample {
 
 /// Every agent but our pane, any workspace; `Err` is a failed enumeration, never "no agents".
 pub fn agent_samples() -> Result<Vec<AgentSample>> {
-    let (_, me) = agent_env();
-    Ok(samples_of(agent_list()?, me.as_deref()))
+    Ok(samples_of(agent_list()?, var("HERDR_PANE_ID").as_deref()))
 }
 
 /// The sampling rule: real agents other than our own pane.
@@ -583,21 +571,14 @@ enum Readiness {
 }
 
 /// Refuse a send to an agent at a prompt, read fresh; herdr offers no atomic send-if-ready.
-fn ensure_ready(pane: &str) -> Result<()> {
-    let agents = match agent_list() {
-        Ok(agents) => agents,
-        Err(e) => {
-            logln!("agent list failed before the send: {e:#}");
-            return Err(HerdrError::Unanswered.into());
-        }
-    };
-    match readiness_in(&agents, pane) {
+fn ensure_ready(pane: &str) -> Result<(), HerdrError> {
+    match readiness_in(&agent_list()?, pane) {
         Readiness::Ready => Ok(()),
-        Readiness::Busy(name) => Err(HerdrError::AtPrompt(name).into()),
+        Readiness::Busy(name) => Err(HerdrError::AtPrompt(name)),
         // Gone from the agent list is the same verdict herdr's own send would return.
         Readiness::Gone => {
             logln!("agent pane {pane} is gone");
-            Err(HerdrError::PaneGone.into())
+            Err(HerdrError::PaneGone)
         }
     }
 }
@@ -619,7 +600,8 @@ const SEND_BOUND: Duration = Duration::from_secs(5).saturating_add(ANSWER_BOUND)
 
 /// Paste literal text into the agent pane's input, unsubmitted, in one socket request.
 pub fn send_text(pane: &str, text: &str) -> Result<()> {
-    let Some(socket) = env::var_os("HERDR_SOCKET_PATH") else {
+    let Some(socket) = var_os("HERDR_SOCKET_PATH") else {
+        logln!("no HERDR_SOCKET_PATH to send through");
         return Err(HerdrError::Unanswered.into());
     };
     let request = serde_json::json!({
@@ -743,9 +725,8 @@ fn pasted(text: &str) -> String {
 }
 
 /// Focus the agent pane so the reviewer can add context and submit.
-pub fn focus(pane: &str) -> Result<()> {
-    herdr(&["agent", "focus", pane])?;
-    Ok(())
+pub fn focus(pane: &str) -> Result<(), HerdrError> {
+    call(&["agent", "focus", pane]).map(drop)
 }
 
 #[cfg(test)]

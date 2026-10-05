@@ -171,10 +171,10 @@ const LOCK_POLL: Duration = Duration::from_millis(20);
 
 /// Workspace `ws`'s action lock, waited for up to [`LOCK_BOUND`].
 fn action_lock(ws: &str) -> Result<File, Stop> {
-    let Some(dir) = env::var_os("HERDR_PLUGIN_STATE_DIR").filter(|dir| !dir.is_empty()) else {
+    let Some(dir) = herdr::var_os("HERDR_PLUGIN_STATE_DIR") else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
-    // Hex, so ids that differ only in case never share a lock file.
+    // Hex, so any id is a safe file name on every OS.
     let name = hex::encode(ws);
     let path = Path::new(&dir).join(format!("action-{name}.lock"));
     let unusable = |error| refused(format!("cannot lock {}: {error}", path.display()));
@@ -414,19 +414,17 @@ fn wait_until_visible(pane: &str) -> Result<(), HerdrError> {
 fn repoint_launch_links() {
     use std::os::unix::fs::PermissionsExt;
 
-    let (Some(root), Some(home)) = (env::var_os("HERDR_PLUGIN_ROOT"), dirs::home_dir()) else {
+    let (Some(root), Some(home)) = (herdr::var_os("HERDR_PLUGIN_ROOT"), dirs::home_dir()) else {
         return;
     };
-    if root.is_empty() {
-        return;
-    }
     let binary = Path::new(&root).join("bin").join(BINARY);
     let executable = std::fs::metadata(&binary)
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
     if !executable {
         return;
     }
-    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::plugin_id()).join("bin");
+    // The installer's own path, which it writes without herdr's environment.
+    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::PLUGIN_ID).join("bin");
     let local_bin = home.join(".local/bin");
     // `~/.local/bin` only when it already exists: reviewr never creates a PATH directory.
     let dirs = [Some(state_bin), local_bin.is_dir().then_some(local_bin)];

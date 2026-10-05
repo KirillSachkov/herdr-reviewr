@@ -33,8 +33,23 @@ pub trait ExportTarget {
     fn label(&self) -> &'static str;
     /// Destination-specific confirmation shown after a successful export.
     fn success_message(&self, count: usize) -> String;
-    /// The status after a failed export: one short sentence; the cause goes to the log.
-    fn failure_message(&self, error: &anyhow::Error) -> String;
+    /// The status after a failed export, `copy` naming the copy key; the cause goes to the log.
+    fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String;
+}
+
+/// The status for a failed send to `agent`: the cause first, since a narrow pane keeps only the
+/// line's start, then the way out.
+pub fn send_failure(error: &anyhow::Error, agent: Option<&str>, copy: &str) -> String {
+    use herdr::HerdrError as E;
+    let cause = match error.downcast_ref::<E>() {
+        Some(E::AtPrompt(name)) => return format!("answer {name}'s prompt first"),
+        Some(E::PaneGone) => format!("{} closed", agent.unwrap_or("the agent")),
+        Some(E::NoAgent) => "no agent in this workspace".to_string(),
+        Some(E::TooLarge) => "review too large to send".to_string(),
+        Some(E::Unanswered) => "herdr didn't answer".to_string(),
+        Some(E::Refused(_) | E::Unreadable) | None => "herdr refused the send".to_string(),
+    };
+    format!("{cause}, press {copy} to copy")
 }
 
 pub(crate) fn counted_comments(count: usize) -> String {
@@ -55,7 +70,7 @@ impl ExportTarget for Clipboard {
         format!("copied {}", counted_comments(count))
     }
 
-    fn failure_message(&self, error: &anyhow::Error) -> String {
+    fn failure_message(&self, error: &anyhow::Error, _copy: &str) -> String {
         match clipboard::remedy(error) {
             Some(remedy) => format!("copy failed: {remedy}"),
             None => "copy failed".to_string(),
@@ -164,13 +179,8 @@ impl ExportTarget for Agent {
         format!("sent {} to {}", counted_comments(count), self.name)
     }
 
-    /// A pane that closed says so; any other refusal says herdr refused.
-    fn failure_message(&self, error: &anyhow::Error) -> String {
-        if matches!(error.downcast_ref(), Some(herdr::HerdrError::PaneGone)) {
-            format!("{} closed", self.name)
-        } else {
-            "herdr refused the send".to_string()
-        }
+    fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String {
+        send_failure(error, Some(&self.name), copy)
     }
 
     /// An agent at a prompt refuses: the picker's rows can be minutes old.
@@ -184,7 +194,7 @@ impl ExportTarget for Agent {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment};
+    use super::{Agent, Clipboard, ExportTarget, format_all, format_comment, send_failure};
     use crate::model::{Comment, Side};
 
     #[cfg(not(windows))]
@@ -217,27 +227,35 @@ mod tests {
 
     #[test]
     fn a_failed_send_or_copy_says_what_to_do() {
+        use crate::herdr::HerdrError as E;
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
-        let gone = anyhow::Error::from(crate::herdr::HerdrError::PaneGone);
-        assert_eq!(agent.failure_message(&gone), "release-bot closed");
-        // Any other refusal never claims the agent closed.
-        for other in [
-            crate::herdr::HerdrError::Refused(Some("internal".into())),
-            crate::herdr::HerdrError::Refused(None),
-            crate::herdr::HerdrError::Unreadable,
-        ] {
-            let other = anyhow::Error::from(other);
-            assert_eq!(agent.failure_message(&other), "herdr refused the send", "{other}");
+        let rows = [
+            (E::PaneGone, "release-bot closed, press y to copy"),
+            (E::AtPrompt("codex".into()), "answer codex's prompt first"),
+            (E::NoAgent, "no agent in this workspace, press y to copy"),
+            (E::TooLarge, "review too large to send, press y to copy"),
+            (E::Unanswered, "herdr didn't answer, press y to copy"),
+            // Any other refusal never claims the agent closed.
+            (E::Refused(Some("internal".into())), "herdr refused the send, press y to copy"),
+            (E::Refused(None), "herdr refused the send, press y to copy"),
+            (E::Unreadable, "herdr refused the send, press y to copy"),
+        ];
+        for (error, line) in rows {
+            let error = anyhow::Error::from(error);
+            assert_eq!(agent.failure_message(&error, "y"), line, "{error}");
         }
+        // Before any agent is chosen, a gone pane names no one.
+        let gone = anyhow::Error::from(E::PaneGone);
+        assert_eq!(send_failure(&gone, None, "y"), "the agent closed, press y to copy");
         #[cfg(not(windows))]
         {
             let missing = anyhow::Error::from(super::clipboard::NoTool);
             assert_eq!(
-                Clipboard.failure_message(&missing),
+                Clipboard.failure_message(&missing, "y"),
                 "copy failed: install wl-clipboard, xclip, or xsel"
             );
             assert_eq!(
-                Clipboard.failure_message(&anyhow::anyhow!("pbcopy exited non-zero")),
+                Clipboard.failure_message(&anyhow::anyhow!("pbcopy exited non-zero"), "y"),
                 "copy failed"
             );
         }
@@ -246,7 +264,7 @@ mod tests {
         {
             let busy = anyhow::Error::from(arboard::Error::ClipboardOccupied)
                 .context("writing the Windows clipboard");
-            assert_eq!(Clipboard.failure_message(&busy), "copy failed");
+            assert_eq!(Clipboard.failure_message(&busy, "y"), "copy failed");
         }
     }
 

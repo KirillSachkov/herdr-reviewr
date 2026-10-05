@@ -47,7 +47,7 @@ impl ExportTarget for FakeTarget {
         let noun = if count == 1 { "comment" } else { "comments" };
         format!("exported {count} {noun}")
     }
-    fn failure_message(&self, _error: &anyhow::Error) -> String {
+    fn failure_message(&self, _error: &anyhow::Error, _copy: &str) -> String {
         "fake not found".to_string()
     }
     fn export(&self, text: &str) -> Result<()> {
@@ -6265,7 +6265,7 @@ impl ExportTarget for SelClipboard {
     fn success_message(&self, count: usize) -> String {
         format!("copied {count}")
     }
-    fn failure_message(&self, _error: &anyhow::Error) -> String {
+    fn failure_message(&self, _error: &anyhow::Error, _copy: &str) -> String {
         "clipboard failed".to_string()
     }
     fn export(&self, text: &str) -> Result<()> {

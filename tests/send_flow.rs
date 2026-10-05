@@ -236,7 +236,7 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     assert_eq!(app.mode, Mode::Normal, "the picker closes whatever the outcome");
     assert_eq!(app.store.len(), 1, "a failed send keeps every comment");
     // One short sentence, never herdr's JSON envelope.
-    assert_eq!(app.status, "claude closed");
+    assert_eq!(app.status, "claude closed, press y to copy");
     assert_eq!(app.last_sent_pane, None, "a failed send arms nothing");
     socket.reply(Reply::Result);
 
@@ -322,8 +322,8 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     assert_eq!(app.mode, Mode::Normal, "a failed enumeration opens no picker");
     assert_eq!(app.store.len(), 1, "a refusal keeps every comment");
-    // A failed enumeration says so, never a count.
-    assert_eq!(app.status, "herdr didn't answer, press y to copy");
+    // A refused enumeration says herdr refused, never a count.
+    assert_eq!(app.status, "herdr refused the send, press y to copy");
 
     // The sole agent at a prompt is refused the same way.
     agent_list_fails(&fake_dir, false);
@@ -340,16 +340,16 @@ fn send_dispatches_one_agent_directly_and_several_through_the_picker() {
     let sends = socket.requests().len();
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.store.len(), 1, "a gone agent keeps every comment");
-    assert_eq!(app.status, "codex closed");
+    assert_eq!(app.status, "codex closed, press y to copy");
     assert_eq!(socket.requests().len(), sends, "nothing was pasted");
 
-    // A herdr that stops answering by then says so, rather than claiming the agent is gone.
+    // A herdr that refuses by then says so, rather than claiming the agent is gone.
     agents(&fake_dir, TWO_AGENTS);
     press(&mut app, KeyCode::Char('s'), area, &keymap);
     agent_list_fails(&fake_dir, true);
     press(&mut app, KeyCode::Enter, area, &keymap);
     assert_eq!(app.store.len(), 1);
-    assert_eq!(app.status, "herdr didn't answer, press y to copy");
+    assert_eq!(app.status, "herdr refused the send, press y to copy");
     agent_list_fails(&fake_dir, false);
 
     // The quit question's `s` sends, and the pane stays open.
@@ -390,9 +390,9 @@ fn a_send_consumes_the_comments_only_on_a_result_reply() {
     );
 
     for (reply, status) in [
-        (Reply::PaneGone, "claude closed"),
+        (Reply::PaneGone, "claude closed, press y to copy"),
         // A refusal of herdr's own never claims the agent closed: its pane is still there.
-        (Reply::Internal, "herdr refused the send"),
+        (Reply::Internal, "herdr refused the send, press y to copy"),
         (Reply::Drop, "herdr didn't answer, press y to copy"),
         // Waits out the whole send bound, past herdr's own read deadline.
         (Reply::Hang, "herdr didn't answer, press y to copy"),

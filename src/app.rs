@@ -3105,7 +3105,7 @@ impl App {
             Ok(()) => self.status = crate::selection::copied_status(text),
             Err(e) => {
                 crate::logln!("selection copy failed: {e:#}");
-                self.status = target.failure_message(&e);
+                self.status = target.failure_message(&e, &self.copy_key());
             }
         }
     }
@@ -4342,31 +4342,13 @@ impl App {
         match herdr::send_target() {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
-            Err(e) => self.status = self.failure_line(&e, ToString::to_string),
+            Err(e) => self.status = crate::export::send_failure(&e, None, &self.copy_key()),
         }
     }
 
-    /// The status for a failed send or copy: the cause first, since a narrow pane keeps only the
-    /// line's start, then the way out; else the target's own line.
-    fn failure_line(
-        &self,
-        error: &anyhow::Error,
-        other: impl Fn(&anyhow::Error) -> String,
-    ) -> String {
-        let copy = self.keymap().hint(crate::keymap::Action::Copy).label();
-        match error.downcast_ref::<herdr::HerdrError>() {
-            Some(herdr::HerdrError::AtPrompt(name)) => format!("answer {name}'s prompt first"),
-            Some(herdr::HerdrError::Unanswered) => {
-                format!("herdr didn't answer, press {copy} to copy")
-            }
-            Some(herdr::HerdrError::NoAgent) => {
-                format!("no agent in this workspace, press {copy} to copy")
-            }
-            Some(herdr::HerdrError::TooLarge) => {
-                format!("review too large to send, press {copy} to copy")
-            }
-            _ => other(error),
-        }
+    /// The copy key as its hint shows it, the way out of a failed send.
+    fn copy_key(&self) -> String {
+        self.keymap().hint(crate::keymap::Action::Copy).label()
     }
 
     /// Open the agent picker over `rows`, armed on the last-sent agent.
@@ -4707,7 +4689,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.status = self.failure_line(&e, |e| target.failure_message(e));
+                self.status = target.failure_message(&e, &self.copy_key());
                 logln!("export ERR: {e:#}");
                 false
             }
