@@ -1518,16 +1518,28 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 /// The worktree as a tree object, via `add -A` on a private [`IndexCopy`].
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // A fresh copy each time: `add -A` stages into it, and a killed git leaves its lock behind.
-    let mut index = IndexCopy::new()?;
-    index.seed(&git_dir(repo)?.join("index"))?;
+    let index = IndexCopy::new(repo)?;
+    // Seeded from the session copy, refreshed, so `add -A` hashes only what really changed.
+    IndexCopy::with(repo, |session| {
+        session.git(repo, &["update-index", "-q", "--refresh"])?;
+        if session.path().exists() {
+            std::fs::copy(session.path(), index.path()).context("seeding the snapshot index")?;
+        }
+        Ok(())
+    })?;
     index.git(repo, &["add", "-A"])?;
     Ok(index.git(repo, &["write-tree"])?.trim().to_string())
 }
 
-/// The prefix of every index copy's directory in the OS temp dir.
-const COPY_PREFIX: &str = "reviewr-index-";
+/// The prefix of every index copy's directory under [`copies_dir`].
+const COPY_PREFIX: &str = "index-";
 
-/// A private index copy in the OS temp dir, never the real index; its `lock` marks it live.
+/// Where `repo`'s index copies live: its own git dir, on disk beside the index they copy.
+fn copies_dir(repo: &Path) -> Result<PathBuf> {
+    Ok(git_dir(repo)?.join("reviewr"))
+}
+
+/// A private index copy under the git dir, never the real index; its `lock` marks it live.
 struct IndexCopy {
     /// The lock that marks this copy live, released on drop (before the dir) or with the process.
     _live: std::fs::File,
@@ -1557,18 +1569,20 @@ impl IndexCopy {
             kept
         });
         if kept.is_none() {
-            *kept = Some(Self::new()?);
+            *kept = Some(Self::new(repo)?);
         }
         let copy = kept.as_mut().expect("filled above");
         copy.seed(&real)?;
         f(copy)
     }
 
-    /// A new, empty copy.
-    fn new() -> Result<Self> {
+    /// A new, empty copy of `repo`'s index.
+    fn new(repo: &Path) -> Result<Self> {
+        let home = copies_dir(repo)?;
+        std::fs::create_dir_all(&home).context("creating the index copies' dir")?;
         let dir = tempfile::Builder::new()
             .prefix(COPY_PREFIX)
-            .tempdir()
+            .tempdir_in(home)
             .context("creating the index copy")?;
         // Locked before it is named `lock`, so a sweep never takes a live copy.
         let pending = dir.path().join("lock.new");
@@ -1629,9 +1643,11 @@ struct Stamp {
     tail: Vec<u8>,
 }
 
-/// Remove copies whose `lock` is free, or that never got one within an hour: their process died.
-pub fn sweep_dead_copies() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+/// Remove `repo`'s copies whose `lock` is free, or that never got one within an hour: their
+/// process died.
+pub fn sweep_dead_copies(repo: &Path) {
+    let Ok(home) = copies_dir(repo) else { return };
+    let Ok(entries) = std::fs::read_dir(home) else { return };
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().starts_with(COPY_PREFIX) {
             continue;

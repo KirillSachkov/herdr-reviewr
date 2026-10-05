@@ -1000,19 +1000,52 @@ fn an_untracked_file_past_the_big_file_threshold_is_binary() {
 /// A copy a killed process left behind holds no lock, and the sweep removes it; a live one stays.
 #[test]
 fn a_dead_processs_index_copy_is_swept() {
-    let dead = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap().keep();
+    let r = Repo::init();
+    let home = r.path().join(".git/reviewr");
+    std::fs::create_dir_all(&home).unwrap();
+    let copy = || tempfile::Builder::new().prefix("index-").tempdir_in(&home).unwrap();
+    let dead = copy().keep();
     std::fs::write(dead.join("lock"), "").unwrap();
     std::fs::write(dead.join("index"), "stale").unwrap();
-    let live = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap();
+    let live = copy();
     let held = std::fs::File::create(live.path().join("lock")).unwrap();
     held.lock().unwrap();
     // A copy still being made has no lock yet, and is young.
-    let making = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap();
+    let making = copy();
     std::fs::write(making.path().join("index"), "seeding").unwrap();
-    herdr_reviewr::git::sweep_dead_copies();
+    herdr_reviewr::git::sweep_dead_copies(r.path());
     assert!(!dead.exists(), "{} survived", dead.display());
     assert!(live.path().exists(), "a live copy was swept");
     assert!(making.path().exists(), "a copy being made was swept");
+}
+
+#[test]
+fn index_copies_live_in_the_git_dir_and_a_seeded_snapshot_is_the_worktree() {
+    let r = Repo::init();
+    r.write("a.txt", "one\n");
+    r.write("b.txt", "same\n");
+    r.commit_all("init");
+    changed_from(r.path(), "HEAD").unwrap();
+    // Touched without a change, then one file edited and one added.
+    std::fs::File::options()
+        .write(true)
+        .open(r.path().join("b.txt"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+        .unwrap();
+    r.write("a.txt", "two\n");
+    r.write("c.txt", "new\n");
+    let snapshot = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+
+    let home = r.path().join(".git/reviewr");
+    let copies = std::fs::read_dir(&home).unwrap().flatten();
+    assert!(copies.into_iter().any(|e| e.file_name().to_string_lossy().starts_with("index-")));
+    // git's own tree of the same worktree, from a throwaway index.
+    let scratch = tempfile::tempdir().unwrap();
+    let own = scratch.path().join("index");
+    let env = [("GIT_INDEX_FILE", own.to_str().unwrap())];
+    r.git_env(&["add", "-A"], &env);
+    assert_eq!(snapshot, r.git_env(&["write-tree"], &env).trim());
 }
 
 #[test]
@@ -1584,12 +1617,15 @@ fn reading_a_touched_file_never_rewrites_the_index() {
     snapshot_worktree(r.path()).unwrap();
 
     assert_eq!(stamp(), before, ".git/index was rewritten");
+    // reviewr's only files in .git are its index copies, in their own dir.
     let ours: Vec<_> = std::fs::read_dir(r.path().join(".git"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("reviewr"))
         .collect();
-    assert!(ours.is_empty(), "reviewr left {ours:?} in .git");
+    assert_eq!(ours, ["reviewr"], "reviewr left {ours:?} in .git");
+    let copies = std::fs::read_dir(r.path().join(".git/reviewr")).unwrap().flatten();
+    assert!(copies.into_iter().all(|e| e.file_name().to_string_lossy().starts_with("index-")));
 }
 
 /// A file ignored since the last snapshot leaves the next one: `add -A` never unstages.
