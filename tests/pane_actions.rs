@@ -3,11 +3,11 @@
 mod common;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{fake_herdr, fixture, herdr_calls, herdr_error};
+use common::{Repo, fake_herdr, fixture, herdr_calls, herdr_error};
 use serde_json::{Value, json};
 
 fn reviewr_bin() -> &'static str {
@@ -52,21 +52,6 @@ fn reset(dir: &Path) {
 }
 
 /// A fresh git repo at `dir/name`.
-fn init_repo(dir: &Path, name: &str) -> PathBuf {
-    let repo = dir.join(name);
-    fs::create_dir(&repo).unwrap();
-    assert!(
-        Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["init", "-q", "-b", "main"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    repo
-}
-
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -277,9 +262,10 @@ fn auto_open_opened_live_exits_before_herdr_calls() {
 #[test]
 fn auto_open_birth_events_follow_shared_policy() {
     let dir = tempfile::tempdir().unwrap();
-    let live_repo = init_repo(dir.path(), "live-repo");
-    pane_with_cwd(dir.path(), "w1:p1", &live_repo);
-    let context = json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": live_repo}).to_string();
+    let live_repo = Repo::init();
+    pane_with_cwd(dir.path(), "w1:p1", live_repo.path());
+    let context =
+        json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": live_repo.path()}).to_string();
 
     for (event_name, already_open) in [("worktree_created", None), ("worktree_opened", Some(false))]
     {
@@ -307,7 +293,7 @@ fn auto_open_birth_events_follow_shared_policy() {
             assert!(!tokens.contains(&"--focus"), "{open}");
             assert!(open.contains(&format!("--cwd {}", env!("CARGO_MANIFEST_DIR"))), "{open}");
             assert!(open.contains(&format!("--placement {placement}")), "{open}");
-            assert!(!open.contains(live_repo.to_str().unwrap()), "{open}");
+            assert!(!open.contains(live_repo.path().to_str().unwrap()), "{open}");
         }
     }
 }
@@ -1326,8 +1312,9 @@ fn open_prefers_the_focused_panes_live_foreground_cwd() {
 fn open_prefers_the_live_cwd_when_the_launch_cwd_is_also_a_repo() {
     let dir = tempfile::tempdir().unwrap();
     // The launch cwd is a repo too, so only a live-cwd read picks the right one.
-    let launch_repo = init_repo(dir.path(), "main-checkout");
-    let context = json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": launch_repo}).to_string();
+    let launch_repo = Repo::init();
+    let context =
+        json!({"focused_pane_id": "w1:p1", "focused_pane_cwd": launch_repo.path()}).to_string();
     pane_with_cwd(dir.path(), "w1:p1", Path::new(env!("CARGO_MANIFEST_DIR")));
 
     let output = run_with_context("open", dir.path(), &context);
@@ -1397,11 +1384,11 @@ fn a_toggle_open_falls_back_when_the_live_cwd_is_not_a_repo() {
 fn open_takes_the_focused_panes_cwd_not_another_panes() {
     let dir = tempfile::tempdir().unwrap();
     // The lookup keys on the focused pane's id, not the first entry.
-    let decoy_repo = init_repo(dir.path(), "decoy-repo");
+    let decoy_repo = Repo::init();
     panes(
         dir.path(),
         &json!([
-            {"pane_id": "w1:p0", "foreground_cwd": decoy_repo},
+            {"pane_id": "w1:p0", "foreground_cwd": decoy_repo.path()},
             {"pane_id": "w1:p1", "foreground_cwd": env!("CARGO_MANIFEST_DIR")},
         ]),
     );
