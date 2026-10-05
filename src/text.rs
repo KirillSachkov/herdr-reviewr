@@ -15,7 +15,6 @@ pub(crate) fn line_body(line: &str) -> (&str, bool) {
 }
 
 /// `\n` as CRLF, an existing CRLF kept, a lone CR passed through.
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn crlf_line_breaks(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\n', "\r\n")
 }

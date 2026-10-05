@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use crate::logln;
 use crate::turn::Status;
-use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -491,9 +490,8 @@ fn tab_labels(ws: Option<&str>) -> HashMap<String, String> {
 }
 
 /// `herdr tab list`'s labelled tabs, as tab id → label.
-fn parse_tab_labels(json: &str) -> Result<HashMap<String, String>> {
-    Ok(answer::<TabList>(json)
-        .context("parsing tab list")?
+fn parse_tab_labels(json: &str) -> Result<HashMap<String, String>, HerdrError> {
+    Ok(answer::<TabList>(json)?
         .tabs
         .into_iter()
         .filter_map(|tab| tab.label.map(|label| (tab.tab_id, label)))
@@ -525,8 +523,9 @@ pub struct AgentSample {
 }
 
 /// Every agent but our pane, any workspace; `Err` is a failed enumeration, never "no agents".
-pub fn agent_samples() -> Result<Vec<AgentSample>> {
-    Ok(samples_of(agent_list()?, var("HERDR_PANE_ID").as_deref()))
+pub fn agent_samples() -> Result<Vec<AgentSample>, HerdrError> {
+    let (_, me) = agent_env();
+    Ok(samples_of(agent_list()?, me.as_deref()))
 }
 
 /// The sampling rule: real agents other than our own pane.
@@ -688,13 +687,8 @@ const PASTE_END: &str = "\x1b[201~";
 /// The batch as one bracketed paste, line breaks as herdr's own paste encodes them on this OS,
 /// every inner terminator stripped in one pass.
 fn pasted(text: &str) -> String {
-    let crlf;
-    let text = if cfg!(windows) {
-        crlf = crate::text::crlf_line_breaks(text);
-        crlf.as_str()
-    } else {
-        text
-    };
+    let text: std::borrow::Cow<'_, str> =
+        if cfg!(windows) { crate::text::crlf_line_breaks(text).into() } else { text.into() };
     let mut body = String::with_capacity(text.len());
     for ch in text.chars() {
         body.push(ch);

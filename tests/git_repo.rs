@@ -1066,10 +1066,14 @@ fn a_turn_snapshot_holds_through_a_merge_conflict() {
         .args(["merge", "-q", "side"])
         .output();
     changed_from(r.path(), "HEAD").unwrap();
-    assert!(
-        herdr_reviewr::git::snapshot_worktree(r.path()).is_ok(),
-        "an agent mid-merge stops turn tracking"
-    );
+    let snapshot = herdr_reviewr::git::snapshot_worktree(r.path());
+    let snapshot = snapshot.expect("an agent mid-merge stops turn tracking");
+    // The tree holds the worktree's conflict-marked file, as git's own `add -A` records it.
+    let scratch = tempfile::tempdir().unwrap();
+    let own = scratch.path().join("index");
+    let env = [("GIT_INDEX_FILE", own.to_str().unwrap())];
+    r.git_env(&["add", "-A"], &env);
+    assert_eq!(snapshot, r.git_env(&["write-tree"], &env).trim());
 }
 
 #[test]

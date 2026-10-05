@@ -253,8 +253,9 @@ fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
     let ids: Vec<&str> = panes.panes.iter().map(|entry| entry.pane_id.as_str()).collect();
     let mut existing = Vec::new();
     for (pane, probe) in per_pane(&ids, runs_review_ui) {
-        // A probe that failed, never ran, or panicked never settled, so the sweep refuses.
-        if probe?.ok()? == Some(true) {
+        // A probe that failed, never ran, or panicked never settled, so the sweep refuses; a pane
+        // gone since the list counts as closed.
+        if probe?.ok()? == PaneRun::Review {
             existing.push(pane);
         }
     }
@@ -278,11 +279,21 @@ fn per_pane<'p, R: Send>(
     })
 }
 
-/// Whether pane `pane` runs the review UI; a pane gone since the list counts as closed.
-fn runs_review_ui(pane: &str) -> Result<Option<bool>, HerdrError> {
+/// What a pane runs, as one probe reads it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PaneRun {
+    Review,
+    Other,
+    /// Gone since the list.
+    Gone,
+}
+
+/// What pane `pane` runs now.
+fn runs_review_ui(pane: &str) -> Result<PaneRun, HerdrError> {
     match ProcessInfo::of(pane) {
-        Ok(info) => Ok(Some(info.foreground_processes.iter().any(is_review_ui))),
-        Err(HerdrError::PaneGone) => Ok(None),
+        Ok(info) if info.foreground_processes.iter().any(is_review_ui) => Ok(PaneRun::Review),
+        Ok(_) => Ok(PaneRun::Other),
+        Err(HerdrError::PaneGone) => Ok(PaneRun::Gone),
         Err(error) => Err(error),
     }
 }
@@ -398,8 +409,8 @@ fn launch(pane: &str) -> Launch {
     let deadline = Instant::now() + VISIBLE_BOUND;
     loop {
         match runs_review_ui(pane) {
-            Ok(Some(true)) => return Launch::Running,
-            Ok(None) => return Launch::Exited,
+            Ok(PaneRun::Review) => return Launch::Running,
+            Ok(PaneRun::Gone) => return Launch::Exited,
             _ => {}
         }
         if Instant::now() >= deadline {

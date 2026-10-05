@@ -17,6 +17,6 @@ exec qemu-system-aarch64 \
   -drive if=none,id=winiso,media=cdrom,readonly=on,file=Win11_arm64.iso -device usb-storage,drive=winiso \
   -drive if=none,id=answer,media=cdrom,readonly=on,file=answer.iso -device usb-storage,drive=answer \
   -nic user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:2222-:22 \
-  -display none -vnc 127.0.0.1:5 \
+  -object secret,id=vncpw,data=reviewr -display none -vnc 127.0.0.1:5,password-secret=vncpw \
   -monitor unix:monitor.sock,server,nowait \
   -daemonize -pidfile qemu.pid

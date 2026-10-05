@@ -100,7 +100,7 @@ a local admin `reviewr` logged in with OpenSSH, Git for Windows, and herdr. The 
 | --- | --- |
 | Start it after a Mac restart | `scripts/windows-vm/run-vm.sh` |
 | Run PowerShell in it | `scripts/windows-vm/vm '<command>'` |
-| Watch the screen | Screen Sharing to `vnc://127.0.0.1:5905` |
+| Watch the screen | Screen Sharing to `vnc://127.0.0.1:5905`, password `reviewr` (loopback only) |
 | Type into the desktop | `scripts/windows-vm/vmkeys.py '<text>' --enter` |
 | Screenshot the desktop | `printf 'screendump /tmp/vm.png -f png\n' \| nc -U ~/VMs/reviewr-windows/monitor.sock` |
 

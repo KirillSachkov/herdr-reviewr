@@ -1267,33 +1267,51 @@ pub fn diff_sides(
     let out = git(repo, &args)?;
     let sections = sections(&out);
     // A pathspec matches below a directory of the same name too, so each side is its own section.
-    let side = |name: &str, new_side: bool| -> Option<Option<DiffSides>> {
+    let side = |name: &str, new_side: bool| -> Side {
         let quoted = quote_path(name);
         let holds = |s: &&Section<'_>| if new_side { s.adds() } else { s.removes() };
-        sections.iter().filter(holds).find(|s| s.names(&quoted)).map(|s| parse_sides(s.body))
+        match sections.iter().filter(holds).find(|s| s.names(&quoted)).map(|s| parse_sides(s.body))
+        {
+            None => Side::Absent,
+            Some(None) => Side::Hunkless,
+            Some(Some(DiffSides::Binary)) => Side::Binary,
+            Some(Some(DiffSides::Text { old, new })) => {
+                Side::Text(if new_side { new } else { old })
+            }
+        }
     };
     // A rename's old side is its source's, never what stands at its path now.
-    let (new_side, old_side) = (side(path, true), side(source.unwrap_or(path), false));
-    if [&new_side, &old_side].iter().any(|s| matches!(s, Some(Some(DiffSides::Binary)))) {
-        return Ok(DiffSides::Binary);
-    }
-    let hunkless = |s: &Option<Option<DiffSides>>| matches!(s, None | Some(None));
-    if source.is_none() && hunkless(&new_side) && hunkless(&old_side) {
+    let (old_side, new_side) = (side(source.unwrap_or(path), false), side(path, true));
+    Ok(match (old_side, new_side, source) {
+        (Side::Binary, _, _) | (_, Side::Binary, _) => DiffSides::Binary,
         // Unchanged, or a change with no hunk (a mode, an empty file): one text both sides.
-        let text = file_content(repo, new.unwrap_or(old), path);
-        return Ok(DiffSides::Text { old: text.clone(), new: text });
-    }
-    let new_text = match new_side {
-        Some(Some(DiffSides::Text { new, .. })) => new,
-        _ => String::new(),
-    };
-    let old_text = match (old_side, source) {
-        (Some(Some(DiffSides::Text { old: text, .. })), _) => text,
-        // A copy's source is unchanged, so git printed nothing for it.
-        (None, Some(source)) => file_content(repo, old, source),
-        _ => String::new(),
-    };
-    Ok(DiffSides::Text { old: old_text, new: new_text })
+        (Side::Absent | Side::Hunkless, Side::Absent | Side::Hunkless, None) => {
+            let text = file_content(repo, new.unwrap_or(old), path);
+            DiffSides::Text { old: text.clone(), new: text }
+        }
+        (old_side, new_side, source) => DiffSides::Text {
+            old: match (old_side, source) {
+                (Side::Text(text), _) => text,
+                // A copy's source is unchanged, so git printed nothing for it.
+                (Side::Absent, Some(source)) => file_content(repo, old, source),
+                _ => String::new(),
+            },
+            new: match new_side {
+                Side::Text(text) => text,
+                _ => String::new(),
+            },
+        },
+    })
+}
+
+/// One side of a file as `git diff` printed it.
+enum Side {
+    /// No section names the file on this side.
+    Absent,
+    /// A section without a hunk: a mode change, or an empty file.
+    Hunkless,
+    Text(String),
+    Binary,
 }
 
 /// One file's section of a `--no-prefix` `git diff`.
@@ -1518,21 +1536,12 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 /// The worktree as a tree object, via `add -A` on a private [`IndexCopy`].
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // A fresh copy each time: `add -A` stages into it, and a killed git leaves its lock behind.
-    let index = IndexCopy::new(repo)?;
+    let mut index = IndexCopy::new(repo)?;
     // Seeded from the session copy, refreshed, so `add -A` hashes only what really changed. The
     // refresh only saves time, so a conflict or a stale lock that fails it is ignored.
     IndexCopy::with(repo, |session| {
         let _ = session.git(repo, &["update-index", "-q", "--unmerged", "--refresh"]);
-        let Ok(modified) = std::fs::metadata(session.path()).and_then(|m| m.modified()) else {
-            return Ok(());
-        };
-        std::fs::copy(session.path(), index.path()).context("seeding the snapshot index")?;
-        // The copy keeps its source's mtime, which git's racy-clean check reads.
-        let _ = std::fs::File::options()
-            .write(true)
-            .open(index.path())
-            .and_then(|f| f.set_modified(modified));
-        Ok(())
+        index.seed(&session.path())
     })?;
     index.git(repo, &["add", "-A"])?;
     Ok(index.git(repo, &["write-tree"])?.trim().to_string())
@@ -1599,7 +1608,7 @@ impl IndexCopy {
         Ok(Self { dir, _live: live, seeded: None })
     }
 
-    /// Copy the real index again if it changed since the last copy.
+    /// Copy the index at `real` again if it changed since the last copy, keeping its mtime.
     fn seed(&mut self, real: &Path) -> Result<()> {
         use std::io::{Read, Seek, SeekFrom};
         let mut from = match std::fs::File::open(real) {
@@ -1699,9 +1708,10 @@ pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
 /// git's well-known empty-tree object, used as the diff base when a repo has no commits.
 pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// `HEAD`'s oid, else the empty tree: the old end of `uncommitted`.
-pub fn diff_base(repo: &Path) -> String {
-    head_oid(repo).unwrap_or_else(|| EMPTY_TREE.to_string())
+/// The old end of `uncommitted`: `head`, the [`head_oid`] read, else the empty tree.
+#[must_use]
+pub fn diff_base(head: Option<String>) -> String {
+    head.unwrap_or_else(|| EMPTY_TREE.to_string())
 }
 
 /// The changeset from `base` to the worktree, untracked files included.
@@ -1968,6 +1978,11 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
         // A failed attribute read costs the verdict, never the whole changeset.
         let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
         let mut buf = vec![0; 64 * 1024];
+        // Counts carry from the last build to this one: exactly the live untracked set.
+        let counts = COUNTS.get_or_init(Mutex::default);
+        let known =
+            counts.lock().unwrap_or_else(PoisonError::into_inner).remove(repo).unwrap_or_default();
+        let mut fresh = Counts::new();
         for path in new_paths {
             let path = path.to_string();
             if !seen.insert(path.clone()) {
@@ -1977,7 +1992,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
             let additions = if undiffable.contains(path.as_str()) {
                 None
             } else {
-                untracked_additions(repo, &path, &mut buf)
+                untracked_additions(repo, &path, &mut buf, &known, &mut fresh)
             };
             let binary = additions.is_none();
             files.push(ChangedFile {
@@ -1991,6 +2006,7 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
                 new_size: None,
             });
         }
+        counts.lock().unwrap_or_else(PoisonError::into_inner).insert(repo.to_path_buf(), fresh);
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2025,9 +2041,18 @@ const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 /// Line counts by file, size, and modification time: what an untracked file held when counted.
 type Counts = HashMap<(PathBuf, u64, Option<std::time::SystemTime>), Option<u32>>;
 
-/// An untracked file's line count, `None` where git would call it binary.
-fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
-    static COUNTS: OnceLock<Mutex<Counts>> = OnceLock::new();
+/// Each repo's counts from its last build.
+static COUNTS: OnceLock<Mutex<HashMap<PathBuf, Counts>>> = OnceLock::new();
+
+/// An untracked file's line count, `None` where git would call it binary; a count `known` from the
+/// last build is reused, and every count read lands in `fresh`.
+fn untracked_additions(
+    repo: &Path,
+    path: &str,
+    buf: &mut [u8],
+    known: &Counts,
+    fresh: &mut Counts,
+) -> Option<u32> {
     let at = repo.join(path);
     // Only a regular file has lines: a link to a device would read without end.
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
@@ -2037,19 +2062,17 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     if meta.len() > BIG_FILE_THRESHOLD {
         return None;
     }
-    // A file unchanged since its last count is not read again; the cache stays bounded.
+    // A file unchanged since its last count is not read again.
     let key = (at.clone(), meta.len(), meta.modified().ok());
-    let counts = COUNTS.get_or_init(Mutex::default);
-    if let Some(&count) = counts.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
-        return count;
-    }
-    // A failed read counts zero for now and is read again next poll, never remembered.
-    let Ok(count) = count_lines(&at, buf) else { return Some(0) };
-    let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
-    if counts.len() >= 10_000 {
-        counts.clear();
-    }
-    counts.insert(key, count);
+    let count = match known.get(&key) {
+        Some(&count) => count,
+        // A failed read counts zero for now and is read again next poll, never remembered.
+        None => match count_lines(&at, buf) {
+            Ok(count) => count,
+            Err(_) => return Some(0),
+        },
+    };
+    fresh.insert(key, count);
     count
 }
 

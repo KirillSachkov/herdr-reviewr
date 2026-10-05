@@ -109,10 +109,18 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
 
 /// The active scope's changeset and, on `branch`, its base.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
+    if !git::is_repo(&input.repo) {
+        return Ok(ScopeBuild {
+            branch_base: git::BaseStatus::default(),
+            pick_status: None,
+            ends: None,
+            changed: Vec::new(),
+        });
+    }
     scope_build(input, git::head_oid(&input.repo))
 }
 
-/// [`build_changed`] against `head`, as the caller read it.
+/// [`build_changed`] against `head`, as the caller read it, inside a repo.
 fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
     let plain = |changed| ScopeBuild {
         branch_base: git::BaseStatus::default(),
@@ -120,9 +128,6 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
         ends: None,
         changed,
     };
-    if !git::is_repo(&input.repo) {
-        return Ok(plain(Vec::new()));
-    }
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
             Some(t) => {
@@ -132,7 +137,7 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
             None => Ok(plain(Vec::new())),
         },
         Scope::Uncommitted => {
-            let base = head.unwrap_or_else(|| git::EMPTY_TREE.to_string());
+            let base = git::diff_base(head);
             at_ends(&input.repo, DiffEnds { old: base, new: None })
         }
         Scope::Branch => {
