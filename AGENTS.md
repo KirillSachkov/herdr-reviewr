@@ -17,6 +17,8 @@ herdr-reviewr is a Rust TUI (ratatui) code-review pane: it runs in a [herdr](htt
 
 New behavior is designed with `/brainstorming` and sequenced with `/planning` in the conversation; the repo keeps no spec tree. The commit message and the changelog carry the decisions.
 
+Code comments are one line. Two need a serious reason; three mean the code should change instead.
+
 Load-bearing invariants. Cite them by name:
 
 - **No writes**: reviewr never mutates the worktree, index, or branches. Its only git writes are private refs under `refs/worktree/reviewr/`: the turn baseline and the base pick.

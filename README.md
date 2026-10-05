@@ -325,8 +325,8 @@ editor = "code -g {file}:{line}"
 ### URL opener
 
 `o` and link clicks open URLs with `open` (macOS), `xdg-open` (Linux), or the default browser
-(Windows). Under `herdr --remote`
-that runs on the server, so point `url_opener` at a command that reaches your browser:
+(Windows). Under `herdr --remote` that runs on the server, so point `url_opener` at a command
+that reaches your browser:
 
 ```toml
 url_opener = "browser-bridge --new-tab {url}"

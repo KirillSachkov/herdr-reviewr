@@ -57,6 +57,9 @@ whichever workspace happens to be focused. Closing is safe
 reviewr panes), but opening is not. After the swap, tell the user: press the reviewr toggle in
 each space you want on the new build. Do not automate it.
 
+The Windows VM below is the one exception: no user sits at its herdr, so a script opens panes
+there.
+
 ## Verify
 
 - `<plugin>/bin/herdr-reviewr --resolve-plugin-config` exits 0 and prints the config JSON.
