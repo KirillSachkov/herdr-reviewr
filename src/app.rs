@@ -1314,7 +1314,7 @@ impl App {
             }
         };
         // The new side is the render input, the old side the marks' base; a notice holds none.
-        let renders = self.markdown_file() && self.diff.state == crate::diff::FileState::Normal;
+        let renders = self.markdown_file() && self.diff.notice.is_none();
         self.rendered.content = if renders { self.content(new, Some(old)) } else { None };
         self.rebuild_visible();
         self.settle_read();
@@ -1330,7 +1330,7 @@ impl App {
         self.expanded_folds.clear(); // the File view has no folds
         let (diff, content) = self.file_view(path);
         // A notice never renders, so its content is not held.
-        let renders = self.markdown_file() && diff.state == crate::diff::FileState::Normal;
+        let renders = self.markdown_file() && diff.notice.is_none();
         self.rendered.content = if renders { self.content(content, None) } else { None };
         self.diff = diff;
         self.rebuild_visible();
@@ -5928,7 +5928,7 @@ mod tests {
             let before = git_commands();
             app.set_diff("big.txt".to_string());
             assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
-            assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
+            assert_eq!(app.diff.notice, Some(crate::diff::Notice::TooLarge));
         };
 
         // The worktree side, in `uncommitted`.
@@ -5973,7 +5973,7 @@ mod tests {
         // The landed ends name a commit git no longer has.
         app.changeset.ends = Some(crate::world::DiffEnds { old: "0".repeat(40), new: None });
         app.set_diff("a.txt".to_string());
-        assert_eq!(app.diff.state, crate::diff::FileState::Unreadable);
+        assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable));
         assert!(app.diff.rows.is_empty());
     }
 
@@ -5990,7 +5990,7 @@ mod tests {
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
         app.set_diff("moved.txt".to_string());
-        assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
+        assert_eq!(app.diff.notice, Some(crate::diff::Notice::TooLarge));
         assert_eq!(app.diff.previous_path.as_deref(), Some("big.txt"));
         assert_eq!(app.diff.view, crate::diff::View::Diff);
     }
@@ -6013,7 +6013,7 @@ mod tests {
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
         app.set_diff("link".to_string());
-        assert_eq!(app.diff.state, crate::diff::FileState::Normal);
+        assert_eq!(app.diff.notice, None);
         assert!(app.diff.rows.iter().any(|r| r.marker() == '+'));
     }
 

@@ -161,30 +161,23 @@ impl Row {
     }
 }
 
-/// Whether the file renders as rows, or a notice instead.
+/// A notice that stands in for a file's rows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FileState {
-    Normal,
+pub enum Notice {
     Binary,
     TooLarge,
     /// git failed to read the sides; the next refresh tries again.
     Unreadable,
 }
 
-/// A notice that stands in for a file's rows.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Notice {
-    Binary,
-    TooLarge,
-    Unreadable,
-}
-
-impl From<Notice> for FileState {
-    fn from(notice: Notice) -> Self {
-        match notice {
-            Notice::Binary => Self::Binary,
-            Notice::TooLarge => Self::TooLarge,
-            Notice::Unreadable => Self::Unreadable,
+impl Notice {
+    /// What the read pane says in the file's place.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Binary => "binary file · no line comments",
+            Self::TooLarge => "file too large to show",
+            Self::Unreadable => "git couldn't read this file",
         }
     }
 }
@@ -204,7 +197,8 @@ pub struct FileDiff {
     pub path: String,
     /// The old path when this file was renamed, for the `old → new` header; `None` otherwise.
     pub previous_path: Option<String>,
-    pub state: FileState,
+    /// The notice shown in place of rows, `None` when the file renders.
+    pub notice: Option<Notice>,
     pub view: View,
     pub rows: Vec<Row>,
     /// The `(old, new)` line numbers of each line edited in place.
@@ -231,12 +225,17 @@ impl Default for FileDiff {
 impl FileDiff {
     /// An empty placeholder, for when no file is selected.
     pub fn empty() -> Self {
-        Self::rowless(String::new(), None, FileState::Normal, View::Diff)
+        Self::rowless(String::new(), None, None, View::Diff)
     }
 
     /// A model with no rows: a notice, or the empty placeholder.
-    fn rowless(path: String, previous_path: Option<String>, state: FileState, view: View) -> Self {
-        Self { path, previous_path, state, view, rows: Vec::new(), pairs: Vec::new() }
+    fn rowless(
+        path: String,
+        previous_path: Option<String>,
+        notice: Option<Notice>,
+        view: View,
+    ) -> Self {
+        Self { path, previous_path, notice, view, rows: Vec::new(), pairs: Vec::new() }
     }
 
     /// Build the diff of `old` to `new`; `previous_path` is a rename or copy source.
@@ -248,17 +247,17 @@ impl FileDiff {
         hl: &Highlighter,
     ) -> Self {
         let language = language_of(&path);
-        let notice = |state| Self::rowless(path.clone(), previous_path.clone(), state, View::Diff);
+        let notice = |n| Self::rowless(path.clone(), previous_path.clone(), Some(n), View::Diff);
         if old.contains('\0') || new.contains('\0') {
-            return notice(FileState::Binary);
+            return notice(Notice::Binary);
         }
         if over_byte_budget(old.len() + new.len()) {
-            return notice(FileState::TooLarge);
+            return notice(Notice::TooLarge);
         }
         // One split feeds both the diff and the highlighter, so row `i` paints line `i`.
         let (old_lines, new_lines) = (lines(old), lines(new));
         if old_lines.len() + new_lines.len() > MAX_LINES {
-            return notice(FileState::TooLarge);
+            return notice(Notice::TooLarge);
         }
 
         let lang = language.as_deref();
@@ -303,7 +302,7 @@ impl FileDiff {
         Self {
             path,
             previous_path,
-            state: FileState::Normal,
+            notice: None,
             view: View::Diff,
             rows: collapse_context(&rows),
             pairs,
@@ -312,16 +311,16 @@ impl FileDiff {
 
     /// Build the File view: all of `content` as `Context` rows, under the same budgets.
     fn build_file(path: String, content: &str, hl: &Highlighter) -> Self {
-        let notice = |state| Self::rowless(path.clone(), None, state, View::File);
+        let notice = |n| Self::rowless(path.clone(), None, Some(n), View::File);
         if content.contains('\0') {
-            return notice(FileState::Binary);
+            return notice(Notice::Binary);
         }
         if over_byte_budget(content.len()) {
-            return notice(FileState::TooLarge);
+            return notice(Notice::TooLarge);
         }
         let lines = lines(content);
         if lines.len() > MAX_LINES {
-            return notice(FileState::TooLarge);
+            return notice(Notice::TooLarge);
         }
         let rows = hl
             .highlight_lines(&lines, language_of(&path).as_deref())
@@ -332,12 +331,12 @@ impl FileDiff {
                 Row::Context { old_no: no, new_no: no, spans }
             })
             .collect();
-        Self { rows, ..Self::rowless(path, None, FileState::Normal, View::File) }
+        Self { rows, ..Self::rowless(path, None, None, View::File) }
     }
 
     /// A notice for a file the caller declines, or failed, to read.
     pub fn notice(path: String, previous_path: Option<String>, notice: Notice, view: View) -> Self {
-        Self::rowless(path, previous_path, notice.into(), view)
+        Self::rowless(path, previous_path, Some(notice), view)
     }
 }
 
@@ -652,7 +651,7 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffCache, FileDiff, FileState, Row, SIMILAR_WINDOW, View, language_of};
+    use super::{DiffCache, FileDiff, Notice, Row, SIMILAR_WINDOW, View, language_of};
     use crate::highlight::Highlighter;
     use crate::theme;
 
@@ -671,7 +670,7 @@ mod tests {
         }
         let d = FileDiff::build_file("a.rs".into(), &content, &hl);
         assert_eq!(d.view, View::File);
-        assert_eq!(d.state, FileState::Normal);
+        assert_eq!(d.notice, None);
         assert_eq!(d.rows.len(), 40);
         assert!(d.rows.iter().all(|r| matches!(r, Row::Context { .. })), "every row is context");
         // Even a long unchanged run never folds in the File view.
@@ -684,7 +683,7 @@ mod tests {
     fn file_view_degrades_on_binary() {
         let hl = Highlighter::new(mocha());
         let d = FileDiff::build_file("blob.bin".into(), "a\0b", &hl);
-        assert_eq!(d.state, FileState::Binary);
+        assert_eq!(d.notice, Some(Notice::Binary));
         assert_eq!(d.view, View::File);
         assert!(d.rows.is_empty());
     }
@@ -708,7 +707,7 @@ mod tests {
     #[test]
     fn rows_carry_sides_numbers_and_markers() {
         let d = build("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n");
-        assert_eq!(d.state, FileState::Normal);
+        assert_eq!(d.notice, None);
         let del = d.rows.iter().find(|r| matches!(r, Row::Deletion { .. })).unwrap();
         let ins = d.rows.iter().find(|r| matches!(r, Row::Insertion { .. })).unwrap();
         assert_eq!(del.old_no(), Some(2));
@@ -936,7 +935,7 @@ mod tests {
     #[test]
     fn binary_content_is_flagged_not_rowed() {
         let d = build("ok\n", "bin\0ary\n");
-        assert_eq!(d.state, FileState::Binary);
+        assert_eq!(d.notice, Some(Notice::Binary));
         assert!(d.rows.is_empty());
     }
 

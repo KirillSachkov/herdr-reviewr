@@ -15,7 +15,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
-use crate::diff::{FileDiff, FileState, MarkerKind, RenderedKind, Row};
+use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
 use crate::file_list::{Annotation, RowKind};
 use crate::forge;
 use crate::git;
@@ -1726,9 +1726,6 @@ fn truncate_width(s: &str, max: usize) -> String {
     out
 }
 
-/// The notice for a file git failed to read.
-const UNREADABLE: &str = "git couldn't read this file";
-
 /// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
 pub const CR_MARKER: &str = "^M";
 
@@ -1754,21 +1751,14 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
         let msg = match app.tab {
-            Tab::AllFiles => match app.diff.state {
-                FileState::Binary => "binary file · no line comments",
-                FileState::TooLarge => "file too large to show",
-                FileState::Unreadable => UNREADABLE,
-                FileState::Normal if app.diff_path.is_some() => "empty file",
-                FileState::Normal => "select a file to read",
+            Tab::AllFiles => match app.diff.notice {
+                Some(notice) => notice.message(),
+                None if app.diff_path.is_some() => "empty file",
+                None => "select a file to read",
             },
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
-            _ => match app.diff.state {
-                FileState::Binary => "binary file · no line comments",
-                FileState::TooLarge => "file too large to show",
-                FileState::Unreadable => UNREADABLE,
-                FileState::Normal => "no diff",
-            },
+            _ => app.diff.notice.map_or("no diff", Notice::message),
         };
         frame.render_widget(dim_paragraph(msg, p), inner);
         return;
@@ -3775,12 +3765,10 @@ fn render_search_preview(
         frame.render_widget(dim_paragraph("no preview", p), region);
         return;
     };
-    let notice = match pv.diff.state {
-        FileState::Binary => Some("binary file · no line comments"),
-        FileState::TooLarge => Some("file too large to show"),
-        FileState::Unreadable => Some(UNREADABLE),
-        FileState::Normal if pv.diff.rows.is_empty() => Some("no preview"),
-        FileState::Normal => None,
+    let notice = match pv.diff.notice {
+        Some(notice) => Some(notice.message()),
+        None if pv.diff.rows.is_empty() => Some("no preview"),
+        None => None,
     };
     if let Some(notice) = notice {
         frame.render_widget(dim_paragraph(notice, p), region);

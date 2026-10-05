@@ -3200,7 +3200,7 @@ fn a_file_view_comment_exports_as_path_line_with_a_context_snippet() {
 #[test]
 fn a_diff_unset_file_reads_as_the_binary_notice_not_a_text_diff() {
     // A `-diff` text file takes git's no-text-diff verdict.
-    use herdr_reviewr::diff::{FileState, View};
+    use herdr_reviewr::diff::{Notice, View};
     let r = Repo::init();
     r.write(".gitattributes", "flake.lock -diff\n");
     r.write("flake.lock", "one\ntwo\n");
@@ -3211,7 +3211,7 @@ fn a_diff_unset_file_reads_as_the_binary_notice_not_a_text_diff() {
     let row = file_row_of(&app, "flake.lock").expect("flake.lock listed");
     app.select_file(row).unwrap();
 
-    assert_eq!(app.diff.state, FileState::Binary);
+    assert_eq!(app.diff.notice, Some(Notice::Binary));
     assert_eq!(app.diff.view, View::Diff);
     assert!(app.diff.rows.is_empty(), "a notice has no rows to comment on");
     assert!(app.visible.is_empty());
@@ -3245,7 +3245,7 @@ fn a_file_crossing_steps_over_a_diff_unset_file() {
 fn a_diff_unset_file_in_all_files_still_reads_its_content() {
     // `-diff` governs diffing, not reading, so `All files` shows it.
     use herdr_reviewr::app::Tab;
-    use herdr_reviewr::diff::{FileState, View};
+    use herdr_reviewr::diff::View;
     let r = Repo::init();
     r.write(".gitattributes", "flake.lock -diff\n");
     r.write("flake.lock", "one\ntwo\n");
@@ -3256,7 +3256,7 @@ fn a_diff_unset_file_in_all_files_still_reads_its_content() {
     let row = file_row_of(&app, "flake.lock").expect("flake.lock listed");
     app.select_file(row).unwrap();
 
-    assert_eq!(app.diff.state, FileState::Normal);
+    assert_eq!(app.diff.notice, None);
     assert_eq!(app.diff.view, View::File);
     assert!(app.diff.rows.iter().any(|row| row.text().contains("two")));
 }
@@ -3264,7 +3264,7 @@ fn a_diff_unset_file_in_all_files_still_reads_its_content() {
 #[test]
 fn an_oversize_file_in_all_files_degrades_to_a_notice() {
     use herdr_reviewr::app::Tab;
-    use herdr_reviewr::diff::{FileState, View};
+    use herdr_reviewr::diff::{Notice, View};
     let r = Repo::init();
     r.write("small.rs", "fn main() {}\n");
     r.write("big.bin", &"x\n".repeat(1_100_000)); // ~2.2 MB, over the 2 MB budget
@@ -3273,7 +3273,7 @@ fn an_oversize_file_in_all_files_degrades_to_a_notice() {
     enter_tab(&mut app, Tab::AllFiles);
     let row = file_row_of(&app, "big.bin").expect("big.bin listed");
     app.select_file(row).unwrap();
-    assert_eq!(app.diff.state, FileState::TooLarge, "an over-budget file is not read whole");
+    assert_eq!(app.diff.notice, Some(Notice::TooLarge), "an over-budget file is not read whole");
     assert_eq!(app.diff.view, View::File);
     assert!(app.visible.is_empty());
 }
