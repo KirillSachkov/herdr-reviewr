@@ -1339,15 +1339,14 @@ impl App {
 
     /// The File view for `path`: the too-large notice unread, else the highlighted worktree content.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
-        let oversize = std::fs::metadata(self.repo.join(path))
-            .is_ok_and(|m| crate::diff::over_byte_budget(m.len() as usize));
-        if oversize {
-            let notice = crate::diff::Notice::TooLarge;
-            (FileDiff::notice(path.to_string(), None, notice, View::File), String::new())
-        } else {
-            let content = worktree_content(&self.repo, path);
-            let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
-            (diff, content)
+        match worktree_content(&self.repo, path) {
+            Ok(content) => {
+                let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
+                (diff, content)
+            }
+            Err(notice) => {
+                (FileDiff::notice(path.to_string(), None, notice, View::File), String::new())
+            }
         }
     }
 
@@ -1697,20 +1696,20 @@ impl App {
         if annotation.binary {
             return Sides::Notice(Notice::Binary);
         }
-        let untracked = annotation.change == ChangeKind::Untracked;
+        // An untracked file is all new side, read raw.
+        if annotation.change == ChangeKind::Untracked {
+            return match worktree_content(&self.repo, path) {
+                Ok(new) => Sides::Text { old: String::new(), new },
+                Err(notice) => Sides::Notice(notice),
+            };
+        }
+        // git diffs a tracked symlink as its target path, so the worktree side is the link's size.
         let new_size = annotation.new_size.unwrap_or_else(|| {
-            // git diffs a tracked symlink as its target path; an untracked file reads through it.
-            let at = self.repo.join(path);
-            let stat =
-                if untracked { std::fs::metadata(at) } else { std::fs::symlink_metadata(at) };
-            stat.map_or(0, |m| m.len())
+            std::fs::symlink_metadata(self.repo.join(path)).map_or(0, |m| m.len())
         });
         let total = annotation.old_size.saturating_add(new_size);
         if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
             return Sides::Notice(Notice::TooLarge);
-        }
-        if untracked {
-            return Sides::Text { old: String::new(), new: worktree_content(&self.repo, path) };
         }
         let source = annotation.previous_path.as_deref();
         match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, source) {
@@ -5160,18 +5159,22 @@ enum Sides {
     Notice(crate::diff::Notice),
 }
 
-/// `path`'s worktree text, regular files only, capped past the render budget.
-fn worktree_content(repo: &std::path::Path, path: &str) -> String {
+/// `path`'s worktree text, regular files only: over the budget, the notice, never read.
+fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate::diff::Notice> {
     use std::io::Read;
     let at = repo.join(path);
-    if !std::fs::metadata(&at).is_ok_and(|m| m.is_file()) {
-        return String::new();
+    let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
+        return Ok(String::new());
+    };
+    if crate::diff::over_byte_budget(usize::try_from(meta.len()).unwrap_or(usize::MAX)) {
+        return Err(crate::diff::Notice::TooLarge);
     }
+    // Capped, so a file grown since its stat still stops past the budget.
     let mut bytes = Vec::new();
     let cap = crate::diff::MAX_BYTES as u64 + 1;
     match std::fs::File::open(at).and_then(|f| f.take(cap).read_to_end(&mut bytes)) {
-        Ok(_) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(_) => String::new(),
+        Ok(_) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(_) => Ok(String::new()),
     }
 }
 
