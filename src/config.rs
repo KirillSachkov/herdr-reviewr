@@ -1127,6 +1127,7 @@ mod tests {
         use crate::keymap::Action;
         let config = PluginConfig::default();
         assert_eq!(config.keymap().bindings().len(), Action::names().count());
+        assert!(config.keymap().bindings().iter().all(|(_, keys)| !keys.is_empty()));
         assert_eq!(keys_of(&config, Action::Quit), ["q"]);
         assert_eq!(keys_of(&config, Action::Send), ["s", "S"]);
     }
