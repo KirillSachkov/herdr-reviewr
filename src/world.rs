@@ -432,8 +432,6 @@ pub fn spawn(
                     break;
                 }
             }
-            // The loop has quit, so a job finished after its sweep takes its copy too.
-            git::end_sessions();
         })
         .expect("spawn world worker")
 }

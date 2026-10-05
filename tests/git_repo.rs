@@ -1095,6 +1095,16 @@ fn a_worktree_re_added_at_its_path_lists_against_its_own_index() {
     r.git(&["worktree", "remove", "--force", first.to_str().unwrap()]);
     add("four", &first);
     assert!(changed_from(&first, "HEAD").unwrap().is_empty());
+    // A pruned admin dir stays gone: reviewr never builds one back to hold its copy.
+    let out = std::process::Command::new("git")
+        .current_dir(&first)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()
+        .unwrap();
+    let admin = std::path::PathBuf::from(String::from_utf8(out.stdout).unwrap().trim());
+    std::fs::remove_dir_all(&admin).unwrap();
+    let _ = changed_from(&first, "HEAD");
+    assert!(!admin.exists(), "reviewr re-created {}", admin.display());
 }
 
 /// Run git in `dir`, asserting success.

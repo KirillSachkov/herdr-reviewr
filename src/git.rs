@@ -1593,7 +1593,13 @@ impl IndexCopy {
     /// A new, empty copy of `repo`'s index.
     fn new(repo: &Path) -> Result<Self> {
         let home = copies_dir(repo)?;
-        std::fs::create_dir_all(&home).context("creating the index copies' dir")?;
+        // Never `create_dir_all`: a pruned git dir must stay gone, not come back holding copies.
+        match std::fs::create_dir(&home) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+                return Err(e).context("creating the index copies' dir");
+            }
+            _ => {}
+        }
         let dir = tempfile::Builder::new()
             .prefix(COPY_PREFIX)
             .tempdir_in(home)
