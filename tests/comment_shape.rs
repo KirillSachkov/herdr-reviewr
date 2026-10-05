@@ -9,7 +9,10 @@ use std::process::Command;
 fn no_comment_runs_past_two_lines() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let listed = Command::new("git").arg("-C").arg(root).args(["ls-files", "-z"]).output();
-    let listed = listed.expect("git ls-files runs").stdout;
+    let listed = listed.expect("git ls-files runs");
+    // A git that failed lists nothing, which must fail here, never pass unchecked.
+    assert!(listed.status.success() && !listed.stdout.is_empty(), "git ls-files listed nothing");
+    let listed = listed.stdout;
     let mut long = Vec::new();
     for file in String::from_utf8_lossy(&listed).split('\0').filter(|f| !f.is_empty()) {
         if let Some(mark) = comment_mark(Path::new(file)) {

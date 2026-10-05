@@ -2149,29 +2149,36 @@ fn parse_raw(out: &str) -> (Vec<RawRow>, &str) {
 fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
     static KNOWN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Mutex::default);
-    let named = oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0'));
-    let unknown: Vec<&str> = {
-        let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
-        // A turn's snapshots mint new blobs every poll, so the cache stays bounded, cleared
-        // before this batch asks so none of its sizes go missing.
-        if known.len() >= 100_000 {
-            known.clear();
+    // The result is this call's own: the cache hits now, then what git answers, so another
+    // thread clearing the cache never drops a size from it.
+    let mut sizes = HashMap::new();
+    let mut unknown = Vec::new();
+    {
+        let known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        for oid in oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0')) {
+            match known.get(oid) {
+                Some(&size) => drop(sizes.insert(oid.to_string(), size)),
+                None => unknown.push(oid),
+            }
         }
-        named.clone().filter(|oid| !known.contains_key(*oid)).collect()
-    };
+    }
     if !unknown.is_empty() {
         let input = unknown.join("\n") + "\n";
         let args = ["cat-file", "--batch-check=%(objectname) %(objectsize)"];
         let out = git_stdin(repo, &args, &input)?;
-        let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
         for (oid, size) in out.lines().filter_map(|line| line.split_once(' ')) {
             if let Ok(size) = size.parse() {
-                known.insert(oid.to_string(), size);
+                sizes.insert(oid.to_string(), size);
             }
         }
+        let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        // A turn's snapshots mint new blobs every poll, so the cache stays bounded.
+        if known.len() >= 100_000 {
+            known.clear();
+        }
+        known.extend(sizes.iter().map(|(oid, &size)| (oid.clone(), size)));
     }
-    let known = known.lock().unwrap_or_else(PoisonError::into_inner);
-    Ok(named.filter_map(|oid| Some((oid.to_string(), *known.get(oid)?))).collect())
+    Ok(sizes)
 }
 
 #[cfg(test)]
