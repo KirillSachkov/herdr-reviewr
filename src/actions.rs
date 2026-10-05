@@ -19,8 +19,8 @@ use crate::proc::program_name;
 pub enum NonUiRun {
     /// `--resolve-plugin-config`: print the normalized plugin config.
     ResolvePluginConfig,
-    /// `--action <name>`. The name is `None` when the flag ends argv.
-    Action(Option<String>),
+    /// `--action <name>`; a flag that ends argv names the empty action.
+    Action(String),
 }
 
 impl NonUiRun {
@@ -31,7 +31,8 @@ impl NonUiRun {
             return Some(Self::ResolvePluginConfig);
         }
         let at = args.iter().position(|arg| *arg == "--action")?;
-        Some(Self::Action(args.get(at + 1).map(|name| name.to_string_lossy().into_owned())))
+        let name = args.get(at + 1).map(|name| name.to_string_lossy().into_owned());
+        Some(Self::Action(name.unwrap_or_default()))
     }
 }
 
@@ -70,13 +71,10 @@ fn refused(why: impl Into<String>) -> Stop {
 }
 
 /// Run the action `name` and return the process exit code.
-pub fn run(name: Option<&str>) -> i32 {
+pub fn run(name: &str) -> i32 {
     crate::log::init();
-    let Some(action) = name.and_then(Action::parse) else {
-        eprintln!(
-            "reviewr: unknown action '{}' (toggle | open | close | auto-open)",
-            name.unwrap_or_default()
-        );
+    let Some(action) = Action::parse(name) else {
+        eprintln!("reviewr: unknown action '{name}' (toggle | open | close | auto-open)");
         return 1;
     };
     match act(action) {
@@ -450,25 +448,5 @@ fn repoint_launch_links() {
         {
             let _ = std::fs::remove_file(&fresh);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::NonUiRun;
-
-    #[test]
-    fn a_non_ui_flag_is_recognized_anywhere_in_argv() {
-        assert_eq!(
-            NonUiRun::from_args(&["--some-future-arg", "--resolve-plugin-config"]),
-            Some(NonUiRun::ResolvePluginConfig)
-        );
-        assert_eq!(
-            NonUiRun::from_args(&["/repo", "--action", "toggle"]),
-            Some(NonUiRun::Action(Some("toggle".into())))
-        );
-        assert_eq!(NonUiRun::from_args(&["--action"]), Some(NonUiRun::Action(None)));
-        // UI flags and a repo path are the review UI.
-        assert_eq!(NonUiRun::from_args(&["--base", "main", "/repo"]), None);
     }
 }

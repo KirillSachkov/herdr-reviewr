@@ -11,7 +11,7 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(NonUiRun::Action(name)) => std::process::exit(actions::run(name.as_deref())),
+        Some(NonUiRun::Action(name)) => std::process::exit(actions::run(&name)),
         None => herdr_reviewr::run(),
     }
 }

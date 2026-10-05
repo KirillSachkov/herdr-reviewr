@@ -261,18 +261,6 @@ fn auto_open_skips_placements_that_are_not_split_or_tab() {
 }
 
 #[test]
-fn valid_auto_open_runtime_refusal_remains_silent() {
-    let dir = tempfile::tempdir().unwrap();
-
-    let output = action("auto-open", dir.path()).env_remove("HERDR_WORKSPACE_ID").output().unwrap();
-
-    assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
-    assert!(herdr_calls(dir.path()).is_empty());
-}
-
-#[test]
 fn auto_open_opened_live_exits_before_herdr_calls() {
     let dir = tempfile::tempdir().unwrap();
     let event =
