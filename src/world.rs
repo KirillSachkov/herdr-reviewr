@@ -134,8 +134,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
         }
         Scope::Branch => {
             // A resolve failure fails the build, keeping the stale frame.
-            let resolution = git::resolve_base(&input.repo, input.base.as_deref())
-                .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+            let resolution = git::resolve_base(&input.repo, input.base.as_deref())?;
             let merge_base = resolution
                 .status
                 .winner

@@ -447,6 +447,14 @@ fn split_remote(url: &str) -> Option<(RemoteTransport, &str, &str, bool)> {
 #[derive(Debug)]
 pub struct GitFail(pub String);
 
+impl std::fmt::Display for GitFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GitFail {}
+
 /// Spawn one git read under `LC_ALL=C`, since a missing remote is read from stderr text.
 fn run_git(repo: &Path, args: &[&str]) -> Result<std::process::Output, GitFail> {
     git_command(repo)
@@ -1880,8 +1888,7 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
         input.push_str(path);
         input.push('\0');
     }
-    let out = git_stdin(repo, &["check-attr", "-z", "--stdin", "diff"], &input)
-        .map_err(|e| anyhow::anyhow!("{}", e.0))?;
+    let out = git_stdin(repo, &["check-attr", "-z", "--stdin", "diff"], &input)?;
     let mut fields = out.split('\0');
     let mut unset = HashSet::new();
     while let (Some(path), Some(_attr), Some(value)) = (fields.next(), fields.next(), fields.next())
@@ -2032,7 +2039,7 @@ fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
     if !unknown.is_empty() {
         let input = unknown.join("\n") + "\n";
         let args = ["cat-file", "--batch-check=%(objectname) %(objectsize)"];
-        let out = git_stdin(repo, &args, &input).map_err(|e| anyhow::anyhow!(e.0))?;
+        let out = git_stdin(repo, &args, &input)?;
         let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
         for (oid, size) in out.lines().filter_map(|line| line.split_once(' ')) {
             if let Ok(size) = size.parse() {
