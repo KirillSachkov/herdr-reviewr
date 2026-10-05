@@ -15,26 +15,50 @@ const COMMON_BINS: &[&str] = &[];
 
 /// The host PATH: the common bins, then the inherited PATH, built once.
 fn host_path() -> &'static OsString {
-    static PATH: OnceLock<OsString> = OnceLock::new();
-    PATH.get_or_init(|| prepended_path(env::var_os("PATH").as_deref()))
+    host().path()
 }
 
-/// `name` on the host PATH, a bare name's hit kept while it still exists.
+/// The host's lookup, built once.
+fn host() -> &'static Lookup {
+    static HOST: OnceLock<Lookup> = OnceLock::new();
+    HOST.get_or_init(|| Lookup::on(prepended_path(env::var_os("PATH").as_deref())))
+}
+
+/// `name` on the host PATH.
 fn resolve_on_host(name: &OsStr) -> Option<PathBuf> {
-    static FOUND: OnceLock<Mutex<HashMap<OsString, PathBuf>>> = OnceLock::new();
-    let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
-    let found = FOUND.get_or_init(Mutex::default);
-    if bare
-        && let Some(hit) = found.lock().unwrap_or_else(PoisonError::into_inner).get(name)
-        && hit.is_file()
-    {
-        return Some(hit.clone());
+    host().resolve(name)
+}
+
+/// Program lookup on one PATH, a bare name's hit kept while it still exists.
+struct Lookup {
+    path: OsString,
+    found: Mutex<HashMap<OsString, PathBuf>>,
+}
+
+impl Lookup {
+    fn on(path: OsString) -> Self {
+        Self { path, found: Mutex::default() }
     }
-    let hit = resolve_on(host_path(), name)?;
-    if bare {
-        found.lock().unwrap_or_else(PoisonError::into_inner).insert(name.into(), hit.clone());
+
+    fn path(&self) -> &OsString {
+        &self.path
     }
-    Some(hit)
+
+    fn resolve(&self, name: &OsStr) -> Option<PathBuf> {
+        let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
+        let found = || self.found.lock().unwrap_or_else(PoisonError::into_inner);
+        if bare
+            && let Some(hit) = found().get(name)
+            && hit.is_file()
+        {
+            return Some(hit.clone());
+        }
+        let hit = resolve_on(&self.path, name)?;
+        if bare {
+            found().insert(name.into(), hit.clone());
+        }
+        Some(hit)
+    }
 }
 
 fn common_bins() -> impl Iterator<Item = PathBuf> {
@@ -184,6 +208,19 @@ mod tests {
 
     fn same_file(a: &Path, b: &Path) -> bool {
         std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
+    }
+
+    #[test]
+    fn a_remembered_program_that_moved_is_looked_up_again() {
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let path = env::join_paths([first.path(), second.path()]).unwrap();
+        let lookup = super::Lookup::on(path);
+        let was = program(first.path(), "tool");
+        assert!(same_file(&lookup.resolve(OsStr::new("tool")).unwrap(), &was));
+        // Reinstalled elsewhere on the PATH: the remembered hit is gone, so the lookup runs again.
+        std::fs::remove_file(&was).unwrap();
+        let now = program(second.path(), "tool");
+        assert!(same_file(&lookup.resolve(OsStr::new("tool")).unwrap(), &now));
     }
 
     #[test]
