@@ -51,7 +51,6 @@ fn reset(dir: &Path) {
     let _ = fs::remove_file(dir.join("opened"));
 }
 
-/// A fresh git repo at `dir/name`.
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
@@ -382,10 +381,13 @@ fn a_failed_plugin_pane_open_refuses_an_action_and_stays_silent_for_the_event() 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(stderr(&output), "reviewr: herdr plugin pane open failed\n");
 
+    reset(dir.path());
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
     let output = run_auto_open(dir.path(), &event, None);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
+    // The event reached its open, which is what refused.
+    assert!(herdr_calls(dir.path()).contains("plugin pane open"), "{}", herdr_calls(dir.path()));
 }
 
 #[test]
@@ -1041,7 +1043,7 @@ fn an_open_waits_until_its_pane_reads_as_reviewr() {
 }
 
 #[test]
-fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
+fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound_and_says_so() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("opened-empty-reads"), "1000000").unwrap();
 
@@ -1050,7 +1052,10 @@ fn an_open_whose_pane_never_reads_as_reviewr_succeeds_after_the_bound() {
     let elapsed = started.elapsed();
 
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "reviewr: opened w1:p9 (split) in workspace-1\n");
+    assert_eq!(
+        stdout(&output),
+        "reviewr: opened w1:p9 (split) in workspace-1, not yet seen running\n"
+    );
     assert!(elapsed >= Duration::from_millis(5900), "returned before the bound: {elapsed:?}");
     assert!(elapsed < Duration::from_secs(15), "the wait is bounded: {elapsed:?}");
     assert!(opened_pane_reads(dir.path()) > 1, "{}", herdr_calls(dir.path()));
@@ -1247,6 +1252,9 @@ fn auto_open_over_an_open_reviewr_pane_does_nothing_and_says_nothing() {
     assert!(output.stderr.is_empty(), "{}", stderr(&output));
     let log = herdr_calls(dir.path());
     assert!(!log.contains("plugin pane open") && !log.contains("pane close"), "{log}");
+    // It got as far as seeing the open pane.
+    assert!(log.contains("pane list --workspace workspace-9"), "{log}");
+    assert!(log.contains("pane process-info"), "{log}");
 }
 
 #[test]

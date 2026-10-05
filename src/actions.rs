@@ -249,35 +249,39 @@ impl Target {
 
 /// The workspace's reviewr panes, read concurrently; `None` when any read failed.
 fn reviewr_panes(panes: &PaneList) -> Option<Vec<&str>> {
-    thread::scope(|scope| {
-        let probes: Vec<_> = panes
-            .panes
-            .iter()
-            .map(|entry| {
-                let pane = entry.pane_id.as_str();
-                let probe =
-                    thread::Builder::new().spawn_scoped(scope, move || runs_review_ui(pane));
-                (pane, probe)
-            })
-            .collect();
-        let mut existing = Vec::new();
-        for (pane, probe) in probes {
-            // A probe that never ran or panicked never settled, so it refuses like a failed read.
-            match probe.map(thread::ScopedJoinHandle::join) {
-                Ok(Ok(Ok(true))) => existing.push(pane),
-                Ok(Ok(Ok(false))) => {}
-                _ => return None,
-            }
+    let ids: Vec<&str> = panes.panes.iter().map(|entry| entry.pane_id.as_str()).collect();
+    let mut existing = Vec::new();
+    for (pane, probe) in per_pane(&ids, runs_review_ui) {
+        // A probe that failed, never ran, or panicked never settled, so the sweep refuses.
+        if probe?.ok()? == Some(true) {
+            existing.push(pane);
         }
-        Some(existing)
+    }
+    Some(existing)
+}
+
+/// `f` on every pane at once; `None` where its thread never ran or panicked.
+fn per_pane<'p, R: Send>(
+    panes: &[&'p str],
+    f: impl Fn(&str) -> Result<R, HerdrError> + Sync,
+) -> Vec<(&'p str, Option<Result<R, HerdrError>>)> {
+    let f = &f;
+    thread::scope(|scope| {
+        let runs: Vec<_> = panes
+            .iter()
+            .map(|&pane| (pane, thread::Builder::new().spawn_scoped(scope, move || f(pane))))
+            .collect();
+        runs.into_iter()
+            .map(|(pane, run)| (pane, run.ok().and_then(|run| run.join().ok())))
+            .collect()
     })
 }
 
 /// Whether pane `pane` runs the review UI; a pane gone since the list counts as closed.
-fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
+fn runs_review_ui(pane: &str) -> Result<Option<bool>, HerdrError> {
     match ProcessInfo::of(pane) {
-        Ok(info) => Ok(info.foreground_processes.iter().any(is_review_ui)),
-        Err(HerdrError::PaneGone) => Ok(false),
+        Ok(info) => Ok(Some(info.foreground_processes.iter().any(is_review_ui))),
+        Err(HerdrError::PaneGone) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -294,30 +298,16 @@ fn is_review_ui(process: &Process) -> bool {
 
 /// Close every pane in `existing` concurrently; a pane already gone counts as closed.
 fn close_all(existing: &[&str], ws: &str) -> Result<String, Stop> {
-    let results = thread::scope(|scope| {
-        let closes: Vec<_> = existing
-            .iter()
-            .map(|&pane| {
-                (pane, thread::Builder::new().spawn_scoped(scope, move || herdr::close_pane(pane)))
-            })
-            .collect();
-        let joined = closes
-            .into_iter()
-            .map(|(pane, close)| (pane, close.map(thread::ScopedJoinHandle::join)));
-        joined.collect::<Vec<_>>()
-    });
-    let mut closed = Vec::new();
-    let mut failed = Vec::new();
-    for (pane, result) in results {
-        match result {
-            Ok(Ok(Ok(()) | Err(HerdrError::PaneGone))) => closed.push(pane),
-            _ => failed.push(pane),
-        }
-    }
+    // A pane that closed itself meanwhile is closed all the same.
+    let failed: Vec<&str> = per_pane(existing, herdr::close_pane)
+        .into_iter()
+        .filter(|(_, close)| !matches!(close, Some(Ok(()) | Err(HerdrError::PaneGone))))
+        .map(|(pane, _)| pane)
+        .collect();
     if !failed.is_empty() {
         return Err(refused(format!("herdr pane close failed for {} in {ws}", failed.join(" "))));
     }
-    Ok(format!("closed {} in {ws}", closed.join(" ")))
+    Ok(format!("closed {} in {ws}", existing.join(" ")))
 }
 
 /// How long an open waits for its pane to read as reviewr: a cold Windows open, with room.
@@ -381,9 +371,12 @@ fn open(
         let _ = herdr::rename_tab(tab, herdr::LABEL);
     }
 
-    wait_until_visible(&opened.pane_id)
-        .map_err(|_| refused(format!("pane {} exited at launch in {ws}", opened.pane_id)))?;
-    Ok(format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str()))
+    let success = format!("opened {} ({}) in {ws}", opened.pane_id, placement.as_str());
+    match launch(&opened.pane_id) {
+        Launch::Running => Ok(success),
+        Launch::Unseen => Ok(format!("{success}, not yet seen running")),
+        Launch::Exited => Err(refused(format!("pane {} exited at launch in {ws}", opened.pane_id))),
+    }
 }
 
 /// Whether `dir` sits in a worktree; a `.git` dir or bare repository does not.
@@ -391,18 +384,26 @@ fn has_worktree(dir: &str) -> bool {
     crate::git::toplevel(Path::new(dir)).is_some()
 }
 
-/// Return once pane `pane` reads as reviewr, or past [`VISIBLE_BOUND`]; `Err` once it is gone.
-fn wait_until_visible(pane: &str) -> Result<(), HerdrError> {
+/// What an opened pane showed within [`VISIBLE_BOUND`].
+enum Launch {
+    Running,
+    /// Never read as reviewr in time, nor gone.
+    Unseen,
+    Exited,
+}
+
+/// Read pane `pane` until it runs reviewr, is gone, or [`VISIBLE_BOUND`] passes.
+fn launch(pane: &str) -> Launch {
     let deadline = Instant::now() + VISIBLE_BOUND;
     loop {
-        match ProcessInfo::of(pane) {
-            Ok(info) if info.foreground_processes.iter().any(is_review_ui) => return Ok(()),
-            Err(HerdrError::PaneGone) => return Err(HerdrError::PaneGone),
+        match runs_review_ui(pane) {
+            Ok(Some(true)) => return Launch::Running,
+            Ok(None) => return Launch::Exited,
             _ => {}
         }
         if Instant::now() >= deadline {
-            logln!("opened pane {pane} not visible as reviewr after {VISIBLE_BOUND:?}");
-            return Ok(());
+            logln!("opened pane {pane} not seen as reviewr after {VISIBLE_BOUND:?}");
+            return Launch::Unseen;
         }
         thread::sleep(VISIBLE_POLL);
     }
