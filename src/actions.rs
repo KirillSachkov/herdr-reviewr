@@ -413,19 +413,15 @@ fn launch(pane: &str) -> Launch {
 /// Re-point the stable launch links at the live plugin root; best effort, symlinks only.
 #[cfg(unix)]
 fn repoint_launch_links() {
-    use std::os::unix::fs::PermissionsExt;
-
     let (Some(root), Some(home)) = (herdr::var_os("HERDR_PLUGIN_ROOT"), dirs::home_dir()) else {
         return;
     };
     let binary = Path::new(&root).join("bin").join(BINARY);
-    let executable = std::fs::metadata(&binary)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
-    if !executable {
+    if which::which(&binary).is_err() {
         return;
     }
     // The installer's own path, which it writes without herdr's environment.
-    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::plugin_id()).join("bin");
+    let state_bin = home.join(".local/state/herdr/plugins").join(herdr::PLUGIN_ID).join("bin");
     let local_bin = home.join(".local/bin");
     // `~/.local/bin` only when it already exists: reviewr never creates a PATH directory.
     let dirs = [Some(state_bin), local_bin.is_dir().then_some(local_bin)];

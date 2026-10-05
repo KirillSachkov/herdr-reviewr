@@ -1,12 +1,11 @@
 //! External command-line tools: located, named, and run within a bound.
 
-use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -20,50 +19,8 @@ const COMMON_BINS: &[&str] = &[];
 
 /// The host PATH: the common bins, then the inherited PATH, built once.
 fn host_path() -> &'static OsString {
-    host().path()
-}
-
-/// The host's lookup, built once.
-fn host() -> &'static Lookup {
-    static HOST: OnceLock<Lookup> = OnceLock::new();
-    HOST.get_or_init(|| Lookup::on(prepended_path(env::var_os("PATH").as_deref())))
-}
-
-/// `name` on the host PATH.
-fn resolve_on_host(name: &OsStr) -> Option<PathBuf> {
-    host().resolve(name)
-}
-
-/// Program lookup on one PATH, a bare name's hit kept while it still exists.
-struct Lookup {
-    path: OsString,
-    found: Mutex<HashMap<OsString, PathBuf>>,
-}
-
-impl Lookup {
-    fn on(path: OsString) -> Self {
-        Self { path, found: Mutex::default() }
-    }
-
-    fn path(&self) -> &OsString {
-        &self.path
-    }
-
-    fn resolve(&self, name: &OsStr) -> Option<PathBuf> {
-        let bare = Path::new(name).components().count() == 1 && !Path::new(name).is_absolute();
-        let found = || self.found.lock().unwrap_or_else(PoisonError::into_inner);
-        if bare
-            && let Some(hit) = found().get(name)
-            && hit.is_file()
-        {
-            return Some(hit.clone());
-        }
-        let hit = resolve_on(&self.path, name)?;
-        if bare {
-            found().insert(name.into(), hit.clone());
-        }
-        Some(hit)
-    }
+    static HOST: OnceLock<OsString> = OnceLock::new();
+    HOST.get_or_init(|| prepended_path(env::var_os("PATH").as_deref()))
 }
 
 fn common_bins() -> impl Iterator<Item = PathBuf> {
@@ -97,7 +54,8 @@ fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
 /// Resolve one of reviewr's own tools: the common host bins first, then the inherited PATH.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
-    let mut cmd = resolve_on_host(program).map_or_else(|| Command::new(program), Command::new);
+    let mut cmd =
+        resolve_on(host_path(), program).map_or_else(|| Command::new(program), Command::new);
     cmd.env("PATH", host_path());
     cmd
 }
@@ -125,7 +83,7 @@ pub(crate) fn program_name(path: &str) -> &str {
 /// Whether `name` resolves to an executable on the host PATH.
 #[must_use]
 pub fn on_path(name: &str) -> bool {
-    resolve_on_host(OsStr::new(name)).is_some()
+    resolve_on(host_path(), OsStr::new(name)).is_some()
 }
 
 /// How one bounded run of a tool failed.
@@ -308,19 +266,6 @@ mod tests {
 
     fn same_file(a: &Path, b: &Path) -> bool {
         std::fs::canonicalize(a).unwrap() == std::fs::canonicalize(b).unwrap()
-    }
-
-    #[test]
-    fn a_remembered_program_that_moved_is_looked_up_again() {
-        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let path = env::join_paths([first.path(), second.path()]).unwrap();
-        let lookup = super::Lookup::on(path);
-        let was = program(first.path(), "tool");
-        assert!(same_file(&lookup.resolve(OsStr::new("tool")).unwrap(), &was));
-        // Reinstalled elsewhere on the PATH: the remembered hit is gone, so the lookup runs again.
-        std::fs::remove_file(&was).unwrap();
-        let now = program(second.path(), "tool");
-        assert!(same_file(&lookup.resolve(OsStr::new("tool")).unwrap(), &now));
     }
 
     #[test]
