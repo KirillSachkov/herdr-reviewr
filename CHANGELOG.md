@@ -22,6 +22,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Quick double toggle**: two fast presses open reviewr and then close it, and never stack two panes.
 - **PR link**: `o` opens only an http(s) pull request URL.
 
+## [0.44.0] — 2026-10-03
+
+### Added
+- **Jump to a line**: `:` and a number land on that line (`:0` first, `:$` last), opening a fold or `<details>` that hides it.
+  Thanks [@black-snow](https://github.com/black-snow) ([#90](https://github.com/persiyanov/herdr-reviewr/issues/90)).
+- **Breaking: `:` is a new default key.** A `[keybindings]` config that already uses `:` now collides and must move it.
+
+## [0.43.0] — 2026-10-03
+
+### Changed
+- **Colors by meaning**: each theme focuses in its own accent, like herdr's frame, and every color reads on what sits behind it.
+  Running checks are yellow, like herdr's working dot.
+- **Rendered markdown takes the theme's heading and code colors**, per level in Catppuccin and Everforest, and inline code sits on a chip.
+
+### Fixed
+- **Line numbers and faint text are readable in every theme**, and tokyo-night-day shows its selection and diff tints.
+
 ## [0.42.0] — 2026-10-02
 
 ### Changed

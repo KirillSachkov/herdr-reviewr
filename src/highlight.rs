@@ -6,7 +6,7 @@ use std::io::Cursor;
 
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{Scope, SyntaxSet};
 
 use std::sync::OnceLock;
 
@@ -32,6 +32,40 @@ fn embedded_themes() -> &'static two_face::theme::EmbeddedLazyThemeSet {
 pub struct Highlighter {
     theme: Option<Theme>,
     default_fg: Rgb,
+    markdown: MarkdownColors,
+}
+
+/// The colors a syntax theme gives rendered markdown, read once from its rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkdownColors {
+    /// H1 through H6; `None` where the theme sets no heading color.
+    pub headings: [Option<Rgb>; 6],
+    /// `None` where the theme sets no inline-code color.
+    pub inline_code: Option<Rgb>,
+}
+
+impl MarkdownColors {
+    /// Ask the theme under VS Code's and `TextMate`'s markdown scopes; highlighting a sample can't,
+    /// since the bundled grammar levels only H1 and H2.
+    fn of(theme: &Theme) -> Self {
+        let hl = syntect::highlighting::Highlighter::new(theme);
+        let fg = |stack: &[&str]| -> Option<Rgb> {
+            let scopes: Vec<Scope> = stack.iter().filter_map(|s| Scope::new(s).ok()).collect();
+            hl.style_mod_for_stack(&scopes).foreground.map(|c| (c.r, c.g, c.b))
+        };
+        // A rule for all markdown text is not a heading or code color.
+        let plain = fg(&["text.html.markdown"]);
+        let probe = |scope: &str| fg(&["text.html.markdown", scope]).filter(|c| Some(*c) != plain);
+        let headings = std::array::from_fn(|i| {
+            let n = i + 1;
+            probe(&format!("heading.{n}.markdown"))
+                .or_else(|| probe(&format!("markup.heading.{n}.markdown")))
+                .or_else(|| probe("markup.heading.markdown"))
+        });
+        let inline_code = probe("markup.inline.raw.string.markdown")
+            .or_else(|| probe("markup.raw.inline.markdown"));
+        Self { headings, inline_code }
+    }
 }
 
 impl fmt::Debug for Highlighter {
@@ -59,7 +93,14 @@ impl Highlighter {
             .as_ref()
             .and_then(|t| t.settings.foreground)
             .map_or(DEFAULT_FG, |c| (c.r, c.g, c.b));
-        Self { theme, default_fg }
+        let markdown = theme.as_ref().map(MarkdownColors::of).unwrap_or_default();
+        Self { theme, default_fg, markdown }
+    }
+
+    /// The theme's own colors for rendered markdown headings and inline code.
+    #[must_use]
+    pub fn markdown(&self) -> MarkdownColors {
+        self.markdown
     }
 
     /// Highlight `content` line by line.

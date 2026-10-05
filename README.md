@@ -130,6 +130,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | `→` `←` | Expand / collapse, or scroll sideways |
 | `/` | Search files and code |
 | `Ctrl+F` | Find in file |
+| `:` | Jump to a line number (`:0` first, `:$` last) |
 | `w` | Toggle line wrap |
 | `m` | Flip markdown between rendered and source |
 | `p` | Rotate navigator |
@@ -262,7 +263,8 @@ theme = "tokyo-night"
 - **Light:** `catppuccin-latte`, `gruvbox-light`, `one-light`, `solarized-light`,
   `github-light`, `tokyo-night-day`, `rose-pine-dawn`.
 
-Names match herdr's where both ship a palette.
+Names and accents match herdr's where both ship a palette, so focus in the pane matches herdr's
+frame. Every color stays readable on whatever sits behind it.
 
 ### Markdown view
 
@@ -373,6 +375,7 @@ The action names and their defaults:
 | `comments` | `l` |
 | `search` | `/` |
 | `find` | `ctrl+f` |
+| `goto-line` | `:` |
 | `keys` | `?` |
 | `send` | `s`, `S` |
 | `copy` | `y`, `Y` |

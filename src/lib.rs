@@ -23,6 +23,7 @@ pub(crate) mod marks;
 pub mod model;
 pub mod proc;
 pub(crate) mod rendered;
+pub mod roles;
 pub mod search;
 pub mod selection;
 pub mod snippet;
@@ -852,10 +853,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             // Rewrap rendered markdown before the heights measure it.
             app.sync_rendered_width(ui::rendered_width(area, app));
             let heights = ui::diff_row_heights(app, area);
-            if std::mem::take(&mut app.reveal_diff) || app.composing() {
-                app.reveal_diff_cursor(&heights, effective);
-            }
-            app.bound_diff_scroll(&heights, effective);
+            app.settle_diff_scroll(&heights, effective);
             let file_vp = ui::file_viewport_height(area, app);
             // A hidden navigator keeps its reveal pending, since its viewport is zero.
             if !app.navigator_hidden_here() && std::mem::take(&mut app.reveal_files) {
@@ -1501,6 +1499,27 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         return Ok(());
     }
 
+    // Line field: digits or `$` edit, Enter jumps, Esc closes, the rest is inert.
+    if app.line_open() {
+        let plain = !ctrl && !key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            Esc => app.close_find(),
+            Enter => app.line_go(),
+            Char(c @ ('0'..='9' | '$')) if plain => app.line_type(c),
+            code @ (KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Home
+            | KeyCode::End)
+                if plain =>
+            {
+                apply_text_edit(app, code, false, false, false);
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
     // Find: printables edit, `↑`/`↓` step matches, `esc` closes, the rest is inert.
     if app.mode == Mode::Find {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1707,6 +1726,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Comments => app.open_list(),
             K::Search => app.open_search(),
             K::Find => app.open_find(),
+            K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
             // Inert here; `quit-discard` only answers the quit question.
             K::Delete | K::OpenPr | K::QuitDiscard => {}

@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.42.0"
+version = "0.44.0"
 # 0.9.0 is the first herdr that resolves a relative pane `command[0]` against the plugin root
 # on every OS, which the pane and every action below rely on (docs/herdr-api-notes.md). Turn
 # tracking also needs each agent's `cwd` in `herdr agent list`, present from 0.7.5.

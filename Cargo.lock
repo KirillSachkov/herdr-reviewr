@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "herdr-reviewr"
-version = "0.42.0"
+version = "0.44.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -966,6 +966,7 @@ dependencies = [
  "interprocess",
  "neo_frizbee",
  "opener",
+ "palette",
  "process-wrap",
  "pulldown-cmark",
  "ratatui",

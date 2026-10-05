@@ -4,12 +4,13 @@ use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::highlight::Highlighter;
-use crate::theme::Palette;
+use crate::roles::Palette;
+use crate::roles::{Fill, Ink};
 
 /// The deepest block indent, so nesting never squeezes the content to nothing.
 const MAX_NEST: usize = 8;
@@ -377,7 +378,13 @@ impl Renderer<'_> {
                 }
             }
             Event::Code(t) if self.emitting() && !self.collecting_summary() => {
-                let style = self.current_style().fg(self.p.orange);
+                // Inline code sits on a chip, so it reads as code in every theme, in the
+                // syntax theme's code color where it sets one.
+                let fg = self.hl.markdown().inline_code.map_or_else(
+                    || self.p.ink(Ink::Text, Fill::Code),
+                    |c| self.readable(c, Fill::Code),
+                );
+                let style = self.current_style().fg(fg).bg(self.p.fill(Fill::Code));
                 self.push_code_span(&t, &range, style);
             }
             Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
@@ -395,7 +402,10 @@ impl Renderer<'_> {
                 let budget = self.budget(self.prefix(None).0.width());
                 let line = Line::from(vec![
                     self.prefix(None).0,
-                    Span::styled("─".repeat(budget), Style::default().fg(self.p.dim2)),
+                    Span::styled(
+                        "─".repeat(budget),
+                        Style::default().fg(self.p.mark(Ink::Border, Fill::Base)),
+                    ),
                 ]);
                 self.push_plain_line(line);
                 self.needs_blank = true;
@@ -463,8 +473,8 @@ impl Renderer<'_> {
                 let at = self.chunk_len();
                 self.urls.push(std::sync::Arc::from(dest_url.as_ref()));
                 self.links.push((self.urls.len() - 1, at));
-                let blue = self.p.blue;
-                self.push_style(|s| s.fg(blue).add_modifier(Modifier::UNDERLINED));
+                let accent = self.p.ink(Ink::Accent, Fill::Base);
+                self.push_style(|s| s.fg(accent).add_modifier(Modifier::UNDERLINED));
             }
             Tag::Image { dest_url, .. } => {
                 let at = self.chunk_len();
@@ -610,17 +620,27 @@ impl Renderer<'_> {
     }
 
     fn current_style(&self) -> Style {
-        self.styles.last().copied().unwrap_or_else(|| Style::default().fg(self.p.text))
+        self.styles
+            .last()
+            .copied()
+            .unwrap_or_else(|| Style::default().fg(self.p.ink(Ink::Text, Fill::Base)))
     }
 
-    /// Heading style: bold in an accent, deeper levels dimmer.
+    /// Heading style: bold in the theme's color for its level, else body text (deeper levels
+    /// secondary); never the accent, since a heading is never clicked.
     fn heading_style(&self, level: HeadingLevel) -> Style {
-        let fg = match level {
-            HeadingLevel::H1 | HeadingLevel::H2 => self.p.purple,
-            HeadingLevel::H3 => self.p.blue,
-            _ => self.p.dim0,
+        let fallback = match level {
+            HeadingLevel::H1 | HeadingLevel::H2 | HeadingLevel::H3 => Ink::Text,
+            _ => Ink::TextSecondary,
         };
+        let fg = self.hl.markdown().headings[level as usize - 1]
+            .map_or_else(|| self.p.ink(fallback, Fill::Base), |c| self.readable(c, Fill::Base));
         Style::default().fg(fg).add_modifier(Modifier::BOLD)
+    }
+
+    /// A syntax theme's color, read as text on `on`.
+    fn readable(&self, (r, g, b): crate::diff::Rgb, on: Fill) -> Color {
+        self.p.readable(Color::Rgb(r, g, b), on)
     }
 
     /// Close a link, appending its destination dim when the text differs.
@@ -632,7 +652,7 @@ impl Renderer<'_> {
         let dest = self.urls[id].clone();
         let text: String = self.chunks_mut()[start..].iter().map(|c| c.text.as_str()).collect();
         if !dest.is_empty() && text != *dest {
-            let style = Style::default().fg(self.p.dim2);
+            let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
             // The dim destination shares the click target with the text.
             self.push_chunk(format!(" ({})", sanitize(&dest)), style, Some(id));
         }
@@ -655,9 +675,9 @@ impl Renderer<'_> {
     fn emit_image(&mut self, alt: &str, dest: &str) {
         if let Some(label) = badge_label(alt) {
             let fg = match label {
-                "P1" => self.p.orange,
-                "P2" => self.p.yellow,
-                _ => self.p.dim0,
+                "P1" => self.p.ink(Ink::Danger, Fill::Base),
+                "P2" => self.p.ink(Ink::Warning, Fill::Base),
+                _ => self.p.ink(Ink::TextSecondary, Fill::Base),
             };
             let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             self.push_chunk(label.to_string(), style, self.current_link());
@@ -666,7 +686,7 @@ impl Renderer<'_> {
         let alt = sanitize(alt);
         let dest = sanitize(dest);
         let text = if alt.is_empty() { "⧉ image".to_string() } else { format!("⧉ {alt}") };
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         let link = if dest.is_empty() {
             self.current_link()
         } else {
@@ -821,8 +841,8 @@ impl Renderer<'_> {
         let glyph = if open { "▾ " } else { "▸ " };
         let (first, _) = self.prefix(None);
         let off = first.width();
-        let glyph_style = Style::default().fg(self.p.dim2);
-        let text_style = Style::default().fg(self.p.text);
+        let glyph_style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
+        let text_style = Style::default().fg(self.p.ink(Ink::Text, Fill::Base));
         let summary_w = summary.width();
         self.pending_details = Some(DetailsHit {
             start: off,
@@ -850,7 +870,7 @@ impl Renderer<'_> {
         let marker = marker.unwrap_or("");
         let first = format!("{bars}{gap}{indent}{marker}");
         let cont = format!("{bars}{gap}{indent}{}", " ".repeat(marker.width()));
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         (Span::styled(first, style), Span::styled(cont, style))
     }
 
@@ -973,7 +993,10 @@ impl Renderer<'_> {
             self.out.lines.push(if bars.is_empty() {
                 Line::default()
             } else {
-                Line::from(Span::styled(bars, Style::default().fg(self.p.dim2)))
+                Line::from(Span::styled(
+                    bars,
+                    Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base)),
+                ))
             });
         }
         self.needs_blank = false;
@@ -1064,7 +1087,7 @@ impl Renderer<'_> {
     fn emit_fragments(&mut self, fragments: Vec<(String, Style)>, extra_indent: &str) {
         let marker = self.take_marker();
         let (first, cont) = self.prefix(marker.as_deref());
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         let first = Span::styled(format!("{}{extra_indent}", first.content), style);
         let cont = Span::styled(format!("{}{extra_indent}", cont.content), style);
         let budget = self.budget(cont.width());
@@ -1118,7 +1141,7 @@ impl Renderer<'_> {
             Some(k) => format!("⧉ mermaid {k}"),
             None => "⧉ mermaid".to_string(),
         };
-        let style = Style::default().fg(self.p.dim2);
+        let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
         self.emit_fragments(vec![(text, style)], "");
     }
 
@@ -1179,7 +1202,7 @@ impl Renderer<'_> {
 
         if deficit > 0 {
             // Over-wide at every floor: the table renders as its source text instead.
-            let style = Style::default().fg(self.p.dim2);
+            let style = Style::default().fg(self.p.ink(Ink::TextSecondary, Fill::Base));
             let src = self.source.get(table.range.clone()).unwrap_or("");
             let first_line = self.src_line(table.range.start);
             for (i, src_line) in src.trim_end_matches('\n').split('\n').enumerate() {
@@ -1191,7 +1214,7 @@ impl Renderer<'_> {
             return;
         }
 
-        let dim = Style::default().fg(self.p.dim2);
+        let dim = Style::default().fg(self.p.mark(Ink::Border, Fill::Base));
         for (r, row) in table.rows.iter().enumerate() {
             let head = r < table.head_rows;
             let style_of =
@@ -1553,8 +1576,10 @@ fn char_width(c: char) -> usize {
 mod tests {
     use super::{LinkSpan, RenderCache, Rendered, render, render_expanded};
     use crate::highlight::Highlighter;
-    use crate::theme::{self, Palette};
-    use ratatui::style::Modifier;
+    use crate::roles::Palette;
+    use crate::roles::{Fill, Ink};
+    use crate::theme;
+    use ratatui::style::{Color, Modifier};
     use ratatui::text::Line;
     use std::collections::HashSet;
 
@@ -1590,11 +1615,12 @@ mod tests {
             .unwrap_or_else(|| panic!("{t:?}"));
         assert!(!t[i].contains("<h3>"), "{t:?}");
         let span = lines[i].spans.iter().find(|s| s.content.contains("Greptile")).unwrap();
-        assert_eq!(span.style.fg, Some(p.blue), "h3 uses the H3 accent");
+        // Catppuccin's H3 yellow, the same as a `###` heading.
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xf9, 0xe2, 0xaf)), "h3 takes the h3 color");
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
         let j = t.iter().position(|l| l.contains("Confidence Score")).unwrap();
         let span = lines[j].spans.iter().find(|s| s.content.contains("Confidence")).unwrap();
-        assert_eq!(span.style.fg, Some(p.blue));
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xf9, 0xe2, 0xaf)));
     }
 
     #[test]
@@ -1613,20 +1639,33 @@ mod tests {
     }
 
     #[test]
-    fn heading_is_bold_accent_without_markers() {
+    fn heading_is_bold_in_its_theme_color_without_markers() {
         let (hl, p) = setup();
         let lines = render_lines("## Install", 80, &hl, &p);
         assert_eq!(texts(&lines), vec!["Install"]);
         let span = &lines[0].spans[1]; // [0] is the (empty) prefix
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(span.style.fg, Some(p.purple));
+        // Catppuccin's H2 peach.
+        assert_eq!(span.style.fg, Some(Color::Rgb(0xfa, 0xb3, 0x87)));
     }
 
+    /// Each level takes the theme's color for it: Catppuccin's markdown rainbow, red through
+    /// lavender. A theme with no heading colors falls back to body text, deeper levels secondary.
     #[test]
-    fn deeper_headings_dim() {
+    fn each_heading_level_takes_its_theme_color() {
         let (hl, p) = setup();
-        let h4 = render_lines("#### Notes", 80, &hl, &p);
-        assert_eq!(h4[0].spans[1].style.fg, Some(p.dim0));
+        let rainbow = [0xf3_8b_a8, 0xfa_b3_87, 0xf9_e2_af, 0xa6_e3_a1, 0x74_c7_ec, 0xb4_be_fe];
+        for (level, rgb) in (1..=6).zip(rainbow) {
+            let md = format!("{} Title", "#".repeat(level));
+            let lines = render_lines(&md, 80, &hl, &p);
+            let [r, g, b] = [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8];
+            assert_eq!(lines[0].spans[1].style.fg, Some(Color::Rgb(r, g, b)), "h{level}");
+        }
+        let t = theme::resolve(Some("one-dark"));
+        let (hl, p) = (Highlighter::new(t.syntax), t.palette);
+        let fg = |md: &str| render_lines(md, 80, &hl, &p)[0].spans[1].style.fg;
+        assert_eq!(fg("## Title"), Some(p.ink(Ink::Text, Fill::Base)));
+        assert_eq!(fg("#### Title"), Some(p.ink(Ink::TextSecondary, Fill::Base)));
     }
 
     #[test]
@@ -1640,12 +1679,47 @@ mod tests {
         assert!(find("d").style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 
+    /// Every heading level and the code chip clear 4.5:1 in every theme, whatever its colors.
     #[test]
-    fn inline_code_gets_the_code_tint() {
+    fn markdown_colors_read_in_every_theme() {
+        use crate::roles::{TEXT_FLOOR, contrast};
+        let md = "# a\n\n## b\n\n### c\n\n#### d\n\n##### e\n\n###### f\n\nrun `x` now\n";
+        for name in theme::NAMES {
+            let t = theme::resolve(Some(name));
+            let (hl, p) = (Highlighter::new(t.syntax), t.palette);
+            let lines = render_lines(md, 80, &hl, &p);
+            let fg_of = |needle: &str| {
+                let span = lines.iter().flat_map(|l| &l.spans).find(|s| s.content == needle);
+                span.unwrap_or_else(|| panic!("{name}: {needle:?}")).style
+            };
+            for h in ["a", "b", "c", "d", "e", "f"] {
+                let c = contrast(fg_of(h).fg.unwrap(), p.fill(Fill::Base));
+                assert!(c >= TEXT_FLOOR, "{name}: heading {h} {c:.2}");
+            }
+            let code = fg_of("x");
+            assert_eq!(code.bg, Some(p.fill(Fill::Code)), "{name}: the code chip");
+            let c = contrast(code.fg.unwrap(), p.fill(Fill::Code));
+            assert!(c >= TEXT_FLOOR, "{name}: inline code {c:.2}");
+            let level = |h| fg_of(h).fg;
+            match name {
+                "everforest" => assert_ne!(level("a"), level("b"), "everforest colors each level"),
+                "ayu" => assert!(["b", "c", "f"].iter().all(|&h| level(h) == level("a"))),
+                _ => {}
+            }
+        }
+    }
+
+    /// Inline code sits on the code chip in the theme's code color: Catppuccin's green on
+    /// surface0.
+    #[test]
+    fn inline_code_sits_on_a_chip_in_its_theme_color() {
         let (hl, p) = setup();
         let lines = render_lines("run `cargo test` now", 80, &hl, &p);
         let code = lines[0].spans.iter().find(|s| s.content.contains("cargo test")).unwrap();
-        assert_eq!(code.style.fg, Some(p.orange));
+        assert_eq!(code.style.fg, Some(Color::Rgb(0xa6, 0xe3, 0xa1)));
+        assert_eq!(code.style.bg, Some(Color::Rgb(0x31, 0x32, 0x44)));
+        let prose = lines[0].spans.iter().find(|s| s.content.contains("run")).unwrap();
+        assert_eq!(prose.style.bg, None, "only the code wears the chip");
     }
 
     #[test]
@@ -1665,7 +1739,7 @@ mod tests {
         // `let` keyword takes a syntax color different from the plain text color.
         let colors: Vec<_> = lines[0].spans.iter().filter_map(|s| s.style.fg).collect();
         assert!(colors.len() > 2, "rust tokenizes into several colored spans: {colors:?}");
-        assert!(colors.iter().any(|c| *c != p.text));
+        assert!(colors.iter().any(|&c| c != p.ink(Ink::Text, Fill::Base)));
     }
 
     #[test]
@@ -1685,7 +1759,7 @@ mod tests {
         let text = text_of(&lines[0]);
         assert_eq!(text, "see the run (https://ci.example/1)");
         let dest = lines[0].spans.iter().find(|s| s.content.contains("ci.example")).unwrap();
-        assert_eq!(dest.style.fg, Some(p.dim2));
+        assert_eq!(dest.style.fg, Some(p.ink(Ink::TextMuted, Fill::Base)));
         let label = lines[0].spans.iter().find(|s| s.content.contains("the run")).unwrap();
         assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -1928,8 +2002,12 @@ mod tests {
             &hl,
             &p,
         );
-        let named =
-            [p.text, p.dim0, p.dim2, p.dim1, p.purple, p.blue, p.orange, p.red, p.green, p.yellow];
+        let named: Vec<_> = crate::roles::INKS
+            .iter()
+            .flat_map(|&ink| {
+                crate::roles::FILLS.iter().flat_map(move |&on| [p.ink(ink, on), p.mark(ink, on)])
+            })
+            .collect();
         for line in &lines {
             for span in &line.spans {
                 if let Some(fg) = span.style.fg {
@@ -2321,7 +2399,7 @@ mod tests {
         assert!(!t.contains("<sub>"), "{t}");
         assert!(!t.contains("⧉"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P2").unwrap();
-        assert_eq!(chip.style.fg, Some(p.yellow));
+        assert_eq!(chip.style.fg, Some(p.ink(Ink::Warning, Fill::Base)));
         assert!(chip.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -2335,7 +2413,7 @@ mod tests {
         assert!(t.contains("Backfill misses live updates"), "{t}");
         assert!(!t.contains("<img"), "{t}");
         let chip = lines[0].spans.iter().find(|s| s.content == "P1").unwrap();
-        assert_eq!(chip.style.fg, Some(p.orange));
+        assert_eq!(chip.style.fg, Some(p.ink(Ink::Danger, Fill::Base)));
     }
 
     #[test]

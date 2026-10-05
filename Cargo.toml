@@ -1,6 +1,6 @@
 [package]
 name = "herdr-reviewr"
-version = "0.42.0"
+version = "0.44.0"
 edition = "2024"
 rust-version = "1.97"
 description = "A terminal review pane for herdr: browse an agent's changes and send comments back to chat."
@@ -20,8 +20,11 @@ hex = "0.4"
 # The matcher fff-search scores with: the base picker ranks branch names by the same rule
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
-# Forge CLIs spawn in a process group (unix) or job object (Windows), so cancelling a fetch
-# kills the whole tree, `az.cmd`'s python included, and the pipe readers finish.
+# Pinned in the lockfile through ratatui's optional `palette` feature. WCAG contrast and OKLab
+# for the color roles, instead of hand-rolled matrices.
+palette = { version = "0.7.7", default-features = false, features = ["std"] }
+# herdr and the forge CLIs run in a process group (unix) or job object (Windows), so ending a
+# run ends its whole tree, `az.cmd`'s python included.
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui = "0.30"
