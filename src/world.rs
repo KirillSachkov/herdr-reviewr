@@ -110,24 +110,21 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
 /// The active scope's changeset and, on `branch`, its base.
 pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     if !git::is_repo(&input.repo) {
-        return Ok(ScopeBuild {
-            branch_base: git::BaseStatus::default(),
-            pick_status: None,
-            ends: None,
-            changed: Vec::new(),
-        });
+        return Ok(ScopeBuild::plain(Vec::new()));
     }
     scope_build(input, git::head_oid(&input.repo))
 }
 
+impl ScopeBuild {
+    /// `changed` alone, with no base, pick, or ends.
+    fn plain(changed: Vec<ChangedFile>) -> Self {
+        Self { branch_base: git::BaseStatus::default(), pick_status: None, ends: None, changed }
+    }
+}
+
 /// [`build_changed`] against `head`, as the caller read it, inside a repo.
 fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
-    let plain = |changed| ScopeBuild {
-        branch_base: git::BaseStatus::default(),
-        pick_status: None,
-        ends: None,
-        changed,
-    };
+    let plain = ScopeBuild::plain;
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
             Some(t) => {
@@ -168,12 +165,7 @@ fn at_ends(repo: &Path, ends: DiffEnds) -> Result<ScopeBuild> {
         None => git::changed_from(repo, &ends.old)?,
         Some(new) => git::changed_between(repo, &ends.old, new)?,
     };
-    Ok(ScopeBuild {
-        branch_base: git::BaseStatus::default(),
-        pick_status: None,
-        ends: Some(ends),
-        changed,
-    })
+    Ok(ScopeBuild { ends: Some(ends), ..ScopeBuild::plain(changed) })
 }
 
 /// The pick's changeset, verdict and ends in one pass; a `gone` pick has neither.

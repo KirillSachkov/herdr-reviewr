@@ -1978,10 +1978,11 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
         // A failed attribute read costs the verdict, never the whole changeset.
         let undiffable = diff_unset(repo, &new_paths).unwrap_or_default();
         let mut buf = vec![0; 64 * 1024];
-        // Counts carry from the last build to this one: exactly the live untracked set.
-        let counts = COUNTS.get_or_init(Mutex::default);
-        let known =
-            counts.lock().unwrap_or_else(PoisonError::into_inner).remove(repo).unwrap_or_default();
+        // Counts carry from the last build to this one, read without taking them from a build
+        // running beside this one.
+        let last_counts = COUNTS.get_or_init(Mutex::default);
+        let known = last_counts.lock().unwrap_or_else(PoisonError::into_inner).get(repo).cloned();
+        let known = known.unwrap_or_default();
         let mut fresh = Counts::new();
         for path in new_paths {
             let path = path.to_string();
@@ -2006,7 +2007,11 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
                 new_size: None,
             });
         }
-        counts.lock().unwrap_or_else(PoisonError::into_inner).insert(repo.to_path_buf(), fresh);
+        let fresh = std::sync::Arc::new(fresh);
+        last_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(repo.to_path_buf(), fresh);
     }
 
     files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -2042,7 +2047,7 @@ const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 type Counts = HashMap<(PathBuf, u64, Option<std::time::SystemTime>), Option<u32>>;
 
 /// Each repo's counts from its last build.
-static COUNTS: OnceLock<Mutex<HashMap<PathBuf, Counts>>> = OnceLock::new();
+static COUNTS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Counts>>>> = OnceLock::new();
 
 /// An untracked file's line count, `None` where git would call it binary; a count `known` from the
 /// last build is reused, and every count read lands in `fresh`.
