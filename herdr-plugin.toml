@@ -1,6 +1,6 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
-version = "0.44.0"
+version = "0.45.0"
 # 0.9.0 first resolves a relative pane `command[0]` against the plugin root on every OS, which
 # every command below relies on (docs/herdr-api-notes.md).
 min_herdr_version = "0.9.0"

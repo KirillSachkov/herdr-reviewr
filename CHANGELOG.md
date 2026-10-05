@@ -6,8 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-10-05
+
 ### Added
-- **Windows**: install, toggle, review, and send on native Windows, with the same plugin and keybindings.
+- **Windows**: install, toggle, review, and send on native Windows, with the same plugin and keybindings (thanks @Gerkinfeltser, #94).
 - **Git's editor as a fallback**: with no editor variable set, `e` opens the editor in `core.editor`.
 - **Changed line endings**: a line whose only change is its ending shows a `^M` marker.
 - **Copies**: with git's copy detection on, a copied file is marked `C`, not `R`.
