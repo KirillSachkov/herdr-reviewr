@@ -1378,7 +1378,7 @@ impl HunkHeader {
                 None => Some((r.parse().ok()?, 1)),
             }
         };
-        let mut parts = line.strip_prefix("@@ ")?.split(' ');
+        let mut parts = line.strip_prefix("@@ ")?.split_whitespace();
         let old = range(parts.next()?.strip_prefix('-')?)?;
         let new = range(parts.next()?.strip_prefix('+')?)?;
         Some(Self { old, new })
@@ -1994,9 +1994,12 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
 /// reviewr's own read bound, at git's default `core.bigFileThreshold`: past it, binary unread.
 const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
+/// Line counts by file, size, and modification time: what an untracked file held when counted.
+type Counts = HashMap<(PathBuf, u64, Option<std::time::SystemTime>), Option<u32>>;
+
 /// An untracked file's line count, `None` where git would call it binary.
 fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
-    use std::io::Read;
+    static COUNTS: OnceLock<Mutex<Counts>> = OnceLock::new();
     let at = repo.join(path);
     // Only a regular file has lines: a link to a device would read without end.
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
@@ -2006,6 +2009,24 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     if meta.len() > BIG_FILE_THRESHOLD {
         return None;
     }
+    // A file unchanged since its last count is not read again; the cache stays bounded.
+    let key = (at.clone(), meta.len(), meta.modified().ok());
+    let counts = COUNTS.get_or_init(Mutex::default);
+    if let Some(&count) = counts.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return count;
+    }
+    let count = count_lines(&at, buf);
+    let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
+    if counts.len() >= 10_000 {
+        counts.clear();
+    }
+    counts.insert(key, count);
+    count
+}
+
+/// `at`'s line count, `None` where git would call it binary.
+fn count_lines(at: &Path, buf: &mut [u8]) -> Option<u32> {
+    use std::io::Read;
     let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };
     // Counted a buffer at a time, so a large file never sits in memory whole.
     let (mut newlines, mut read, mut last) = (0usize, 0usize, None);
@@ -2658,6 +2679,8 @@ mod tests {
             ("@@ -105,11 +105,12 @@\n", Some(((105, 11), (105, 12)))),
             ("@@ -0,0 +1 @@\n", Some(((0, 0), (1, 1)))),
             ("@@ -7 +7,0 @@ fn main() {\n", Some(((7, 1), (7, 0)))),
+            // A forge payload's doubled space still reads.
+            ("@@ -3,2  +3,2 @@\n", Some(((3, 2), (3, 2)))),
             ("@@ +1 -1 @@\n", None),
             ("@@@ -1 -1 +1 @@@\n", None),
         ];

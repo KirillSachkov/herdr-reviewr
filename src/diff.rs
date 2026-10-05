@@ -456,16 +456,14 @@ fn pair_homologs(
             pairs.extend(rows[d].old_no().zip(rows[inss.start + j].new_no()));
         }
     }
-    // Then each remaining line's first similar unclaimed successor, in order.
+    // Then each remaining line's first similar unclaimed successor within a window, in order.
     let mut next_ins = inss.start;
     for (k, d) in dels.enumerate() {
         if twinned[k] {
             continue;
         }
-        for p in next_ins..inss.end {
-            if claimed[p - inss.start] {
-                continue;
-            }
+        let candidates = (next_ins..inss.end).filter(|&p| !claimed[p - inss.start]);
+        for p in candidates.take(SIMILAR_WINDOW) {
             let (ratio, old_e, new_e) = word_emphasis(&old_texts[k], &new_texts[p - inss.start]);
             if ratio >= MIN_SIMILARITY {
                 if let Row::Deletion { emphasis, .. } = &mut rows[d] {
@@ -483,6 +481,9 @@ fn pair_homologs(
     }
     pairs[first..].sort_unstable();
 }
+
+/// How many unclaimed insertions a deletion tries, so a rewrite block costs linear, not square.
+const SIMILAR_WINDOW: usize = 64;
 
 /// Below this, two lines are different lines, not one edited. Stricter than git-delta: marginal
 /// pairs land near 0.6–0.65, real edits near 0.71–0.78.
@@ -667,7 +668,7 @@ fn content_hash(previous_path: Option<&str>, old: &str, new: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{DiffCache, FileDiff, FileState, Row, View, language_of};
+    use super::{DiffCache, FileDiff, FileState, Row, SIMILAR_WINDOW, View, language_of};
     use crate::highlight::Highlighter;
     use crate::theme;
 
@@ -930,6 +931,22 @@ mod tests {
             .find(|r| matches!(r, Row::Insertion { .. }) && r.text() == "beta")
             .unwrap();
         assert!(extra.emphasis().is_empty(), "the unpaired insertion is not emphasized");
+    }
+
+    #[test]
+    fn a_similar_line_past_the_window_stays_unpaired() {
+        use std::fmt::Write as _;
+        let pairs_with = |unlike: usize| {
+            let mut new = String::new();
+            for i in 0..unlike {
+                writeln!(new, "zz{i} qq{i} ww{i}").unwrap();
+            }
+            new.push_str("let total = sum + 2;\n");
+            build("let total = sum + 1;\n", &new).pairs
+        };
+        let at = |n: usize| u32::try_from(n + 1).unwrap();
+        assert_eq!(pairs_with(SIMILAR_WINDOW - 1), [(1, at(SIMILAR_WINDOW - 1))]);
+        assert!(pairs_with(SIMILAR_WINDOW).is_empty());
     }
 
     #[test]

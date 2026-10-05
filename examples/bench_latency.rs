@@ -115,7 +115,9 @@ fn main() {
     }
 
     // Changes tab: set_diff = one `git diff` for both sides + two-side highlight + diff.
-    if let Some(cf) = changed.first() {
+    // An untracked file reads raw, never through `git diff`.
+    if let Some(cf) = changed.iter().find(|f| f.kind != herdr_reviewr::model::ChangeKind::Untracked)
+    {
         let path = cf.path.clone();
         let base = git::diff_base(&repo);
         let source = cf.previous_path.clone();
@@ -128,17 +130,17 @@ fn main() {
             sample(3, || {
                 let mut cache = DiffCache::new();
                 let (old, new) = sides();
-                cache.get(path.clone(), None, &old, &new, &hl);
+                cache.get(path.clone(), source.clone(), &old, &new, &hl);
             }),
         );
         let mut warm = DiffCache::new();
         let (old0, new0) = sides();
-        warm.get(path.clone(), None, &old0, &new0, &hl);
+        warm.get(path.clone(), source.clone(), &old0, &new0, &hl);
         row(
             "diff open, Changes WARM (same file re-poll)",
             sample(5, || {
                 let (old, new) = sides();
-                warm.get(path.clone(), None, &old, &new, &hl);
+                warm.get(path.clone(), source.clone(), &old, &new, &hl);
             }),
         );
     } else {
