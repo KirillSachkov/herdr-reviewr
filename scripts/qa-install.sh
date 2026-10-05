@@ -53,12 +53,20 @@ fi
 # keeps the old inode and macOS then SIGKILLs the binary at every launch (exit 137).
 "$(dirname "$0")/swap-binary.sh" "$NEW" "$BIN"
 
-# Prove the installed binary actually runs before touching any pane.
-"$BIN" --resolve-plugin-config >/dev/null || {
-  echo "qa-install: installed binary failed --resolve-plugin-config (exit $?)" >&2
+# Prove the installed binary actually runs before touching any pane: an action outside a
+# workspace refuses at once, and a killed binary (exit 137) prints nothing.
+empty=$(mktemp -d)
+said=$(env -u HERDR_WORKSPACE_ID -u HERDR_PANE_ID HERDR_PLUGIN_CONFIG_DIR="$empty" \
+  "$BIN" --action close 2>&1) || :
+rmdir "$empty"
+case "$said" in
+*"invoke from inside herdr"*) ;;
+*)
+  echo "qa-install: installed binary did not run: ${said:-no output}" >&2
   echo "qa-install: rolled-back copy available at $BIN.release-backup" >&2
   exit 1
-}
+  ;;
+esac
 echo "installed: $BIN"
 
 # The manifest names the commands herdr runs for the pane and every action, so a build that

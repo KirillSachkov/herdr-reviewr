@@ -591,7 +591,7 @@ fn a_flag_run_never_counts_as_the_review_ui() {
     let dir = tempfile::tempdir().unwrap();
     // A non-UI flag run is not the review UI, so `open` opens over it.
     let flag_runs: [&[&str]; 2] =
-        [&["herdr-reviewr", "--resolve-plugin-config"], &["herdr-reviewr", "--action", "toggle"]];
+        [&["herdr-reviewr", "--action", "toggle"], &["herdr-reviewr", "/repo", "--action"]];
     for argv in flag_runs {
         reset(dir.path());
         procinfo(dir.path(), "w1:p1", &json!([process("herdr-reviewr", argv)]));
@@ -609,20 +609,8 @@ fn a_flag_run_never_counts_as_the_review_ui() {
 
 #[test]
 fn the_flag_dispatch_matches_the_actions_anywhere_in_argv() {
-    // The binary dispatches a non-UI flag wherever it sits, as the actions exclude it.
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
-
-    let output = Command::new(reviewr_bin())
-        .args(["--some-future-arg", "--resolve-plugin-config"])
-        .env("HERDR_PLUGIN_CONFIG_DIR", dir.path())
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("\"theme\""), "expected config JSON: {}", stdout(&output));
-
     // The flag after a UI argument still dispatches to the action, never the review UI.
+    let dir = tempfile::tempdir().unwrap();
     let mut close = action("close", dir.path());
     let output = close.args(["/some/repo"]).output().unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
@@ -850,41 +838,29 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
 
 #[test]
 fn the_cli_fallback_resolves_the_config_dir_when_the_env_names_none() {
-    // With no `HERDR_PLUGIN_CONFIG_DIR`, the binary asks herdr for the directory.
+    // With no `HERDR_PLUGIN_CONFIG_DIR`, an action asks herdr; its invalid config proves the read.
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
+    fs::write(dir.path().join("config.toml"), "unknown = true\n").unwrap();
 
-    let output = Command::new(reviewr_bin())
-        .arg("--resolve-plugin-config")
-        .env_remove("HERDR_PLUGIN_CONFIG_DIR")
-        .env("HERDR_BIN_PATH", fake_herdr())
-        .env("FAKE_HERDR_DIR", dir.path())
-        .output()
-        .unwrap();
+    let output =
+        action("close", dir.path()).env_remove("HERDR_PLUGIN_CONFIG_DIR").output().unwrap();
 
-    assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("gruvbox"), "expected the CLI-named dir's config");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("config.toml"), "{}", stderr(&output));
 }
 
 #[test]
 fn a_wedged_config_dir_lookup_degrades_to_the_defaults_inside_the_bound() {
-    // A herdr that hangs past the bound resolves no directory.
+    // A herdr that hangs past the bound names no directory, so the invalid file is never read.
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("config.toml"), "theme = \"gruvbox\"\n").unwrap();
+    fs::write(dir.path().join("config.toml"), "unknown = true\n").unwrap();
     fs::write(dir.path().join("configdir-hang"), "").unwrap();
 
-    let output = Command::new(reviewr_bin())
-        .arg("--resolve-plugin-config")
-        .env_remove("HERDR_PLUGIN_CONFIG_DIR")
-        .env("HERDR_BIN_PATH", fake_herdr())
-        .env("FAKE_HERDR_DIR", dir.path())
-        .output()
-        .unwrap();
+    let output =
+        action("close", dir.path()).env_remove("HERDR_PLUGIN_CONFIG_DIR").output().unwrap();
 
     assert!(output.status.success(), "{}", stderr(&output));
-    let stdout = stdout(&output);
-    assert!(!stdout.contains("gruvbox"), "a hung lookup must name no directory: {stdout}");
-    assert!(stdout.contains("\"theme\""), "the defaults still print in full: {stdout}");
+    assert_eq!(stdout(&output), "reviewr: nothing open in workspace-1\n");
 }
 
 // --- Placement: the shape of the `plugin pane open` call.
@@ -1180,21 +1156,19 @@ fn an_explicit_action_refuses_once_the_lock_stays_held_past_the_bound() {
 }
 
 #[test]
-fn auto_open_waits_out_a_held_lock_then_opens() {
+fn auto_open_gives_way_to_a_held_lock() {
+    // The holder is the user's own action in the new workspace, so its outcome stands.
     let dir = tempfile::tempdir().unwrap();
-    let lock = hold_lock(dir.path(), "workspace-9");
-    let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(1));
-        drop(lock);
-    });
+    let _lock = hold_lock(dir.path(), "workspace-9");
     let event = worktree_event("worktree_created", "workspace-9", env!("CARGO_MANIFEST_DIR"), None);
 
+    let started = Instant::now();
     let output = run_auto_open(dir.path(), &event, None);
-    release.join().unwrap();
 
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(output.stdout.is_empty(), "{}", stdout(&output));
-    assert!(herdr_calls(dir.path()).contains("plugin pane open"), "{}", herdr_calls(dir.path()));
+    assert!(started.elapsed() < Duration::from_secs(5), "auto-open waited on the lock");
+    assert!(herdr_calls(dir.path()).is_empty(), "{}", herdr_calls(dir.path()));
 }
 
 #[test]

@@ -287,7 +287,7 @@ impl Keymap {
     }
 
     /// Every action with its bound keys, in keymap-table order.
-    #[must_use]
+    #[cfg(test)]
     pub(crate) fn bindings(&self) -> &[(Action, Vec<Key>)] {
         &self.bindings
     }

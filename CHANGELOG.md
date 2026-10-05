@@ -28,6 +28,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **PR link**: `o` opens only an http(s) pull request URL.
 - **Submodule bumps**: a moved submodule shows its old and new commit, as `git diff` does, instead of an empty diff.
 
+### Removed
+- **`--resolve-plugin-config`**: the JSON dump lost its last reader with the pane script.
+
 ## [0.44.0] — 2026-10-03
 
 ### Added

@@ -17,8 +17,6 @@ use crate::proc::program_name;
 /// A run that is not the review UI: dispatched by `main`, and never counted as a reviewr pane.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NonUiRun {
-    /// `--resolve-plugin-config`: print the normalized plugin config.
-    ResolvePluginConfig,
     /// `--action <name>`; a flag that ends argv names the empty action.
     Action(String),
 }
@@ -27,9 +25,6 @@ impl NonUiRun {
     /// The non-UI run `args` asks for, anywhere in argv, or `None` for the review UI.
     pub fn from_args<S: AsRef<OsStr>>(args: &[S]) -> Option<Self> {
         let args: Vec<&OsStr> = args.iter().map(AsRef::as_ref).collect();
-        if args.contains(&OsStr::new("--resolve-plugin-config")) {
-            return Some(Self::ResolvePluginConfig);
-        }
         let at = args.iter().position(|arg| *arg == "--action")?;
         let name = args.get(at + 1).map(|name| name.to_string_lossy().into_owned());
         Some(Self::Action(name.unwrap_or_default()))
@@ -134,8 +129,10 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 
     let target = Target::read(event)?;
     let ws = target.ws.as_str();
+    // The event gives way at once: a holder is the user's own action in the new workspace.
+    let bound = if action == Action::AutoOpen { Duration::ZERO } else { LOCK_BOUND };
     // Held through the close or open, so a concurrent action sees this one's effect.
-    let _lock = action_lock(ws)?;
+    let _lock = action_lock(ws, bound)?;
 
     // One listing serves the run; a failed one never reads as "no reviewr pane".
     let panes =
@@ -170,8 +167,8 @@ const LOCK_BOUND: Duration = herdr::CALL_BOUND
 /// The pause between two lock attempts.
 const LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Workspace `ws`'s action lock, waited for up to [`LOCK_BOUND`].
-fn action_lock(ws: &str) -> Result<File, Stop> {
+/// Workspace `ws`'s action lock, waited for up to `bound`.
+fn action_lock(ws: &str, bound: Duration) -> Result<File, Stop> {
     let Some(dir) = herdr::var_os("HERDR_PLUGIN_STATE_DIR") else {
         return Err(refused("no plugin state dir (invoke as a herdr plugin action)"));
     };
@@ -189,14 +186,14 @@ fn action_lock(ws: &str) -> Result<File, Stop> {
         .truncate(false)
         .open(&path)
         .map_err(unusable)?;
-    let deadline = Instant::now() + LOCK_BOUND;
+    let deadline = Instant::now() + bound;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(LOCK_POLL),
             Err(TryLockError::WouldBlock) => {
                 return Err(refused(format!(
-                    "another reviewr action in {ws} is still running after {LOCK_BOUND:?}"
+                    "another reviewr action in {ws} is still running after {bound:?}"
                 )));
             }
             Err(TryLockError::Error(error)) => return Err(unusable(error)),

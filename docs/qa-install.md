@@ -27,7 +27,8 @@ runs, and prints what remains manual. The steps it performs, and why each one is
    overwrites the pristine release with an earlier QA build.
 4. Replace the binary **through a new inode**: `rm`, `cp` to a staging name, `mv` into place,
    then `codesign --force --sign -` on macOS.
-5. Run `bin/herdr-reviewr --resolve-plugin-config` and require exit 0 before touching any pane.
+5. Run `bin/herdr-reviewr --action close` outside any workspace and require its refusal
+   ("invoke from inside herdr") before touching any pane. A killed binary prints nothing.
 6. Copy this checkout's `herdr-plugin.toml` over the installed one, through a staging name, so
    herdr never reads a half-written manifest. The manifest names the commands the pane and the
    actions run, so a build that changes them is only exercised with its own manifest.
@@ -62,7 +63,8 @@ there.
 
 ## Verify
 
-- `<plugin>/bin/herdr-reviewr --resolve-plugin-config` exits 0 and prints the config JSON.
+- `env -u HERDR_WORKSPACE_ID <plugin>/bin/herdr-reviewr --action close` prints
+  `reviewr: no workspace context (invoke from inside herdr)`.
 - `herdr plugin action invoke close --plugin persiyanov.reviewr` answers from the new manifest:
   its log entry ran `bin/herdr-reviewr --action close`.
 - After the user reopens a pane, `ps -o lstart= -p $(pgrep -f herdr-reviewr)` shows a start

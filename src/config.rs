@@ -83,15 +83,6 @@ pub enum MarkdownView {
     Rendered,
 }
 
-impl MarkdownView {
-    fn as_str(self) -> &'static str {
-        match self {
-            MarkdownView::Source => "source",
-            MarkdownView::Rendered => "rendered",
-        }
-    }
-}
-
 /// Where the navigator sits around the read pane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NavigatorPosition {
@@ -268,34 +259,6 @@ impl PluginConfig {
     /// The resolved keymap: the defaults with this snapshot's `[keybindings]` applied.
     pub fn keymap(&self) -> &crate::keymap::Keymap {
         &self.keymap
-    }
-
-    /// The normalized config as `--resolve-plugin-config` prints it.
-    pub fn to_json(&self) -> serde_json::Value {
-        let keybindings: serde_json::Map<String, serde_json::Value> = self
-            .keymap
-            .bindings()
-            .iter()
-            .map(|(action, keys)| {
-                let keys: Vec<String> = keys.iter().map(|k| k.config_str()).collect();
-                (action.name().to_owned(), serde_json::json!(keys))
-            })
-            .collect();
-        serde_json::json!({
-            "theme": self.theme,
-            "default_scope": self.default_scope.name(),
-            "markdown_view": self.markdown_view.as_str(),
-            "navigator_position": self.navigator_position.as_str(),
-            "toggle_placement": self.toggle_placement.as_str(),
-            "toggle_direction": self.toggle_direction.as_str(),
-            "auto_open": self.auto_open,
-            "github_host": self.github_host,
-            "gitlab_host": self.gitlab_host,
-            "azure_devops_host": self.azure_devops_host,
-            "editor": self.editor,
-            "url_opener": self.url_opener,
-            "keybindings": keybindings,
-        })
     }
 }
 
@@ -696,13 +659,6 @@ pub(crate) fn valid_host_syntax(host: &str) -> bool {
     })
 }
 
-/// Print the normalized config; its own entry point, so it resolves the dir and log itself.
-pub fn print_plugin_config() -> Result<(), PluginConfigError> {
-    crate::log::init();
-    println!("{}", plugin_config_from_herdr()?.to_json());
-    Ok(())
-}
-
 /// The plugin config a non-UI run reads: the env's dir, else herdr's.
 pub(crate) fn plugin_config_from_herdr() -> Result<PluginConfig, PluginConfigError> {
     plugin_config(resolve_config_dir(crate::herdr::plugin_config_dir).as_deref())
@@ -814,14 +770,12 @@ mod tests {
     }
 
     #[test]
-    fn the_editor_key_carries_its_whole_command_and_reaches_the_resolved_json() {
+    fn the_editor_key_carries_its_whole_command() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "editor = \"code -g {file}:{line}\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.editor(), Some("code -g {file}:{line}"));
-
-        assert_eq!(config.to_json()["editor"], "code -g {file}:{line}");
 
         // A value naming no placeholder is valid: the path is appended.
         for value in ["vim", "myed --at {line}"] {
@@ -834,7 +788,6 @@ mod tests {
         std::fs::write(&path, "theme = \"tokyo-night\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.editor(), None);
-        assert!(config.to_json()["editor"].is_null());
     }
 
     #[test]
@@ -844,7 +797,6 @@ mod tests {
         std::fs::write(&path, "url_opener = \"remote-open\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.url_opener(), Some("remote-open"));
-        assert_eq!(config.to_json()["url_opener"], "remote-open");
     }
 
     #[test]
@@ -1002,7 +954,6 @@ mod tests {
         std::fs::write(&path, "theme = \"catppuccin\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.keymap().action_for(Key::plain(':')), Some(Action::GotoLine));
-        assert_eq!(config.to_json()["keybindings"]["goto-line"], serde_json::json!([":"]));
         std::fs::write(&path, "[keybindings]\ngoto-line = [\"L\"]\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.keymap().action_for(Key::plain('L')), Some(Action::GotoLine));
@@ -1015,12 +966,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // The default `find` chord resolves and serializes in config syntax.
+        // The default `find` chord resolves and spells in config syntax.
         std::fs::write(&path, "theme = \"catppuccin\"\n").unwrap();
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), Some(Action::Find));
-        let bindings = config.to_json()["keybindings"].as_object().unwrap().clone();
-        assert_eq!(bindings["find"], serde_json::json!(["ctrl+f"]));
+        assert_eq!(keys_of(&config, Action::Find), ["ctrl+f"]);
 
         // A rebind to another chord takes, and the old default frees.
         std::fs::write(&path, "[keybindings]\nfind = [\"alt+x\"]\n").unwrap();
@@ -1030,8 +980,8 @@ mod tests {
             Some(Action::Find)
         );
         assert_eq!(config.keymap().action_for(Key::ctrl('f')), None);
-        // The `alt+` chord serializes back in config syntax, not the glyph.
-        assert_eq!(config.to_json()["keybindings"]["find"], serde_json::json!(["alt+x"]));
+        // The `alt+` chord spells back in config syntax, not the glyph.
+        assert_eq!(keys_of(&config, Action::Find), ["alt+x"]);
 
         // A malformed chord is an invalid value.
         std::fs::write(&path, "[keybindings]\nfind = [\"ctrl+\"]\n").unwrap();
@@ -1049,20 +999,20 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.keymap().action_for(Key::plain('h')), Some(Action::Collapse));
         assert_eq!(config.keymap().action_for(Key::named(KeyCode::Left)), Some(Action::Collapse));
-        let json = config.to_json();
-        assert_eq!(json["keybindings"]["collapse"], serde_json::json!(["h", "left"]));
-        assert_eq!(json["keybindings"]["expand"], serde_json::json!(["right"]));
-        assert_eq!(json["keybindings"]["down"], serde_json::json!(["j", "down"]));
-        assert_eq!(json["keybindings"]["half-up"], serde_json::json!(["ctrl+u"]));
+        assert_eq!(keys_of(&config, Action::Collapse), ["h", "left"]);
+        assert_eq!(keys_of(&config, Action::Expand), ["right"]);
+        assert_eq!(keys_of(&config, Action::Down), ["j", "down"]);
+        assert_eq!(keys_of(&config, Action::HalfUp), ["ctrl+u"]);
 
-        // The resolved output re-parses: every emitted spelling is valid config grammar.
-        let resolved = json["keybindings"].as_object().unwrap().clone();
+        // Every key's config spelling re-parses to the same keymap.
         let toml: String = std::iter::once("[keybindings]\n".to_string())
-            .chain(resolved.iter().map(|(action, keys)| format!("{action} = {keys}\n")))
+            .chain(config.keymap().bindings().iter().map(|&(action, _)| {
+                format!("{} = {:?}\n", action.name(), keys_of(&config, action))
+            }))
             .collect();
         std::fs::write(&path, toml).unwrap();
         let reparsed = super::plugin_config_in(dir.path()).unwrap();
-        assert_eq!(reparsed.to_json()["keybindings"], json["keybindings"]);
+        assert_eq!(reparsed.keymap().bindings(), config.keymap().bindings());
 
         // The display spelling of a named key is not the config spelling.
         std::fs::write(&path, "[keybindings]\npage-up = [\"PageUp\"]\n").unwrap();
@@ -1092,12 +1042,11 @@ mod tests {
         let config = super::plugin_config_in(dir.path()).unwrap();
         assert_eq!(config.keymap().action_for(Key::plain('+')), Some(Action::NavigatorGrow));
         assert_eq!(config.keymap().action_for(Key::plain('-')), Some(Action::NavigatorShrink));
-        let json = config.to_json();
-        let bindings = json["keybindings"].as_object().unwrap();
-        assert!(bindings.contains_key("navigator-grow"));
-        assert!(bindings.contains_key("navigator-shrink"));
-        assert!(!bindings.contains_key("list-wider"));
-        assert!(!bindings.contains_key("list-narrower"));
+        let names: Vec<&str> = config.keymap().bindings().iter().map(|(a, _)| a.name()).collect();
+        assert!(names.contains(&"navigator-grow"));
+        assert!(names.contains(&"navigator-shrink"));
+        assert!(!names.contains(&"list-wider"));
+        assert!(!names.contains(&"list-narrower"));
 
         std::fs::write(&path, "[keybindings]\nnavigator-grow = [\"g\"]\nlist-wider = [\"h\"]\n")
             .unwrap();
@@ -1174,24 +1123,18 @@ mod tests {
     }
 
     #[test]
-    fn normalized_json_contains_every_key() {
-        let value = PluginConfig::default().to_json();
-        let object = value.as_object().unwrap();
-        assert_eq!(object.len(), super::PLUGIN_CONFIG_KEYS.len(), "one JSON key per config key");
-        assert_eq!(object["default_scope"], "uncommitted");
-        assert_eq!(object["markdown_view"], "source");
-        assert_eq!(object["navigator_position"], "right");
-        assert_eq!(object["toggle_placement"], "split");
-        assert_eq!(object["toggle_direction"], "right");
-        assert_eq!(object["auto_open"], true);
-        assert!(object["github_host"].is_null());
-        let keybindings = object["keybindings"].as_object().unwrap();
-        assert_eq!(
-            keybindings.len(),
-            crate::keymap::Action::names().count(),
-            "every action is present, resolved"
-        );
-        assert_eq!(keybindings["quit"], serde_json::json!(["q"]));
-        assert_eq!(keybindings["send"], serde_json::json!(["s", "S"]));
+    fn the_default_keymap_binds_every_action() {
+        use crate::keymap::Action;
+        let config = PluginConfig::default();
+        assert_eq!(config.keymap().bindings().len(), Action::names().count());
+        assert_eq!(keys_of(&config, Action::Quit), ["q"]);
+        assert_eq!(keys_of(&config, Action::Send), ["s", "S"]);
+    }
+
+    /// `action`'s keys in `config`, spelled as the config file spells them.
+    fn keys_of(config: &PluginConfig, action: crate::keymap::Action) -> Vec<String> {
+        let mut bindings = config.keymap().bindings().iter();
+        let keys = bindings.find(|(a, _)| *a == action).map(|(_, keys)| keys.as_slice());
+        keys.unwrap_or_default().iter().map(|k| k.config_str()).collect()
     }
 }
