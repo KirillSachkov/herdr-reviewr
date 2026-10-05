@@ -1,6 +1,7 @@
 //! Git access; the only writes are private refs under `refs/worktree/reviewr/`.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -1251,30 +1252,115 @@ pub fn diff_sides(
         "--no-ext-diff",
         "--no-textconv",
         "--ignore-submodules",
-        // So even a pure rename prints both sides in full.
+        // So a rename prints its source's deletion and its target's addition in full.
         "--no-renames",
+        // Names bare and unquoted where git allows, so a section matches its path exactly.
+        "--no-prefix",
         // So the one hunk is the whole file at any length reviewr shows.
         &context,
         old,
     ];
     args.extend(new);
-    args.extend(["--", path]);
+    args.push("--");
+    args.extend(source);
+    args.push(path);
     let out = git(repo, &args)?;
-    Ok(match (parse_sides(&out), source) {
-        // A rename's or copy's old side is its source blob, never what stands at that path now.
-        (Some(DiffSides::Text { new, .. }), Some(source)) => {
-            DiffSides::Text { old: file_content(repo, old, source), new }
+    let sections = sections(&out);
+    // A pathspec matches below a directory of the same name too, so each side is its own section.
+    let side = |name: &str, new_side: bool| -> Option<Option<DiffSides>> {
+        let quoted = quote_path(name);
+        let holds = |s: &&Section<'_>| if new_side { s.adds() } else { s.removes() };
+        sections.iter().filter(holds).find(|s| s.names(&quoted)).map(|s| parse_sides(s.body))
+    };
+    // A rename's old side is its source's, never what stands at its path now.
+    let (new_side, old_side) = (side(path, true), side(source.unwrap_or(path), false));
+    if [&new_side, &old_side].iter().any(|s| matches!(s, Some(Some(DiffSides::Binary)))) {
+        return Ok(DiffSides::Binary);
+    }
+    let hunkless = |s: &Option<Option<DiffSides>>| matches!(s, None | Some(None));
+    if source.is_none() && hunkless(&new_side) && hunkless(&old_side) {
+        // Unchanged, or a change with no hunk (a mode, an empty file): one text both sides.
+        let text = file_content(repo, new.unwrap_or(old), path);
+        return Ok(DiffSides::Text { old: text.clone(), new: text });
+    }
+    let new_text = match new_side {
+        Some(Some(DiffSides::Text { new, .. })) => new,
+        _ => String::new(),
+    };
+    let old_text = match (old_side, source) {
+        (Some(Some(DiffSides::Text { old: text, .. })), _) => text,
+        // A copy's source is unchanged, so git printed nothing for it.
+        (None, Some(source)) => file_content(repo, old, source),
+        _ => String::new(),
+    };
+    Ok(DiffSides::Text { old: old_text, new: new_text })
+}
+
+/// One file's section of a `--no-prefix` `git diff`.
+struct Section<'a> {
+    body: &'a str,
+}
+
+impl Section<'_> {
+    /// Whether the section is `quoted`'s: its `---`/`+++` names or its binary verdict name it.
+    fn names(&self, quoted: &str) -> bool {
+        let name = |line: &str| line.trim_end_matches(['\n', '\t']) == quoted;
+        self.body.lines().take_while(|l| !l.starts_with("@@ ")).any(|l| {
+            l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")).is_some_and(name)
+                || l.strip_prefix("Binary files ").is_some_and(|rest| {
+                    rest.starts_with(&format!("{quoted} and "))
+                        || rest.ends_with(&format!(" and {quoted} differ"))
+                })
+        })
+    }
+
+    /// Whether the section gives the file content on the new side.
+    fn adds(&self) -> bool {
+        !self.body.lines().any(|l| l == "+++ /dev/null" || l.starts_with("deleted file mode"))
+    }
+
+    /// Whether the section had the file on the old side.
+    fn removes(&self) -> bool {
+        !self.body.lines().any(|l| l == "--- /dev/null" || l.starts_with("new file mode"))
+    }
+}
+
+/// A `git diff` output cut at each file's `diff --git` line.
+fn sections(out: &str) -> Vec<Section<'_>> {
+    let mut starts: Vec<usize> = out.match_indices("diff --git ").map(|(i, _)| i).collect();
+    starts.retain(|&i| i == 0 || out.as_bytes()[i - 1] == b'\n');
+    starts
+        .iter()
+        .enumerate()
+        .map(|(k, &i)| Section { body: &out[i..*starts.get(k + 1).unwrap_or(&out.len())] })
+        .collect()
+}
+
+/// `path` as git spells it in a header under `core.quotePath=false`: C-quoted only when it must.
+fn quote_path(path: &str) -> String {
+    if !path.chars().any(|c| c == '"' || c == '\\' || c.is_ascii_control()) {
+        return path.to_string();
+    }
+    let mut out = String::from("\"");
+    for c in path.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\x0b' => out.push_str("\\v"),
+            '\x0c' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_ascii_control() => {
+                let _ = write!(out, "\\{:03o}", c as u32);
+            }
+            c => out.push(c),
         }
-        (Some(sides), _) => sides,
-        // No hunk on a rename's target: it is empty now, against its source.
-        (None, Some(source)) => {
-            DiffSides::Text { old: file_content(repo, old, source), new: String::new() }
-        }
-        (None, None) => {
-            let text = file_content(repo, new.unwrap_or(old), path);
-            DiffSides::Text { old: text.clone(), new: text }
-        }
-    })
+    }
+    out.push('"');
+    out
 }
 
 /// A hunk header `@@ -l,s +l,s @@`: each side's (first line, count).
@@ -2556,9 +2642,6 @@ mod tests {
         let added =
             "diff --git a/f b/f\nnew file mode 100644\n--- /dev/null\n+++ b/f\n@@ -0,0 +1 @@\n+a\n";
         assert_eq!(parse_sides(added), text("", "a\n"));
-        // Two sections (a rename git did not pair): the old path's lines, then the new one's.
-        let unpaired = format!("{header}@@ -1 +0,0 @@\n-old\n{header}@@ -0,0 +1 @@\n+new\n");
-        assert_eq!(parse_sides(&unpaired), text("old\n", "new\n"));
         assert_eq!(
             parse_sides(&format!("{header}Binary files a/f and b/f differ\n")),
             Some(DiffSides::Binary)

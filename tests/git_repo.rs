@@ -139,6 +139,49 @@ fn a_renamed_files_sides_read_the_old_path_and_an_unchanged_one_reads_its_blob()
 }
 
 #[test]
+fn a_file_that_replaced_a_directory_reads_only_its_own_sides() {
+    let r = Repo::init();
+    r.write("foo/a", "inner1\ninner2\n");
+    r.write("bar", "plain\n");
+    r.commit_all("init");
+    r.remove("foo/a");
+    std::fs::remove_dir(r.path().join("foo")).unwrap();
+    r.write("foo", "file1\n");
+    r.remove("bar");
+    r.write("bar/b", "nested\n");
+    r.commit_all("swap");
+    let text = |old: &str, new: &str| DiffSides::Text { old: old.into(), new: new.into() };
+    // `-- foo` also matches `foo/a`, which must never join `foo`'s sides.
+    assert_eq!(
+        diff_sides(r.path(), "HEAD~1", Some("HEAD"), "foo", None).unwrap(),
+        text("", "file1\n")
+    );
+    assert_eq!(
+        diff_sides(r.path(), "HEAD~1", Some("HEAD"), "bar", None).unwrap(),
+        text("plain\n", "")
+    );
+    // Names git quotes or ends with a tab still find their own section.
+    for name in ["say \"hi\".txt", "two words.txt"] {
+        r.write(name, "one\n");
+        r.commit_all("add");
+        r.write(name, "two\n");
+        assert_eq!(diff_sides(r.path(), "HEAD", None, name, None).unwrap(), text("one\n", "two\n"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_became_a_symlink_reads_both_its_sections() {
+    let r = Repo::init();
+    r.write("t", "body\n");
+    r.commit_all("init");
+    r.remove("t");
+    std::os::unix::fs::symlink("elsewhere", r.path().join("t")).unwrap();
+    let sides = diff_sides(r.path(), "HEAD", None, "t", None).unwrap();
+    assert_eq!(sides, DiffSides::Text { old: "body\n".into(), new: "elsewhere".into() });
+}
+
+#[test]
 fn a_path_the_diff_attribute_unsets_carries_gits_no_text_diff_verdict() {
     // `-diff` text is binary to git, and the changeset carries that verdict.
     let r = Repo::init();
