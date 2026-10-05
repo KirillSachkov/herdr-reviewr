@@ -144,8 +144,12 @@ fn call(args: &[&str]) -> Result<String, HerdrError> {
             logln!("herdr {args:?} failed: {}", stderr.trim());
             Err(HerdrError::refused(error_code(&stderr)))
         }
+        Err(RunError::TimedOut) => {
+            logln!("herdr {args:?} unanswered after {CALL_BOUND:?}");
+            Err(HerdrError::Unanswered)
+        }
         Err(error) => {
-            logln!("herdr {args:?} unanswered within {CALL_BOUND:?}: {error:?}");
+            logln!("herdr {args:?} could not run: {error:?}");
             Err(HerdrError::Unanswered)
         }
     }

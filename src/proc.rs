@@ -178,7 +178,10 @@ pub(crate) fn run_tree(
         if let Some(stop) = stop {
             // The readers are left to finish as the ended tree closes their pipes.
             let _ = child.start_kill();
-            let _ = child.wait();
+            // Once ended, the tool was reaped already; a job's wait would block on drained news.
+            if !ended {
+                let _ = child.wait();
+            }
             return Err(stop);
         }
         match child.try_wait() {

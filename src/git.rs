@@ -1235,6 +1235,8 @@ pub fn diff_sides(
     path: &str,
     source: Option<&str>,
 ) -> Result<DiffSides> {
+    // Git before 2.50 overflows twice a wider context on Windows; a longer side opens too large.
+    let context = format!("-U{}", crate::diff::MAX_LINES);
     let mut args = vec![
         // An empty context line prints as a lone space, whatever the user set.
         "-c",
@@ -1248,8 +1250,8 @@ pub fn diff_sides(
         "--ignore-submodules",
         // So even a pure rename prints both sides in full.
         "--no-renames",
-        // The widest context git takes, so the one hunk is the whole file at any length.
-        "-U2147483647",
+        // So the one hunk is the whole file at any length reviewr shows.
+        &context,
         old,
     ];
     args.extend(new);
@@ -1433,9 +1435,9 @@ const COPY_PREFIX: &str = "reviewr-index-";
 
 /// A private index copy in the OS temp dir, never the real index; its `lock` marks it live.
 struct IndexCopy {
-    dir: tempfile::TempDir,
-    /// The lock that marks this copy live, released on drop or with the process.
+    /// The lock that marks this copy live, released on drop (before the dir) or with the process.
     _live: std::fs::File,
+    dir: tempfile::TempDir,
     /// The real index's stamp at the last copy.
     seeded: Option<Stamp>,
 }
@@ -2109,6 +2111,19 @@ mod tests {
         };
         let canonical = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
         assert_eq!(canonical(&root), canonical(repo.path()));
+    }
+
+    #[test]
+    fn a_file_at_the_line_budget_edited_at_both_ends_reads_whole() {
+        let (repo, git) = crate::test_support::test_repo();
+        let old = (0..crate::diff::MAX_LINES).map(|i| i.to_string() + "\n").collect::<String>();
+        std::fs::write(repo.path().join("f.txt"), &old).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let new = format!("first\n{}last\n", &old[2..old.len() - 6]);
+        std::fs::write(repo.path().join("f.txt"), &new).unwrap();
+        let sides = super::diff_sides(repo.path(), "HEAD", None, "f.txt", None).unwrap();
+        assert!(sides == super::DiffSides::Text { old, new }, "the sides are not the whole file");
     }
 
     #[test]

@@ -211,7 +211,7 @@ pub struct FileDiff {
 }
 
 /// The line budget; the byte budget below catches one huge line.
-const MAX_LINES: usize = 50_000;
+pub(crate) const MAX_LINES: usize = 50_000;
 /// The byte budget. A file larger than this renders as a `too_large` notice.
 pub(crate) const MAX_BYTES: usize = 2_000_000;
 

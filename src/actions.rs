@@ -160,9 +160,12 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 /// The review binary's name, which identifies a reviewr pane and names its launch links.
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
-/// How long an action waits for its workspace's lock: a holder's worst case, every call wedged.
-/// Its list, probes, open, and rename, then the visibility wait and the probe in flight at its end.
-const LOCK_BOUND: Duration = herdr::CALL_BOUND.saturating_mul(5).saturating_add(VISIBLE_BOUND);
+/// How long an action waits for its workspace's lock: a holder's five herdr calls all wedged, its
+/// visibility wait, and a second for its last poll pause and local git reads.
+const LOCK_BOUND: Duration = herdr::CALL_BOUND
+    .saturating_mul(5)
+    .saturating_add(VISIBLE_BOUND)
+    .saturating_add(Duration::from_secs(1));
 
 /// The pause between two lock attempts.
 const LOCK_POLL: Duration = Duration::from_millis(20);
