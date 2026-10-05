@@ -114,27 +114,30 @@ fn main() {
         );
     }
 
-    // Changes tab: set_diff = git show HEAD:path + fs read + two-side highlight + diff.
+    // Changes tab: set_diff = one `git diff` for both sides + two-side highlight + diff.
     if let Some(cf) = changed.first() {
         let path = cf.path.clone();
+        let base = git::diff_base(&repo);
+        let source = cf.previous_path.clone();
+        let sides = || match git::diff_sides(&repo, &base, None, &path, source.as_deref()) {
+            Ok(git::DiffSides::Text { old, new }) => (old, new),
+            _ => (String::new(), String::new()),
+        };
         row(
             &format!("diff open, Changes COLD ({path})"),
             sample(3, || {
                 let mut cache = DiffCache::new();
-                let old = git::file_content(&repo, "HEAD", &path);
-                let new = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+                let (old, new) = sides();
                 cache.get(path.clone(), None, &old, &new, &hl);
             }),
         );
         let mut warm = DiffCache::new();
-        let old0 = git::file_content(&repo, "HEAD", &path);
-        let new0 = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+        let (old0, new0) = sides();
         warm.get(path.clone(), None, &old0, &new0, &hl);
         row(
             "diff open, Changes WARM (same file re-poll)",
             sample(5, || {
-                let old = git::file_content(&repo, "HEAD", &path);
-                let new = std::fs::read_to_string(repo.join(&path)).unwrap_or_default();
+                let (old, new) = sides();
                 warm.get(path.clone(), None, &old, &new, &hl);
             }),
         );

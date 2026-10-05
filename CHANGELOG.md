@@ -14,7 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 - **Requires herdr 0.9.0.** The plugin actions run in the binary, so bash and jq are no longer needed at runtime.
-- **Send cap**: a review over 256 KiB refuses with a copy hint, since herdr cannot read more in time.
+- **Send cap**: a send over 256 KiB on the wire refuses with a copy hint, since herdr cannot read more in time.
 
 ### Fixed
 - **Diffs under `core.autocrlf`**: a file whose only difference is line endings no longer shows every line changed.

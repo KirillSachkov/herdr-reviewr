@@ -1893,7 +1893,7 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
     Ok(unset)
 }
 
-/// git's default `core.bigFileThreshold`, past which it calls a file binary unread.
+/// reviewr's own read bound, at git's default `core.bigFileThreshold`: past it, binary unread.
 const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
 /// An untracked file's line count, `None` where git would call it binary.
@@ -1904,7 +1904,7 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
         return Some(0);
     };
-    // Past git's threshold: binary, unread.
+    // Past the bound: binary, unread.
     if meta.len() > BIG_FILE_THRESHOLD {
         return None;
     }

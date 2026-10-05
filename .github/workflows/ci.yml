@@ -29,9 +29,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Formatting reads every file whatever the OS, so one runner checks it.
+      # On Windows too, which proves .gitattributes keeps the checkout's line endings LF.
       - name: Format
-        if: runner.os != 'Windows'
         run: cargo fmt --all --check
 
       - name: Clippy
