@@ -1,12 +1,5 @@
 #!/usr/bin/env bash
-# herdr `[[build]]` step: download the prebuilt herdr-reviewr binary for this platform from the
-# matching GitHub Release into the plugin's bin/ dir. Runs on `herdr plugin install` (a managed
-# checkout); `herdr plugin link` skips the build step — for a local checkout, build from source
-# into bin/ with `just install`.
-#
-# The build runs with the plugin checkout as the working directory, so we resolve the plugin root
-# from this script's location rather than $HERDR_PLUGIN_ROOT (build commands may not receive the
-# runtime env). At runtime every pane and action command runs bin/herdr-reviewr.
+# herdr's `[[build]]` step: put this platform's release binary in bin/; `plugin link` skips it.
 set -euo pipefail
 
 NAME="herdr-reviewr"
@@ -14,6 +7,7 @@ NAME="herdr-reviewr"
 SAY="reviewr"
 REPO="persiyanov/herdr-reviewr"
 
+# The root from this script's place: build commands may not receive herdr's runtime env.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$ROOT/bin"
 
@@ -43,9 +37,8 @@ base="https://github.com/${REPO}/releases/download/${TAG}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Release-asset downloads are eventually-consistent: GitHub's CDN can 404 for a few minutes
-# after a release publishes, even though the asset exists. Retry every failure, 404 included,
-# in the shell rather than with curl's retry flags, which older curls (RHEL 8, CentOS 7) lack.
+# GitHub's CDN can 404 a fresh release's asset for minutes, so every failure retries, here
+# rather than with curl's retry flags, which older curls (RHEL 8, CentOS 7) lack.
 dl() {
   for _ in 1 2 3 4 5 6; do
     curl -fsSL "$1" -o "$2" && return
@@ -75,15 +68,8 @@ tar -xzf "$tmp/$archive" -C "$tmp"
 install -m 0755 "$tmp/$NAME" "$BIN_DIR/$NAME"
 echo "$SAY: installed $BIN_DIR/$NAME"
 
-# Stable launch paths: symlinks into the installed
-# plugin, never copies, so a launch after an uninstall fails loudly instead of running a
-# stale build. An existing symlink re-points on every install — the hash-suffixed plugin
-# root moves — but anything else at the path is left alone: a user's own binary there
-# (`cargo install --root ~/.local`) must survive, and `ln -sfn` onto a real directory
-# would nest inside it. The binary is already installed, so a skipped or failed link
-# warns without failing the install. This build may run in a staging checkout herdr
-# renames afterwards, so the links aim at the runtime root when herdr provides one, and
-# every action re-points them at the live root regardless (`--action`, src/actions.rs).
+# Stable launch paths as symlinks, re-pointed each install; a user's own file there is left alone.
+# A staging checkout gets renamed, so every action re-points them at the live root too.
 LINK_ROOT="${HERDR_PLUGIN_ROOT:-$ROOT}"
 link_binary() {
   if mkdir -p "$1" 2>/dev/null && { [ -L "$1/$NAME" ] || [ ! -e "$1/$NAME" ]; } &&

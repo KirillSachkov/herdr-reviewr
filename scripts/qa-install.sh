@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Swap a locally built herdr-reviewr, and this checkout's manifest, into the GitHub-installed
-# plugin for QA. `--restore` puts back the release pair the first install backed up. The full
-# procedure and every known failure mode: docs/qa-install.md.
-#
-#   qa-install.sh [--restore]
+# qa-install.sh [--restore]: swap this build and manifest into the installed plugin for QA, or put
+# the backed-up release back. The procedure and its failure modes: docs/qa-install.md.
 set -euo pipefail
 
 NEW="target/release/herdr-reviewr"
@@ -39,9 +36,8 @@ fi
 
 [ -f "$NEW" ] || { echo "qa-install: build first (cargo build --release)" >&2; exit 1; }
 
-# herdr rereads the installed manifest on every plugin call, and a manifest asking for a newer
-# herdr than the one running marks the whole plugin unavailable: no pane, no action. Refuse
-# before touching anything rather than disable the user's panes.
+# A manifest asking for a newer herdr than the running one disables the whole plugin, so refuse
+# before touching anything.
 need=$(sed -n 's/^min_herdr_version = "\(.*\)"/\1/p' "$MANIFEST")
 have=$(herdr --version 2>/dev/null | awk '{print $2}') || have=""
 if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then

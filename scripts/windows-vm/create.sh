@@ -1,9 +1,7 @@
-#!/bin/sh
-# Build the Windows QA VM from nothing, unattended: Windows 11 ARM64 under QEMU with Apple's
-# hypervisor, a local admin `reviewr` with auto-logon, OpenSSH with a dedicated key, Git for
-# Windows, and herdr. Takes about 30 minutes, almost all of it the Windows install itself.
-# Needs `brew install qemu`, about 40 GB free, and a network. See docs/qa-install.md.
-set -eu
+#!/usr/bin/env bash
+# Build the Windows QA VM unattended, in about 30 minutes: Windows 11 ARM64 under QEMU, OpenSSH,
+# Git for Windows, and herdr. Needs `brew install qemu` and 40 GB free; see docs/qa-install.md.
+set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 VM_DIR="${VM_DIR:-$HOME/VMs/reviewr-windows}"
 KEY="$HOME/.ssh/reviewr_win_vm"

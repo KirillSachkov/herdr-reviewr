@@ -111,5 +111,5 @@ cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
 Run a pane journey with `scripts/windows-herdr.ps1` copied into the VM, the same harness the
-CI smoke uses. The QA rules above apply inside the VM too: actions and keys go to panes the
-journey opened itself.
+CI smoke uses. Rules 1 and 2 apply inside the VM too, and rule 3's exception lets the journey open
+the panes it drives: no user sits at that seat.

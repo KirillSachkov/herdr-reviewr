@@ -1,4 +1,4 @@
-# herdr API notes (verified against herdr 0.7.5)
+# herdr API notes
 
 The herdr surface herdr-reviewr depends on, confirmed live (last sweep 2026-07-31).
 herdr-reviewr ships as a herdr **plugin** (`../herdr-plugin.toml`), and the binary is a plain

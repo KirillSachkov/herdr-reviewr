@@ -52,9 +52,8 @@ arboard = { version = "3.6.1", default-features = false }
 # The console calls behind the Windows input reader (`src/input/windows.rs`): its mode and its
 # input records. Already in the tree through crossterm.
 crossterm_winapi = "0.9.1"
-# herdr's socket on Windows is a named pipe: the client connects with the crate herdr serves it
-# with, by the same name, and waits for a busy pipe only until the send's deadline. The fake herdr
-# in `tests/send_flow.rs` binds its server side. No default features, so no async runtime.
+# herdr's Windows socket is a named pipe; the crate herdr serves it with connects to it, waiting
+# for a busy pipe only until the send's deadline. No default features, so no async runtime.
 interprocess = "2.4.4"
 # Opens a link through `ShellExecuteW` with no shell between, so an `&` in a URL can't
 # truncate or inject.

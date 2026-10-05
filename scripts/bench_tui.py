@@ -33,10 +33,8 @@ import termios
 import time
 
 COLS, ROWS = 160, 45
-# Output gap that ends a frame burst. Must exceed the largest deferred-reload gap: a
-# paint-then-refresh switch draws instantly and reloads behind the frame, so a smaller
-# window would cut the measurement off before the refreshed frame arrives (and leak
-# that late frame into the next timed press).
+# The output gap that ends a frame burst, longer than a deferred reload's, so its late frame
+# lands in this press's timing and never the next one's.
 QUIET_MS = 300
 SETTLE_TIMEOUT = 30.0
 

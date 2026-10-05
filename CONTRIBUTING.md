@@ -55,7 +55,8 @@ component calls.
 
 - Keep one PR to one concern.
 - `just ci` green, changelog bullet added.
-- Tests live beside the code (unit) and in `tests/` (integration, against real git repos).
+- Tests live beside the code (unit) and in `tests/` (integration, against real git repos), where
+  `comment_shape.rs` also holds every comment in code, scripts, and configs to two lines.
   Test names read as sentences: `a_tab_switch_paints_the_stashed_frame_and_defers_its_reload`.
 
 ## Releasing

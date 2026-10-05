@@ -1,9 +1,5 @@
-# The toggle journey in a headless herdr on Windows: link this checkout with `Reviewr` in bin\,
-# toggle reviewr open in a workspace over a git repo, see it paint the repo's change, toggle
-# again, and see the pane gone. It proves the manifest's extension-less `bin/herdr-reviewr`
-# resolves to bin\herdr-reviewr.exe for the actions and the pane alike.
-#
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-herdr-smoke.ps1 -Reviewr <exe>
+# Toggle reviewr open and closed in a headless Windows herdr, proving `bin/herdr-reviewr` resolves
+# to the .exe: powershell -NoProfile -ExecutionPolicy Bypass -File <this> -Reviewr <exe>
 param(
     [Parameter(Mandatory = $true)] [string] $Reviewr
 )
@@ -30,7 +26,10 @@ foreach ($gitArgs in @(
 }
 Set-Content -LiteralPath (Join-Path $repo $marker) -Value 'hello' -Encoding ascii
 
-$herdr = Install-Herdr
+# The manifest's floor, so the oldest herdr it admits is the one proven.
+$manifest = Get-Content -LiteralPath (Join-Path $checkout 'herdr-plugin.toml') -Raw
+$floor = [regex]::Match($manifest, '(?m)^min_herdr_version = "([^"]+)"').Groups[1].Value
+$herdr = Install-Herdr -Version $floor
 Start-HerdrServer -Herdr $herdr
 try {
     Invoke-Herdr plugin link $checkout | Out-Null

@@ -1,18 +1,14 @@
 id = "persiyanov.reviewr"
 name = "reviewr"
 version = "0.44.0"
-# 0.9.0 is the first herdr that resolves a relative pane `command[0]` against the plugin root
-# on every OS, which the pane and every action below rely on (docs/herdr-api-notes.md). Turn
-# tracking also needs each agent's `cwd` in `herdr agent list`, present from 0.7.5.
+# 0.9.0 first resolves a relative pane `command[0]` against the plugin root on every OS, which
+# every command below relies on (docs/herdr-api-notes.md).
 min_herdr_version = "0.9.0"
 platforms = ["macos", "linux", "windows"]
 description = "Review agent-written diffs beside the chat and add line comments to the agent input."
 
-# On `herdr plugin install`, download the prebuilt `herdr-reviewr` binary for this platform from
-# the matching GitHub Release into $HERDR_PLUGIN_ROOT/bin (no Rust toolchain needed). Skipped by
-# `herdr plugin link` — for a local checkout, build it into `bin/` yourself with `just install`.
-# One entry per platform set: on Windows, `bash` on PATH can be the WSL launcher, which would
-# fetch the Linux binary, so Windows runs the PowerShell twin instead.
+# Install downloads this platform's binary from the release into bin/; `plugin link` skips it.
+# Windows runs the PowerShell twin, since `bash` there can be WSL's, which would fetch Linux's.
 [[build]]
 platforms = ["macos", "linux"]
 command = ["bash", "herdr/install.sh"]
@@ -21,10 +17,8 @@ command = ["bash", "herdr/install.sh"]
 platforms = ["windows"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "herdr/install.ps1"]
 
-# Every runtime command runs the binary in `bin/`, which herdr resolves against the plugin root
-# (the pane's own cwd is the repo under review). No shell and no jq: the actions and the event
-# hook are `--action <id>` runs of the same binary, so one action id works on every OS. The
-# toggle's placement is configurable (default: right split); see `src/actions.rs`.
+# Every command runs `bin/herdr-reviewr` itself, the actions and the event hook as `--action <id>`,
+# so one id works on every OS with no shell between.
 [[panes]]
 id = "pane"
 title = "reviewr"

@@ -1,7 +1,7 @@
-#!/bin/sh
-# Boot the Windows QA VM headless (QEMU + Apple's hypervisor). Idempotent: a running VM is left be.
-#   screen:  vnc://127.0.0.1:5905 (Screen Sharing; or vmkeys.py + a monitor screendump)
-#   shell:   scripts/windows-vm/vm '<powershell>'
+#!/usr/bin/env bash
+# Boot the Windows QA VM headless, idempotently; its screen is vnc://127.0.0.1:5905, its shell
+# scripts/windows-vm/vm '<powershell>'.
+set -euo pipefail
 VM_DIR="${VM_DIR:-$HOME/VMs/reviewr-windows}"
 cd "$VM_DIR" || exit 1
 if [ -f qemu.pid ] && kill -0 "$(cat qemu.pid)" 2>/dev/null; then echo "already running"; exit 0; fi

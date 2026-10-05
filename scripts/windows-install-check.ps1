@@ -1,10 +1,5 @@
-# herdr/install.ps1 against a local fixture release, served over HTTP the way GitHub serves one.
-# `Archive` and `Checksum` are the zip and .sha256 sidecar the release action packs (CI runs it
-# in dry-run mode). Each row installs into a fresh copy of the plugin root, run with the exact
-# argv the manifest's Windows `[[build]]` entry gives herdr.
-#
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows-install-check.ps1 `
-#       -Archive <zip> -Checksum <sha256>
+# Run herdr/install.ps1, as the manifest's build entry does, against a local fixture of the release
+# action's zip and .sha256: <this> -Archive <zip> -Checksum <sha256>
 param(
     [Parameter(Mandatory = $true)] [string] $Archive,
     [Parameter(Mandatory = $true)] [string] $Checksum
@@ -54,9 +49,8 @@ function New-PluginRoot([string]$Row) {
     return $root
 }
 
-# Start the manifest's Windows build argv in `Root`, against the release at `BaseUrl`. The
-# shipped script reads only GitHub, so the staged copy in `Root` has its release URL rewritten:
-# the one line that differs from what users run.
+# Start the manifest's Windows build argv in `Root` against `BaseUrl`: the staged copy's release
+# URL is the one line that differs from what users run.
 function Start-Install([string]$Root, [string]$BaseUrl) {
     $script = Join-Path $Root 'herdr\install.ps1'
     $github = '$BaseUrl = "https://github.com/$Repo/releases/download"'

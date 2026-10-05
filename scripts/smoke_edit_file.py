@@ -24,9 +24,8 @@ import termios
 import time
 
 ROWS, COLS = 40, 120
-# Every session reads a config dir. Left unset, reviewr falls back to the real installed one
-# and the suite would run against whatever the machine's own `editor` key says — opening the
-# reviewer's actual editor. `main` points this at an empty directory before any session starts.
+# An empty config dir `main` sets before any session, so the machine's own `editor` key never
+# opens the reviewer's real editor.
 NO_CONFIG = None
 ALT_ENTER = b"\x1b[?1049h"
 ALT_LEAVE = b"\x1b[?1049l"
@@ -274,9 +273,8 @@ def main():
 
         check("the status names the edited file", b"edited" in plain(after))
 
-        # `q` is the first key sent after the pane comes back, so this is also what proves the
-        # return does not swallow one. Reading output instead would not: the status expires on
-        # its own clock and repaints regardless of whether the press was seen.
+        # `q` is the first key after the pane comes back, so quitting proves the return swallowed
+        # none; the status line can't, since it repaints on its own clock.
         s.press("q")
         try:
             quit_code = s.proc.wait(timeout=10)
@@ -286,9 +284,8 @@ def main():
               f"exit={quit_code}, and None means the pane never saw the key")
         s.close()
 
-        # A window editor takes a different dialect and holds the file the way a reviewer does,
-        # so the checks below run against a pane with an editor still open. A real poll, since
-        # the poll is what shows the write.
+        # A window editor holds the file open as a reviewer's does, so the checks below run with
+        # it still open, on a real poll, since the poll is what shows the write.
         gui_log = os.path.join(home, "argv-gui.txt")
         gui = make_editor(bindir, gui_log, "code", holds=12)
         # Its own repository, so the earlier session's write is not already on screen.
@@ -324,9 +321,8 @@ def main():
         before = s.cpu_seconds()
         s.drain(quiet=0.3, timeout=2.0)
         burned = s.cpu_seconds() - before
-        # `ps -o time=` reports hundredths on macOS and whole seconds on Linux, so the bound is
-        # exact here and degrades to "did not burn a core" there. Either resolution catches the
-        # regression it exists for: a loop asking to wake at a deadline already in the past.
+        # `ps -o time=` is exact on macOS and whole seconds on Linux; either catches a loop waking
+        # at a deadline already past.
         check("and rests while it waits", burned < 0.2, f"burned {burned:.2f}s of cpu in 2s")
         # Nothing waits for the editor to close: the poll shows the write while the file is
         # still out, with no keypress from the reviewer.

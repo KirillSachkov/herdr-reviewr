@@ -1,19 +1,5 @@
-# A headless herdr to drive reviewr in, on a Windows runner or VM. Dot-source it:
-#
-#   . .\scripts\windows-herdr.ps1
-#   $herdr = Install-Herdr                       # herdr.exe, downloaded from its release
-#   Start-HerdrServer -Herdr $herdr              # private session, no terminal attached
-#   Invoke-Herdr plugin link $repoRoot           # any herdr CLI call; throws on a non-zero exit
-#   $ws = New-HerdrWorkspace -Cwd $gitRepo       # .Workspace and .Pane (its root pane)
-#   $run = Invoke-PluginAction toggle            # waits for the run; .exit_code, .stdout, .stderr
-#   $pane = Get-PaneIds $ws.Workspace | Where-Object { $_ -ne $ws.Pane }
-#   Wait-PaneText $pane 'Files'                  # the visible screen, once it matches
-#   Send-PaneKeys $pane j Enter                  # herdr pane send-keys
-#   Send-PaneText $pane "two`nlines"             # herdr pane send-text: literal, unsubmitted
-#   Stop-HerdrServer
-#
-# Modeled on herdr's own scripts/windows_smoke_conpty_path.ps1. PowerShell 5.1 compatible and
-# ASCII only, so the same file runs in the Windows VM's stock `powershell`.
+# A headless herdr to drive reviewr in on Windows, dot-sourced; windows-herdr-smoke.ps1 is a journey.
+# ASCII and PowerShell 5.1 only, so the VM's stock `powershell` runs it too.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -41,10 +27,8 @@ function Install-Herdr {
     return $exe
 }
 
-# Run herdr with `Arguments` and return its output as one string, stderr included. Throws on a
-# non-zero exit. 5.1 turns a native command's stderr into errors, so the call runs with
-# ErrorActionPreference relaxed and judges by the exit code alone. A plain function with no
-# param block, so herdr's `--flags` pass through as arguments instead of binding as parameters.
+# Run herdr and return stdout and stderr as one string, throwing on a non-zero exit alone. No param
+# block, so herdr's `--flags` pass through as arguments.
 function Invoke-Herdr {
     $Arguments = [string[]] $args
     $ErrorActionPreference = 'Continue'
@@ -103,9 +87,8 @@ function Wait-For {
     }
 }
 
-# Invoke plugin action `Action` and wait for it to finish, the way a keypress runs it. herdr
-# answers the invoke at once and runs the action detached, so the finished run is read back from
-# herdr's plugin log. Returns that log entry: .status, .exit_code, .stdout, .stderr.
+# Invoke plugin action `Action` as a keypress does, and return its finished run from herdr's
+# plugin log: .status, .exit_code, .stdout, .stderr.
 function Invoke-PluginAction {
     param(
         [Parameter(Mandatory = $true, Position = 0)] [string] $Action,

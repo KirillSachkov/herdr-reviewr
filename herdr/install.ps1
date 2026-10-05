@@ -1,15 +1,5 @@
-# herdr `[[build]]` step on Windows, the twin of install.sh: download the prebuilt
-# herdr-reviewr.exe from the matching GitHub Release into the plugin's bin\ dir. Runs on
-# `herdr plugin install` (a managed checkout). `herdr plugin link` skips the build step: for a
-# local checkout, put a build in bin\ yourself.
-#
-# ASCII only, and PowerShell 5.1 compatible: 5.1 is the `powershell` every Windows ships, and it
-# reads a script without a BOM in the ANSI code page, where one UTF-8 dash can decode to a
-# quote that ends a string early.
-#
-# Like install.sh, the plugin root comes from this script's location, not $env:HERDR_PLUGIN_ROOT:
-# herdr runs the build without the runtime env. Windows gets no stable launch links (symlinks
-# need Developer Mode or admin), so this only installs the binary.
+# herdr's Windows `[[build]]` step, install.sh's twin: put the release's herdr-reviewr.exe in bin\.
+# ASCII and PowerShell 5.1 only: 5.1 reads a BOM-less script in the ANSI code page.
 
 $ErrorActionPreference = 'Stop'
 # 5.1 draws a progress bar per downloaded chunk, which slows a download severalfold.
@@ -23,6 +13,7 @@ $Name = 'herdr-reviewr'
 $Say = 'reviewr'
 $Repo = 'persiyanov/herdr-reviewr'
 
+# The root from this script's place: herdr runs the build without the runtime env.
 $Root = Split-Path -Parent $PSScriptRoot
 $BinDir = Join-Path $Root 'bin'
 
