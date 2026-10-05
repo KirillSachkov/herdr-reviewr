@@ -45,7 +45,6 @@ use ratatui::crossterm::event::{
 };
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
 };
 use ratatui::crossterm::{cursor, execute};
 use ratatui::layout::Rect;
@@ -71,14 +70,11 @@ pub fn run() -> Result<()> {
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
-    // The kitty protocol reports Ctrl/Alt+arrows, which the legacy encoding drops.
-    let kbd = supports_keyboard_enhancement().unwrap_or(false);
-    logln!("keyboard enhancement supported={kbd}");
     // `ratatui::init` claimed the screen and raw mode; the input modes are left.
-    claim_input_modes(kbd);
+    claim_input_modes();
     // Paint before the first load, so a hung `git` never leaves herdr's blank pane (issue #4).
     if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-        restore_terminal(kbd);
+        restore_terminal();
         return Err(error.into());
     }
     // A cosmetic label; identity is the process.
@@ -99,7 +95,7 @@ pub fn run() -> Result<()> {
         initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
         app = app_for(&cfg, &initial_config);
         if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-            restore_terminal(kbd);
+            restore_terminal();
             herdr::clear_pane_label();
             return Err(error.into());
         }
@@ -115,40 +111,40 @@ pub fn run() -> Result<()> {
         logln!("startup reload failed: {e:#}");
         app.status = format!("load failed: {e}");
     }
-    let result = event_loop(&mut terminal, &mut app, &cfg, kbd);
+    let result = event_loop(&mut terminal, &mut app, &cfg);
     herdr::clear_pane_label();
     result
 }
 
 /// Claim the input modes on a screen something else owns.
-fn claim_input_modes(kbd: bool) {
-    input::claim(kbd);
+fn claim_input_modes() {
+    input::claim();
     let _ = execute!(io::stdout(), cursor::Hide);
 }
 
 /// Release what [`claim_input_modes`] claimed.
-fn release_input_modes(kbd: bool) {
-    input::release(kbd);
+fn release_input_modes() {
+    input::release();
     let _ = execute!(io::stdout(), cursor::Show);
 }
 
 /// Claim the screen and input modes back from an external program; never at startup.
-fn claim_terminal(kbd: bool) {
+fn claim_terminal() {
     let _ = enable_raw_mode();
     let _ = execute!(io::stdout(), EnterAlternateScreen);
-    claim_input_modes(kbd);
+    claim_input_modes();
 }
 
 /// Release everything [`claim_terminal`] claims.
-fn release_terminal(kbd: bool) {
-    release_input_modes(kbd);
+fn release_terminal() {
+    release_input_modes();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
 
 /// Leave the alternate screen and release terminal input modes before any bounded worker drain.
-fn restore_terminal(kbd: bool) {
-    release_input_modes(kbd);
+fn restore_terminal() {
+    release_input_modes();
     ratatui::restore();
 }
 
@@ -171,7 +167,6 @@ fn run_editor(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     configured: Option<&str>,
-    kbd: bool,
     open: &mut Vec<std::process::Child>,
 ) -> Result<()> {
     let Some(target) = app.editor_request.take() else { return Ok(()) };
@@ -227,9 +222,9 @@ fn run_editor(
 
     // A terminal editor gets the pane, and the loop waits it out.
     app.forget_pointer();
-    release_terminal(kbd);
+    release_terminal();
     let launched = cmd.status();
-    claim_terminal(kbd);
+    claim_terminal();
     drain_input(app)?;
 
     match launched {
@@ -730,12 +725,7 @@ fn world_wake(builds: bool) -> Duration {
 }
 
 /// Draw, then wait up to the poll deadline for input; refresh on each tick.
-fn event_loop(
-    terminal: &mut DefaultTerminal,
-    app: &mut App,
-    cfg: &Config,
-    kbd: bool,
-) -> Result<()> {
+fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Result<()> {
     let poll = cfg.poll;
     let mut last_poll = Instant::now();
     // When the last mouse event came, and whether it sat on the pane's edge.
@@ -1177,7 +1167,7 @@ fn event_loop(
                 app.tick_base_picker_probe();
             }
             if app.editor_request.is_some() {
-                run_editor(terminal, app, painted_frame.editor(), kbd, &mut open_editors)?;
+                run_editor(terminal, app, painted_frame.editor(), &mut open_editors)?;
             }
             if app.should_quit {
                 break;
@@ -1215,7 +1205,7 @@ fn event_loop(
         }
         Ok(())
     })();
-    restore_terminal(kbd);
+    restore_terminal();
     drain_pr_shutdown(&mut pr, &probe_rx, &pr_rx);
     result
 }

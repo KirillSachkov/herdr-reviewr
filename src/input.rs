@@ -8,12 +8,11 @@ mod windows;
 
 use std::io;
 
-/// The bracketed-paste markers.
-pub(crate) const PASTE_START: &str = "\x1b[200~";
-pub(crate) const PASTE_END: &str = "\x1b[201~";
-
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
+#[cfg(not(windows))]
+use ratatui::crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
@@ -23,11 +22,26 @@ pub(crate) use ratatui::crossterm::event::{poll, read};
 #[cfg(windows)]
 pub(crate) use windows::{poll, read};
 
+/// The bracketed-paste markers.
+pub(crate) const PASTE_START: &str = "\x1b[200~";
+pub(crate) const PASTE_END: &str = "\x1b[201~";
+
+/// Whether the terminal speaks the kitty protocol, asked once; it reports Ctrl/Alt+arrows.
+#[cfg(not(windows))]
+fn kitty() -> bool {
+    static KITTY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *KITTY.get_or_init(|| {
+        let kitty = ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+        crate::logln!("keyboard enhancement supported={kitty}");
+        kitty
+    })
+}
+
 /// Mouse capture, bracketed paste, and the kitty protocol where the terminal has it.
-pub(crate) fn claim(kbd: bool) {
+pub(crate) fn claim() {
     let _ = execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste);
-    // Windows pushes the flag itself, in `windows::claim`.
-    if kbd && cfg!(not(windows)) {
+    #[cfg(not(windows))]
+    if kitty() {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         let _ = execute!(io::stdout(), PushKeyboardEnhancementFlags(flags));
     }
@@ -37,10 +51,11 @@ pub(crate) fn claim(kbd: bool) {
 }
 
 /// Release what [`claim`] claimed, in reverse.
-pub(crate) fn release(kbd: bool) {
+pub(crate) fn release() {
     #[cfg(windows)]
     windows::release();
-    if kbd && cfg!(not(windows)) {
+    #[cfg(not(windows))]
+    if kitty() {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
