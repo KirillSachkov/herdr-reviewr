@@ -3,8 +3,6 @@
 
 mod fixture;
 
-#[allow(unused_imports)]
-pub use fixture::fixture;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -12,6 +10,9 @@ use std::sync::OnceLock;
 use herdr_reviewr::app::App;
 use herdr_reviewr::model::Scope;
 use tempfile::TempDir;
+
+#[allow(unused_imports)]
+pub use fixture::fixture;
 
 /// The fake herdr, built here once per test process: `cargo test --test` builds no examples.
 pub fn fake_herdr() -> &'static Path {

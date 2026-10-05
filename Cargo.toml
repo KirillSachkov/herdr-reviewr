@@ -14,9 +14,9 @@ categories = ["command-line-utilities", "development-tools"]
 [dependencies]
 anyhow = "1"
 dirs = "7"
+fff-search = "0.11.0"
 # Already in the tree. Names each workspace's action lock file one-to-one.
 hex = "0.4"
-fff-search = "0.11.0"
 # The matcher fff-search scores with: the base picker ranks branch names by the same rule
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
@@ -43,9 +43,19 @@ unicode-width = "0.2"
 which = "8.0.6"
 
 [target.'cfg(windows)'.dependencies]
+# The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
+# only: no image support, so no image codecs enter the tree.
+arboard = { version = "3.6.1", default-features = false }
 # The console calls behind the Windows input reader (`src/input/windows.rs`): its mode and its
 # input records. Already in the tree through crossterm.
 crossterm_winapi = "0.9.1"
+# herdr's socket on Windows is a named pipe: the client connects with the crate herdr serves it
+# with, by the same name, and waits for a busy pipe only until the send's deadline. The fake herdr
+# in `tests/send_flow.rs` binds its server side. No default features, so no async runtime.
+interprocess = "2.4.4"
+# Opens a link through `ShellExecuteW` with no shell between, so an `&` in a URL can't
+# truncate or inject.
+opener = "0.9.0"
 # crossterm's unix input parser, published on its own, and its mapping onto crossterm's events:
 # the Windows reader parses the console's VT input with them (`src/input/vt.rs`).
 terminput = "0.5.15"
@@ -53,16 +63,6 @@ terminput-crossterm = "0.4.11"
 # `WaitForSingleObject` on the console input handle, the one call no safe wrapper offers. The
 # features are already on in the tree.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
-# The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
-# only: no image support, so no image codecs enter the tree.
-arboard = { version = "3.6.1", default-features = false }
-# Opens a link through `ShellExecuteW` with no shell between, so an `&` in a URL can't
-# truncate or inject.
-opener = "0.9.0"
-# herdr's socket on Windows is a named pipe: the client connects with the crate herdr serves it
-# with, by the same name, and waits for a busy pipe only until the send's deadline. The fake herdr
-# in `tests/send_flow.rs` binds its server side. No default features, so no async runtime.
-interprocess = "2.4.4"
 
 [dev-dependencies]
 # The Windows input parser's tests run on every OS (`src/input/vt.rs`).

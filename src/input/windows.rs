@@ -10,10 +10,9 @@ use ratatui::crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
 use super::vt::{Console as VtConsole, Record, VtInput};
-
-use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
 /// The console and parser state; `None` while released, so an editor's leftovers never parse.
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
