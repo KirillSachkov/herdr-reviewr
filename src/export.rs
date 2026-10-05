@@ -27,6 +27,16 @@ pub fn format_all(comments: &[&Comment]) -> String {
     sorted.iter().map(|c| format_comment(c)).collect::<Vec<_>>().join("\n\n")
 }
 
+/// The text with the platform's line breaks, which both the clipboard and herdr's paste expect.
+fn platform_line_breaks(text: &str) -> String {
+    if cfg!(windows) { crlf_line_breaks(text) } else { text.to_string() }
+}
+
+/// `\n` as CRLF, an existing CRLF kept, a lone CR passed through.
+fn crlf_line_breaks(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
 /// A destination comments can be exported to. Export succeeds or errors as a whole.
 pub trait ExportTarget {
     fn export(&self, text: &str) -> Result<()>;
@@ -78,7 +88,7 @@ impl ExportTarget for Clipboard {
     }
 
     fn export(&self, text: &str) -> Result<()> {
-        clipboard::write(text)
+        clipboard::write(&platform_line_breaks(text))
     }
 }
 
@@ -153,9 +163,7 @@ mod clipboard {
         None
     }
 
-    /// Line breaks as CRLF, the clipboard's own convention.
     pub(super) fn write(text: &str) -> Result<()> {
-        let text = crate::herdr::crlf_line_breaks(text);
         arboard::Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(text))
             .context("writing the Windows clipboard")
@@ -185,7 +193,7 @@ impl ExportTarget for Agent {
 
     /// An agent at a prompt refuses: the picker's rows can be minutes old.
     fn export(&self, text: &str) -> Result<()> {
-        herdr::send_text(&self.pane, text)?;
+        herdr::send_text(&self.pane, &platform_line_breaks(text))?;
         // A focus failure must not fail a delivered export.
         let _ = herdr::focus(&self.pane);
         Ok(())
@@ -213,6 +221,19 @@ mod tests {
             select_tool(TOOLS, |c| c == "pbcopy" || c == "xclip").map(|(cmd, _)| cmd),
             Some("pbcopy")
         );
+    }
+
+    #[test]
+    fn windows_line_breaks_are_crlf_and_never_doubled() {
+        let rows = [
+            ("a.rs:2\n+b\nok", "a.rs:2\r\n+b\r\nok"),
+            ("a\n\nb\n", "a\r\n\r\nb\r\n"),
+            ("a\r\nb", "a\r\nb"),
+            ("a\rb", "a\rb"),
+        ];
+        for (text, want) in rows {
+            assert_eq!(super::crlf_line_breaks(text), want, "{text:?}");
+        }
     }
 
     #[test]

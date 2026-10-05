@@ -607,7 +607,7 @@ pub fn send_text(pane: &str, text: &str) -> Result<()> {
     let request = serde_json::json!({
         "id": "reviewr:send",
         "method": "pane.send_text",
-        "params": {"pane_id": pane, "text": paste_payload(text)},
+        "params": {"pane_id": pane, "text": pasted(text)},
     })
     .to_string();
     if request.len() > MAX_REQUEST_BYTES {
@@ -702,16 +702,6 @@ mod socket {
     }
 }
 
-/// The text framed as one bracketed paste, line breaks as herdr's own paste encodes them.
-fn paste_payload(text: &str) -> String {
-    if cfg!(windows) { pasted(&crlf_line_breaks(text)) } else { pasted(text) }
-}
-
-/// `\n` as CRLF, an existing CRLF kept, a lone CR passed through.
-pub(crate) fn crlf_line_breaks(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\n', "\r\n")
-}
-
 /// The batch as one bracketed paste, with every inner terminator stripped in one pass.
 fn pasted(text: &str) -> String {
     let mut body = String::with_capacity(text.len());
@@ -734,19 +724,6 @@ mod tests {
     use super::{
         AgentChoice, AgentPane, HashMap, HerdrError, Status, parse_agents, parse_tab_labels,
     };
-
-    #[test]
-    fn windows_line_breaks_are_crlf_and_never_doubled() {
-        let rows = [
-            ("a.rs:2\n+b\nok", "a.rs:2\r\n+b\r\nok"),
-            ("a\n\nb\n", "a\r\n\r\nb\r\n"),
-            ("a\r\nb", "a\r\nb"),
-            ("a\rb", "a\rb"),
-        ];
-        for (text, want) in rows {
-            assert_eq!(super::crlf_line_breaks(text), want, "{text:?}");
-        }
-    }
 
     /// One agent entry shaped like the real `herdr agent list` output (api notes).
     fn agent(pane: &str, tab: &str, ws: &str) -> AgentPane {
@@ -937,28 +914,6 @@ mod tests {
         assert_eq!(parse_agents(cleared).unwrap()[0].row_name(), "codex");
     }
 
-    #[test]
-    fn a_send_is_one_bracketed_paste_with_the_platforms_newlines() {
-        // (text, unix bytes, Windows bytes).
-        let rows = [
-            // Issue #41's repro string: sent raw, vim ate the leading `b` and `i`.
-            (
-                "bit/DESIGN.md:95 note",
-                "\x1b[200~bit/DESIGN.md:95 note\x1b[201~",
-                "\x1b[200~bit/DESIGN.md:95 note\x1b[201~",
-            ),
-            (
-                "a.rs:2\n+b\nok",
-                "\x1b[200~a.rs:2\n+b\nok\x1b[201~",
-                "\x1b[200~a.rs:2\r\n+b\r\nok\x1b[201~",
-            ),
-        ];
-        for (text, unix, windows) in rows {
-            let want = if cfg!(windows) { windows } else { unix };
-            assert_eq!(super::paste_payload(text), want, "{text:?}");
-        }
-    }
-
     /// A herdr that accepts and never answers holds the exchange only until its deadline.
     #[cfg(unix)]
     #[test]
@@ -995,7 +950,10 @@ mod tests {
     }
 
     #[test]
-    fn an_embedded_paste_terminator_cannot_end_the_frame_early() {
+    fn a_send_is_one_bracketed_paste_no_embedded_terminator_can_end() {
+        // Issue #41's repro string: sent raw, vim ate the leading `b` and `i`.
+        let note = "bit/DESIGN.md:95 note";
+        assert_eq!(super::pasted(note), "\x1b[200~bit/DESIGN.md:95 note\x1b[201~");
         // A snippet can carry the terminator, even spliced across a removal.
         assert_eq!(super::pasted("a\x1b[201~b"), "\x1b[200~ab\x1b[201~");
         assert_eq!(super::pasted("a\x1b[201\x1b[201~~b"), "\x1b[200~ab\x1b[201~");
