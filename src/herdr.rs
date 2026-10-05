@@ -96,6 +96,13 @@ pub enum HerdrError {
     Unreadable,
     /// The addressed pane no longer exists: it exited between an earlier read and this call.
     PaneGone,
+}
+
+/// Why a review did not reach an agent's input.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SendError {
+    /// herdr failed a call the send made.
+    Herdr(HerdrError),
     /// The named agent waits on a permission or confirm prompt, which would drop a paste.
     AtPrompt(String),
     /// The workspace holds no agent to send to.
@@ -103,6 +110,25 @@ pub enum HerdrError {
     /// The review is over the send cap, so it cannot go as one paste.
     TooLarge,
 }
+
+impl From<HerdrError> for SendError {
+    fn from(error: HerdrError) -> Self {
+        Self::Herdr(error)
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Herdr(error) => error.fmt(f),
+            Self::AtPrompt(name) => write!(f, "{name} is at a prompt"),
+            Self::NoAgent => write!(f, "no agent in the workspace"),
+            Self::TooLarge => write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
 
 impl HerdrError {
     /// A refusal carrying herdr's `error.code`, a gone pane read as such.
@@ -122,9 +148,6 @@ impl std::fmt::Display for HerdrError {
             Self::Refused(None) => write!(f, "herdr refused"),
             Self::Unreadable => write!(f, "herdr answered in an unknown shape"),
             Self::PaneGone => write!(f, "the pane is gone"),
-            Self::AtPrompt(name) => write!(f, "{name} is at a prompt"),
-            Self::NoAgent => write!(f, "no agent in the workspace"),
-            Self::TooLarge => write!(f, "the review is over the {MAX_REQUEST_BYTES}-byte send cap"),
         }
     }
 }
@@ -400,13 +423,13 @@ fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
 }
 
 /// What `Send` does: one agent sends, several open the picker, none refuses.
-pub fn send_target() -> Result<SendTarget> {
+pub fn send_target() -> Result<SendTarget, SendError> {
     let (ws, me) = agent_env();
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
     match picked.len() {
-        0 => Err(HerdrError::NoAgent.into()),
+        0 => Err(SendError::NoAgent),
         // The sole-agent send shows no row, so only the picker pays for the tab-label call.
         1 => Ok(SendTarget::One(picked[0].choice(&HashMap::new()))),
         _ => {
@@ -530,19 +553,19 @@ fn candidates<'a>(
 }
 
 /// Refuse a send to an agent at a prompt, read fresh; herdr offers no atomic send-if-ready.
-fn ensure_ready(pane: &str) -> Result<(), HerdrError> {
+fn ensure_ready(pane: &str) -> Result<(), SendError> {
     readiness_in(&agent_list()?, pane)
 }
 
 /// Only an agent at a prompt refuses, since a prompt drops a paste; one no longer listed is gone.
-fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), HerdrError> {
+fn readiness_in(agents: &[AgentPane], pane: &str) -> Result<(), SendError> {
     match agents.iter().find(|agent| agent.pane_id == pane && agent.agent.is_some()) {
         None => {
             logln!("agent pane {pane} is gone");
-            Err(HerdrError::PaneGone)
+            Err(HerdrError::PaneGone.into())
         }
         Some(agent) if agent.status() == Status::Blocked => {
-            Err(HerdrError::AtPrompt(agent.row_name()))
+            Err(SendError::AtPrompt(agent.row_name()))
         }
         Some(_) => Ok(()),
     }
@@ -555,7 +578,7 @@ const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const SEND_BOUND: Duration = Duration::from_secs(5).saturating_add(ANSWER_BOUND);
 
 /// Paste literal text into the agent pane's input, unsubmitted, in one socket request.
-pub fn send_text(pane: &str, text: &str) -> Result<()> {
+pub fn send_text(pane: &str, text: &str) -> Result<(), SendError> {
     let Some(socket) = var_os("HERDR_SOCKET_PATH") else {
         logln!("no HERDR_SOCKET_PATH to send through");
         return Err(HerdrError::Unanswered.into());
@@ -567,7 +590,7 @@ pub fn send_text(pane: &str, text: &str) -> Result<()> {
     })
     .to_string();
     if request.len() > MAX_REQUEST_BYTES {
-        return Err(HerdrError::TooLarge.into());
+        return Err(SendError::TooLarge);
     }
     ensure_ready(pane)?;
     Ok(socket_call(socket, request)?)
@@ -740,11 +763,12 @@ mod tests {
         }
         // A prompt drops a paste.
         let blocked = super::readiness_in(&[at("blocked")], "w8:p1");
-        assert_eq!(blocked, Err(HerdrError::AtPrompt("claude".into())));
-        assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), Err(HerdrError::PaneGone));
+        assert_eq!(blocked, Err(super::SendError::AtPrompt("claude".into())));
+        let gone = Err(super::SendError::Herdr(HerdrError::PaneGone));
+        assert_eq!(super::readiness_in(&[at("idle")], "w8:p9"), gone);
         // A pane whose agent exited is listed without one: the send goes nowhere near it.
         let shell = AgentPane { agent: None, ..at("idle") };
-        assert_eq!(super::readiness_in(&[shell], "w8:p1"), Err(HerdrError::PaneGone));
+        assert_eq!(super::readiness_in(&[shell], "w8:p1"), gone);
     }
 
     #[test]

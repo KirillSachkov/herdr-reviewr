@@ -39,15 +39,15 @@ pub trait ExportTarget {
 
 /// The status for a failed send to `agent`: the cause first, since a narrow pane keeps only the
 /// line's start, then the way out.
-pub fn send_failure(error: &anyhow::Error, agent: Option<&str>, copy: &str) -> String {
-    use herdr::HerdrError as E;
-    let cause = match error.downcast_ref::<E>() {
-        Some(E::AtPrompt(name)) => return format!("answer {name}'s prompt first"),
-        Some(E::PaneGone) => format!("{} closed", agent.unwrap_or("the agent")),
-        Some(E::NoAgent) => "no agent in this workspace".to_string(),
-        Some(E::TooLarge) => "review too large to send".to_string(),
-        Some(E::Unanswered) => "herdr didn't answer".to_string(),
-        Some(E::Refused(_) | E::Unreadable) | None => "herdr refused the send".to_string(),
+pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -> String {
+    use herdr::{HerdrError as H, SendError as S};
+    let cause = match error {
+        S::AtPrompt(name) => return format!("answer {name}'s prompt first"),
+        S::Herdr(H::PaneGone) => format!("{} closed", agent.unwrap_or("the agent")),
+        S::NoAgent => "no agent in this workspace".to_string(),
+        S::TooLarge => "review too large to send".to_string(),
+        S::Herdr(H::Unanswered) => "herdr didn't answer".to_string(),
+        S::Herdr(H::Refused(_) | H::Unreadable) => "herdr refused the send".to_string(),
     };
     format!("{cause}, press {copy} to copy")
 }
@@ -179,8 +179,12 @@ impl ExportTarget for Agent {
         format!("sent {} to {}", counted_comments(count), self.name)
     }
 
+    /// Every send failure is a [`herdr::SendError`]; anything else only says the send failed.
     fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String {
-        send_failure(error, Some(&self.name), copy)
+        error.downcast_ref().map_or_else(
+            || format!("send failed, press {copy} to copy"),
+            |error| send_failure(error, Some(&self.name), copy),
+        )
     }
 
     /// An agent at a prompt refuses: the picker's rows can be minutes old.
@@ -227,25 +231,28 @@ mod tests {
 
     #[test]
     fn a_failed_send_or_copy_says_what_to_do() {
-        use crate::herdr::HerdrError as E;
+        use crate::herdr::{HerdrError as H, SendError as S};
         let agent = Agent { pane: "w8:p1".into(), name: "release-bot".into() };
         let rows = [
-            (E::PaneGone, "release-bot closed, press y to copy"),
-            (E::AtPrompt("codex".into()), "answer codex's prompt first"),
-            (E::NoAgent, "no agent in this workspace, press y to copy"),
-            (E::TooLarge, "review too large to send, press y to copy"),
-            (E::Unanswered, "herdr didn't answer, press y to copy"),
+            (S::Herdr(H::PaneGone), "release-bot closed, press y to copy"),
+            (S::AtPrompt("codex".into()), "answer codex's prompt first"),
+            (S::NoAgent, "no agent in this workspace, press y to copy"),
+            (S::TooLarge, "review too large to send, press y to copy"),
+            (S::Herdr(H::Unanswered), "herdr didn't answer, press y to copy"),
             // Any other refusal never claims the agent closed.
-            (E::Refused(Some("internal".into())), "herdr refused the send, press y to copy"),
-            (E::Refused(None), "herdr refused the send, press y to copy"),
-            (E::Unreadable, "herdr refused the send, press y to copy"),
+            (
+                S::Herdr(H::Refused(Some("internal".into()))),
+                "herdr refused the send, press y to copy",
+            ),
+            (S::Herdr(H::Refused(None)), "herdr refused the send, press y to copy"),
+            (S::Herdr(H::Unreadable), "herdr refused the send, press y to copy"),
         ];
         for (error, line) in rows {
             let error = anyhow::Error::from(error);
             assert_eq!(agent.failure_message(&error, "y"), line, "{error}");
         }
         // Before any agent is chosen, a gone pane names no one.
-        let gone = anyhow::Error::from(E::PaneGone);
+        let gone = S::Herdr(H::PaneGone);
         assert_eq!(send_failure(&gone, None, "y"), "the agent closed, press y to copy");
         #[cfg(not(windows))]
         {
