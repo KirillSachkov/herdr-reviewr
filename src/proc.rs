@@ -178,8 +178,10 @@ pub(crate) fn run_tree(
         if let Some(stop) = stop {
             // The readers are left to finish as the ended tree closes their pipes.
             let _ = child.start_kill();
-            // The tool alone: a job's own wait blocks on news an earlier poll already drained.
-            let _ = child.inner_mut().wait();
+            // The tool alone, and only unreaped: a job's own wait blocks on news a poll drained.
+            if !ended {
+                let _ = child.inner_mut().wait();
+            }
             return Err(stop);
         }
         match child.try_wait() {
