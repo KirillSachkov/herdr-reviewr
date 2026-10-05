@@ -735,15 +735,17 @@ mod tests {
         assert!(d.rows.iter().filter(|r| matches!(r, Row::Context { .. })).count() >= 2);
     }
 
+    /// The changed rows, each with whether it marks a CR.
+    fn changes(d: &FileDiff) -> Vec<(String, bool)> {
+        d.rows
+            .iter()
+            .filter(|r| r.marker() != ' ')
+            .map(|r| (r.marker_text(), r.cr_marker()))
+            .collect()
+    }
+
     #[test]
     fn a_changed_line_ending_shows_its_cr_and_a_shared_one_does_not() {
-        let changes = |d: &FileDiff| -> Vec<(String, bool)> {
-            d.rows
-                .iter()
-                .filter(|r| r.marker() != ' ')
-                .map(|r| (r.marker_text(), r.cr_marker()))
-                .collect()
-        };
         // Only the ending changed: the gained CR is the one difference, marked, never text.
         let d = build("alpha\nbeta\n", "alpha\r\nbeta\n");
         assert_eq!(changes(&d), [("-alpha".into(), false), ("+alpha".into(), true)]);
@@ -781,15 +783,14 @@ mod tests {
     #[test]
     fn swapped_lines_keep_their_ending_marks() {
         let d = build("alpha one\r\nbeta two\r\n", "beta two\nalpha one\n");
-        let marked: Vec<(String, bool)> = d
-            .rows
-            .iter()
-            .filter(|r| r.marker() != ' ')
-            .map(|r| (r.marker_text(), r.cr_marker()))
-            .collect();
-        assert!(
-            marked.iter().filter(|(text, _)| text.starts_with('-')).all(|(_, cr)| *cr),
-            "{marked:?}"
+        assert_eq!(
+            changes(&d),
+            [
+                ("-alpha one".into(), true),
+                ("-beta two".into(), true),
+                ("+beta two".into(), false),
+                ("+alpha one".into(), false),
+            ]
         );
     }
 
