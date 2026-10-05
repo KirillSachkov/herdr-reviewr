@@ -285,12 +285,10 @@ fn runs_review_ui(pane: &str) -> Result<bool, HerdrError> {
 /// Whether `process` is the review UI, by its executable name and a UI argv.
 fn is_review_ui(process: &Process) -> bool {
     let argv = process.argv.as_slice();
-    // Windows names ignore case, so `HERDR-REVIEWR.EXE` is the same program.
-    let named = process
-        .argv0
-        .iter()
-        .chain(argv.first())
-        .any(|exe| program_name(exe).eq_ignore_ascii_case(BINARY));
+    // Windows names ignore case, so `HERDR-REVIEWR.EXE` is the same program; unix names don't.
+    let same =
+        |name: &str| if cfg!(windows) { name.eq_ignore_ascii_case(BINARY) } else { name == BINARY };
+    let named = process.argv0.iter().chain(argv.first()).any(|exe| same(program_name(exe)));
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
 }
 

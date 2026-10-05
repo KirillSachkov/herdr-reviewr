@@ -294,9 +294,10 @@ paste (`paste_payload` in `src/pane.rs`) converts newlines to CRLF on Windows
 (`prepare_paste_text_for_pty_platform`) and leaves them alone elsewhere. reviewr encodes its
 paste the same way, then brackets it always (`pasted` in `src/herdr.rs` says why).
 
-- Only a `result` reply consumes the comments. An error reply reads as the pane gone. A dropped
-  or unanswered connection reads as herdr not answering. Both keep every comment, though in the
-  second case the paste may still have landed.
+- Only a `result` reply consumes the comments. An error reply is a refusal carrying its code, and
+  only `pane_not_found` reads as the pane gone. A dropped or unanswered connection reads as herdr
+  not answering. Both keep every comment, though in the second case the paste may still have
+  landed.
 - No `HERDR_SOCKET_PATH` is no herdr, the same refusal as a missing herdr binary.
 - herdr 0.7.5 removed `agent send` (replaced by the logical-key `agent send-keys`). The literal,
   no-Enter write has been `pane send-text` since 0.7.0.

@@ -30,7 +30,7 @@ case "$os-$arch" in
   Linux-aarch64 | Linux-arm64) target="aarch64-unknown-linux-musl" ;;
   Linux-x86_64)              target="x86_64-unknown-linux-musl" ;;
   *)
-    echo "$SAY: no prebuilt binary for $os-$arch, build it into bin/ with 'just install'" >&2
+    echo "$SAY: no prebuilt binary for $os-$arch, build with 'cargo build --release' and copy target/release/herdr-reviewr into bin/" >&2
     exit 1
     ;;
 esac

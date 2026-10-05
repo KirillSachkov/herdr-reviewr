@@ -71,9 +71,9 @@ fn common_bins() -> impl Iterator<Item = PathBuf> {
     COMMON_BINS.iter().map(PathBuf::from)
 }
 
-/// The inherited PATH's entries; set-but-empty is none, never the cwd.
+/// The inherited PATH's absolute entries: an empty or relative one would search the cwd.
 fn inherited_dirs(inherited: Option<&OsStr>) -> Vec<PathBuf> {
-    inherited.filter(|p| !p.is_empty()).map(|p| env::split_paths(p).collect()).unwrap_or_default()
+    inherited.map(|p| env::split_paths(p).filter(|d| d.is_absolute()).collect()).unwrap_or_default()
 }
 
 /// Join PATH entries; none holds a separator, so this cannot fail.
@@ -230,8 +230,13 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    /// An absolute directory named `name`.
+    fn abs(name: &str) -> PathBuf {
+        env::temp_dir().join(name)
+    }
+
     fn path_of(dirs: &[&str]) -> OsString {
-        env::join_paths(dirs).unwrap()
+        env::join_paths(dirs.iter().map(|d| abs(d))).unwrap()
     }
 
     fn common() -> Vec<PathBuf> {
@@ -243,7 +248,7 @@ mod tests {
         let got = prepended_path(Some(&path_of(&["inherited-a", "inherited-b"])));
         let parts: Vec<PathBuf> = env::split_paths(&got).collect();
         let mut expected = common();
-        expected.extend([PathBuf::from("inherited-a"), PathBuf::from("inherited-b")]);
+        expected.extend([abs("inherited-a"), abs("inherited-b")]);
         assert_eq!(parts, expected);
     }
 
@@ -260,12 +265,21 @@ mod tests {
         // The reviewer's shim wins; the common bins only backstop.
         let got = appended_path(Some(&path_of(&["mise-shims", "system-bin"])));
         let parts: Vec<PathBuf> = env::split_paths(&got).collect();
-        let mut expected = vec![PathBuf::from("mise-shims"), PathBuf::from("system-bin")];
+        let mut expected = vec![abs("mise-shims"), abs("system-bin")];
         expected.extend(common());
         assert_eq!(parts, expected);
 
         // An empty entry would put the reviewed repo's cwd first.
         assert_eq!(appended_path(Some(OsStr::new(""))), appended_path(None));
+    }
+
+    #[test]
+    fn an_empty_or_relative_path_entry_never_searches_the_cwd() {
+        let inherited = env::join_paths([abs("x"), PathBuf::new(), PathBuf::from("rel"), abs("y")]);
+        let got = appended_path(Some(&inherited.unwrap()));
+        let mut expected = vec![abs("x"), abs("y")];
+        expected.extend(common());
+        assert_eq!(env::split_paths(&got).collect::<Vec<_>>(), expected);
     }
 
     #[test]

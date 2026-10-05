@@ -89,7 +89,7 @@ fn herdr_bin() -> String {
 /// How a herdr call failed, classified so a caller can tell a benign race from a real failure.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HerdrError {
-    /// herdr could not be run at all.
+    /// herdr gave no answer: not run, not reachable, or not within its bound.
     Unanswered,
     /// herdr exited non-zero, with its error envelope's `error.code` when it wrote one.
     Refused(Option<String>),
@@ -118,7 +118,7 @@ impl HerdrError {
 impl std::fmt::Display for HerdrError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unanswered => write!(f, "herdr could not run"),
+            Self::Unanswered => write!(f, "herdr didn't answer"),
             Self::Refused(Some(code)) => write!(f, "herdr refused: {code}"),
             Self::Refused(None) => write!(f, "herdr refused"),
             Self::Unreadable => write!(f, "herdr answered in an unknown shape"),
