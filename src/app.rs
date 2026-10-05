@@ -8,18 +8,18 @@ use anyhow::Result;
 
 use crate::diff::{DiffCache, FileDiff, RenderedKind, Row, View};
 use crate::export::{Agent, ExportTarget, format_all};
-use crate::file_list::{self, Annotation, Entry, RowKind};
+use crate::file_list::{self, Entry, RowKind};
 use crate::forge;
 use crate::git;
 use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
 use crate::logln;
 use crate::marks::{MarkMap, Unit, diff_lines};
-use crate::model::{ChangeKind, Comment, CommentStore, CommitPick, Rev, Scope, Side};
+use crate::model::{ChangeKind, ChangedFile, Comment, CommentStore, CommitPick, Rev, Scope, Side};
 use crate::rendered::{Built, Content, OldMap, RenderedIndex, RenderedInput, RenderedView, RowId};
 use crate::roles::Palette;
 use crate::theme;
-use crate::world::{PickStatus, PickVerdict};
+use crate::world::{Changeset, PickStatus, PickVerdict};
 
 /// Navigator shares and bounds, as percentages of the body's split axis.
 const DEFAULT_SIDE_PCT: u16 = 32;
@@ -1207,7 +1207,7 @@ impl App {
         // The cursor keeps its target, else the open file, else the first file.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
-        self.changeset = Changeset { files: snapshot.changed, ends: snapshot.ends };
+        self.changeset = snapshot.changeset;
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
         self.adopt_pick_status(snapshot.pick_status);
@@ -1304,11 +1304,11 @@ impl App {
         self.diff_path = Some(path.clone());
         let previous_path = self.rename_source(&path);
         let (old, new) = match self.content_sides(&path) {
-            Sides::Text { old, new } => {
+            Ok((old, new)) => {
                 self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
                 (old, new)
             }
-            Sides::Notice(notice) => {
+            Err(notice) => {
                 self.diff = FileDiff::notice(path, previous_path, notice, View::Diff);
                 (String::new(), String::new())
             }
@@ -1685,23 +1685,19 @@ impl App {
     }
 
     /// `path`'s sides from the landed build's record: a notice, or one `git diff` of the scope's ends.
-    fn content_sides(&self, path: &str) -> Sides {
+    fn content_sides(&self, path: &str) -> Result<(String, String), crate::diff::Notice> {
         use crate::diff::Notice;
-        let empty = || Sides::Text { old: String::new(), new: String::new() };
         // A path outside the landed changeset is a stale row: empty until the next reconcile.
         let (Some(annotation), Some(ends)) = (self.changeset.files.get(path), &self.changeset.ends)
         else {
-            return empty();
+            return Ok((String::new(), String::new()));
         };
         if annotation.binary {
-            return Sides::Notice(Notice::Binary);
+            return Err(Notice::Binary);
         }
         // An untracked file is all new side, read raw.
-        if annotation.change == ChangeKind::Untracked {
-            return match worktree_content(&self.repo, path) {
-                Ok(new) => Sides::Text { old: String::new(), new },
-                Err(notice) => Sides::Notice(notice),
-            };
+        if annotation.kind == ChangeKind::Untracked {
+            return worktree_content(&self.repo, path).map(|new| (String::new(), new));
         }
         // git diffs a tracked symlink as its target path, so the worktree side is the link's size.
         let new_size = annotation.new_size.unwrap_or_else(|| {
@@ -1709,15 +1705,15 @@ impl App {
         });
         let total = annotation.old_size.saturating_add(new_size);
         if crate::diff::over_byte_budget(usize::try_from(total).unwrap_or(usize::MAX)) {
-            return Sides::Notice(Notice::TooLarge);
+            return Err(Notice::TooLarge);
         }
         let source = annotation.previous_path.as_deref();
         match git::diff_sides(&self.repo, &ends.old, ends.new.as_deref(), path, source) {
-            Ok(git::DiffSides::Text { old, new }) => Sides::Text { old, new },
-            Ok(git::DiffSides::Binary) => Sides::Notice(Notice::Binary),
+            Ok(git::DiffSides::Text { old, new }) => Ok((old, new)),
+            Ok(git::DiffSides::Binary) => Err(Notice::Binary),
             Err(error) => {
                 logln!("diff of {path} failed: {error:#}");
-                Sides::Notice(Notice::Unreadable)
+                Err(Notice::Unreadable)
             }
         }
     }
@@ -2394,8 +2390,7 @@ impl App {
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
-            let files = crate::world::annotate(&build.changed);
-            self.changeset = Changeset { files, ends: build.ends };
+            self.changeset = Changeset::new(&build.changed, build.ends);
             // Re-mark the badges in place, so none belongs to the old base.
             for entry in &mut self.entries {
                 entry.annotation = self.changeset.files.get(&entry.path).cloned();
@@ -2799,7 +2794,7 @@ impl App {
                 continue;
             }
             // A notice holds no hunk.
-            let Sides::Text { old, new } = self.content_sides(&entry.path) else { continue };
+            let Ok((old, new)) = self.content_sides(&entry.path) else { continue };
             let source = self.rename_source(&entry.path);
             let diff = self.cache.get(entry.path, source, &old, &new, &self.highlighter);
             if hunk_row(&diff.rows, None, forward).is_some() {
@@ -3865,7 +3860,7 @@ impl App {
     // --- Search overlay ------------------------------------------------
 
     /// The active scope's annotation for `path`.
-    pub(crate) fn changed_annotation(&self, path: &str) -> Option<&Annotation> {
+    pub(crate) fn changed_annotation(&self, path: &str) -> Option<&ChangedFile> {
         self.changeset.files.get(path)
     }
 
@@ -5143,20 +5138,6 @@ fn is_markdown_path(path: &str) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
-}
-
-/// A scope's changed files and the ends they were diffed between, landed together.
-#[derive(Debug, Default)]
-struct Changeset {
-    files: HashMap<String, Annotation>,
-    /// `None` exactly when the scope lists nothing.
-    ends: Option<crate::world::DiffEnds>,
-}
-
-/// What reading a changed file's sides found: their text, or the notice for them.
-enum Sides {
-    Text { old: String, new: String },
-    Notice(crate::diff::Notice),
 }
 
 /// `path`'s worktree text, regular files only: over the budget, the notice, never read.

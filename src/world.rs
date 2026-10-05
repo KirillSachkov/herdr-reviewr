@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use anyhow::Result;
 
 use crate::app::Tab;
-use crate::file_list::{Annotation, Entry};
+use crate::file_list::Entry;
 use crate::git;
 use crate::herdr::AgentSample;
 use crate::model::{ChangedFile, CommitPick, Scope};
@@ -34,13 +34,11 @@ pub struct WorldInput {
 /// One refresh's result; the base rides along so the header and its changeset land together.
 #[derive(Debug)]
 pub struct WorldSnapshot {
-    pub changed: HashMap<String, Annotation>,
+    pub changeset: Changeset,
     pub entries: Vec<Entry>,
     pub branch_base: git::BaseStatus,
     /// The `commits` scope's pick verdict; `None` on every other scope.
     pub pick_status: Option<PickStatus>,
-    /// The two ends the changeset was diffed between, which a file's diff reads too.
-    pub ends: Option<DiffEnds>,
     /// `HEAD` at build time, the commit picker's key; `None` when unborn.
     pub head: Option<String>,
 }
@@ -72,6 +70,20 @@ pub struct DiffEnds {
     pub new: Option<String>,
 }
 
+/// A scope's changed files by path and the ends they were diffed between, landed together.
+#[derive(Debug, Default)]
+pub struct Changeset {
+    pub files: HashMap<String, ChangedFile>,
+    /// `None` exactly when the scope lists nothing.
+    pub ends: Option<DiffEnds>,
+}
+
+impl Changeset {
+    pub fn new(changed: &[ChangedFile], ends: Option<DiffEnds>) -> Self {
+        Self { files: changed.iter().map(|f| (f.path.clone(), f.clone())).collect(), ends }
+    }
+}
+
 /// A build's changeset and the base or pick it diffs against, landed together.
 #[derive(Debug)]
 pub struct ScopeBuild {
@@ -91,11 +103,10 @@ fn build_at(input: &WorldInput, written: Option<String>) -> Result<WorldSnapshot
     // Outside a repo, paint the quiet empty state, not an error every poll.
     if !git::is_repo(&input.repo) {
         return Ok(WorldSnapshot {
-            changed: HashMap::new(),
+            changeset: Changeset::default(),
             entries: Vec::new(),
             branch_base: git::BaseStatus::default(),
             pick_status: None,
-            ends: None,
             head: None,
         });
     }
@@ -103,14 +114,14 @@ fn build_at(input: &WorldInput, written: Option<String>) -> Result<WorldSnapshot
     let head = git::head_oid(&input.repo);
     let ScopeBuild { branch_base, pick_status, ends, changed } =
         scope_build(input, head.clone(), written)?;
-    let changed_map = annotate(&changed);
+    let changeset = Changeset::new(&changed, ends);
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
-        Tab::AllFiles => all_files_entries(input, &changed_map)?,
+        Tab::AllFiles => all_files_entries(input, &changeset.files)?,
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changed.iter().map(Entry::from_changed).collect(),
     };
-    Ok(WorldSnapshot { changed: changed_map, entries, branch_base, pick_status, ends, head })
+    Ok(WorldSnapshot { changeset, entries, branch_base, pick_status, head })
 }
 
 /// The active scope's changeset and, on `branch`, its base.
@@ -212,11 +223,6 @@ fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
     Ok(ScopeBuild { pick_status: Some(PickStatus { verdict, subject, count }), ..at })
 }
 
-/// The changed files keyed by path.
-pub fn annotate(changed: &[ChangedFile]) -> HashMap<String, Annotation> {
-    changed.iter().map(|f| (f.path.clone(), Annotation::from(f))).collect()
-}
-
 /// The persisted turn baseline for `repo`, if any.
 pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
     git::read_baseline_ref(repo)
@@ -225,7 +231,7 @@ pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
 /// The `All files` entries; an ignored directory is walked only once expanded.
 pub(crate) fn all_files_entries(
     input: &WorldInput,
-    changed: &HashMap<String, Annotation>,
+    changed: &HashMap<String, ChangedFile>,
 ) -> Result<Vec<Entry>> {
     let to_entry = |w: git::WorktreeEntry| Entry {
         annotation: changed.get(&w.path).cloned(),

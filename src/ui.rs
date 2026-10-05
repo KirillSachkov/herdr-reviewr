@@ -16,12 +16,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Band, Focus, FooterAction, Mode, Tab};
 use crate::config::NavigatorPosition;
 use crate::diff::{FileDiff, MarkerKind, Notice, RenderedKind, Row};
-use crate::file_list::{Annotation, RowKind};
+use crate::file_list::RowKind;
 use crate::forge;
 use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
-use crate::model::{ChangeKind, Comment};
+use crate::model::{ChangeKind, ChangedFile, Comment};
 use crate::roles::Palette;
 use crate::roles::{Fill, Ink};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
@@ -1548,7 +1548,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
 /// The fields [`file_row_item`] renders; `emphasis` is byte ranges of search matches.
 struct FileRowSpec<'a> {
     indent: &'a str,
-    annotation: Option<&'a Annotation>,
+    annotation: Option<&'a ChangedFile>,
     name: &'a str,
     ignored: bool,
     emphasis: &'a [(u32, u32)],
@@ -1557,7 +1557,7 @@ struct FileRowSpec<'a> {
 /// A file row: `<indent><marker> <name> <stats>`, a long name eliding its head.
 fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> ListItem<'static> {
     let FileRowSpec { indent, annotation, name, ignored, emphasis } = *row;
-    let marker = annotation.map_or(String::new(), |a| format!("{} ", a.change.marker()));
+    let marker = annotation.map_or(String::new(), |a| format!("{} ", a.kind.marker()));
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
     let gap = if stats.is_empty() { 0 } else { 2 };
@@ -1566,7 +1566,7 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
 
     let mut spans = vec![Span::styled(indent.to_string(), text_style(p, on))];
     if let Some(a) = annotation {
-        spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.change, on))));
+        spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.kind, on))));
     }
     // An ignored file dims its name, never its change marker.
     let muted = Style::default().fg(p.ink(Ink::TextMuted, on));

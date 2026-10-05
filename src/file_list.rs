@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
 
-use crate::model::{ChangeKind, ChangedFile};
+use crate::model::ChangedFile;
 
 /// A visible row of the flattened tree: a directory or a file.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -22,45 +22,15 @@ pub struct Row {
 pub enum RowKind {
     /// A directory, keyed by its path; `has_change` marks a collapsed folder holding a change.
     Dir { path: String, expanded: bool, has_change: bool },
-    /// A file: its index into the source `&[Entry]`, plus its annotation when changed.
-    File { index: usize, annotation: Option<Annotation> },
+    /// A file: its index into the source `&[Entry]`, plus its change in the active scope.
+    File { index: usize, annotation: Option<ChangedFile> },
 }
 
-/// The change a file carries in the active scope.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Annotation {
-    pub change: ChangeKind,
-    pub additions: u32,
-    pub deletions: u32,
-    /// git's no-text-diff verdict: binary content or an unset `diff` attribute.
-    pub binary: bool,
-    /// The rename or copy source, from the same build as `change`.
-    pub previous_path: Option<String>,
-    /// The sides' sizes as git stores them ([`ChangedFile::old_size`], [`ChangedFile::new_size`]).
-    pub old_size: u64,
-    pub new_size: Option<u64>,
-}
-
-impl From<&ChangedFile> for Annotation {
-    /// The one mapping from a changed file to its annotation.
-    fn from(f: &ChangedFile) -> Self {
-        Self {
-            change: f.kind,
-            additions: f.additions,
-            deletions: f.deletions,
-            binary: f.binary,
-            previous_path: f.previous_path.clone(),
-            old_size: f.old_size,
-            new_size: f.new_size,
-        }
-    }
-}
-
-/// A navigator entry: a path, and its annotation when changed.
+/// A navigator entry: a path, and its change in the active scope.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
     pub path: String,
-    pub annotation: Option<Annotation>,
+    pub annotation: Option<ChangedFile>,
     /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
     /// A wholly ignored directory whose children load on expand.
@@ -70,12 +40,7 @@ pub struct Entry {
 impl Entry {
     /// A `Changes` entry from a changed file: annotated and rename-aware.
     pub fn from_changed(f: &ChangedFile) -> Self {
-        Self {
-            path: f.path.clone(),
-            annotation: Some(Annotation::from(f)),
-            ignored: false,
-            is_dir: false,
-        }
+        Self { path: f.path.clone(), annotation: Some(f.clone()), ignored: false, is_dir: false }
     }
 }
 
@@ -211,7 +176,7 @@ fn join(prefix: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Annotation, Entry, RowKind, build};
+    use super::{Entry, RowKind, build};
     use crate::model::{ChangeKind, ChangedFile};
     use std::collections::HashSet;
 
@@ -288,7 +253,7 @@ mod tests {
         assert_eq!(rows[1].file_index(), Some(0));
         assert!(matches!(
             &rows[0].kind,
-            RowKind::File { annotation: Some(Annotation { change: ChangeKind::Modified, .. }), .. }
+            RowKind::File { annotation: Some(ChangedFile { kind: ChangeKind::Modified, .. }), .. }
         ));
     }
 

@@ -817,7 +817,7 @@ fn edit_reaches_a_file_the_changeset_only_calls_deleted() {
     assert!(
         app.entries.iter().any(|e| {
             e.path == "here.rs"
-                && e.annotation.as_ref().map(|a| a.change)
+                && e.annotation.as_ref().map(|a| a.kind)
                     == Some(herdr_reviewr::model::ChangeKind::Deleted)
         }),
         "and calls it deleted"
@@ -3017,7 +3017,7 @@ fn changed_count_and_staleness_stay_scope_based_on_all_files() {
 
 /// The `All files` row for `path`, if visible, and its annotation.
 #[allow(clippy::option_option)] // outer = row found, inner = its annotation
-fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_reviewr::file_list::Annotation>> {
+fn annotation_of(app: &App, path: &str) -> Option<Option<herdr_reviewr::model::ChangedFile>> {
     use herdr_reviewr::file_list::RowKind;
     app.file_rows.iter().find_map(|row| match &row.kind {
         RowKind::File { index, annotation } if app.entries[*index].path == path => {
@@ -3039,7 +3039,7 @@ fn all_files_annotates_changed_files_only() {
     let mut app = app_on(&r);
     enter_tab(&mut app, Tab::AllFiles);
     assert!(
-        matches!(annotation_of(&app, "a.rs"), Some(Some(a)) if a.change == ChangeKind::Modified),
+        matches!(annotation_of(&app, "a.rs"), Some(Some(a)) if a.kind == ChangeKind::Modified),
         "a changed file carries its marker"
     );
     assert_eq!(
