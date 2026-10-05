@@ -1236,6 +1236,8 @@ pub fn diff_sides(
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
+        // A submodule's sides are its commit lines, whatever `diff.submodule` the user set.
+        "--submodule=short",
         // So a rename prints its source's deletion and its target's addition in full.
         "--no-renames",
         // Names bare and unquoted where git allows, so a section matches its path exactly.
@@ -1265,17 +1267,23 @@ pub fn diff_sides(
     };
     // A rename's old side is its source's, never what stands at its path now.
     let (old_side, new_side) = (side(source.unwrap_or(path), false), side(path, true));
+    let quoted = quote_path(path);
+    let own = sections.iter().find(|s| s.is_for(&quoted));
     Ok(match (old_side, new_side, source) {
         (Side::Binary, _, _) | (_, Side::Binary, _) => DiffSides::Binary,
         // An empty file added or deleted prints no hunk, so neither side holds text.
-        (Side::Absent, Side::Absent, None)
-            if sections.iter().any(|s| s.names_added_or_deleted(path)) =>
-        {
+        (Side::Absent, Side::Absent, None) if own.is_some_and(Section::adds_or_deletes) => {
             DiffSides::Text { old: String::new(), new: String::new() }
         }
-        // Unchanged, or only its mode changed: one text both sides.
-        (Side::Absent, Side::Absent, None) => {
+        // Only its mode changed: one text both sides, which must read.
+        (Side::Absent, Side::Absent, None) if own.is_some() => {
             let text = git(repo, &["show", &format!("{}:{path}", new.unwrap_or(old))])?;
+            DiffSides::Text { old: text.clone(), new: text }
+        }
+        // git found it the same at both ends, so where `show` misses it, both ends lack it.
+        (Side::Absent, Side::Absent, None) => {
+            let shown = git(repo, &["show", &format!("{}:{path}", new.unwrap_or(old))]);
+            let text = shown.unwrap_or_default();
             DiffSides::Text { old: text.clone(), new: text }
         }
         (old_side, new_side, source) => DiffSides::Text {
@@ -1324,13 +1332,14 @@ impl Section<'_> {
         })
     }
 
-    /// Whether the section adds or deletes `path`, named by its `diff --git` line (no renames).
-    fn names_added_or_deleted(&self, path: &str) -> bool {
-        let quoted = quote_path(path);
+    /// Whether the section is `quoted`'s by its `diff --git` line, hunk or not (no renames).
+    fn is_for(&self, quoted: &str) -> bool {
         self.body.starts_with(&format!("diff --git {quoted} {quoted}\n"))
-            && self
-                .header()
-                .any(|l| l.starts_with("new file mode") || l.starts_with("deleted file mode"))
+    }
+
+    /// Whether the section adds or deletes its file.
+    fn adds_or_deletes(&self) -> bool {
+        self.header().any(|l| l.starts_with("new file mode") || l.starts_with("deleted file mode"))
     }
 
     /// Whether the section gives the file content on the new side.
@@ -1572,7 +1581,8 @@ impl IndexCopy {
             *kept = None;
             kept
         });
-        if kept.is_none() {
+        // A worktree removed and re-added, or a re-clone, took the copy's dir with its git dir.
+        if kept.as_ref().is_none_or(|copy| !copy.dir.path().exists()) {
             *kept = Some(Self::new(repo)?);
         }
         let copy = kept.as_mut().expect("filled above");
@@ -2080,7 +2090,7 @@ impl Stat {
             use std::os::unix::fs::MetadataExt;
             Some((meta.ctime(), meta.ctime_nsec()))
         };
-        // Windows keeps no change time, and git there reads its creation time instead.
+        // Windows keeps no change time.
         #[cfg(not(unix))]
         let changed = None;
         Self { size: meta.len(), modified: meta.modified().ok(), changed }

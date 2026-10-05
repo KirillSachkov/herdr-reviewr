@@ -115,6 +115,8 @@ fn a_submodule_bump_reads_as_git_prints_it_and_an_empty_file_as_empty() {
     let at_a = r.git(&["rev-parse", "HEAD"]).trim().to_string();
     r.git(&["update-index", "--cacheinfo", &format!("160000,{b},sub")]);
     r.git(&["commit", "-q", "-m", "sub at b"]);
+    // A user's log format would print the bump with no hunk.
+    r.git(&["config", "diff.submodule", "log"]);
     let text = |old: &str, new: &str| DiffSides::Text { old: old.into(), new: new.into() };
 
     let bump = diff_sides(r.path(), &at_a, Some("HEAD"), "sub", None).unwrap();
@@ -125,6 +127,9 @@ fn a_submodule_bump_reads_as_git_prints_it_and_an_empty_file_as_empty() {
     r.write("empty.txt", "");
     r.git(&["add", "empty.txt"]);
     assert_eq!(diff_sides(r.path(), "HEAD", None, "empty.txt", None).unwrap(), text("", ""));
+    // A staged file unstaged since the listing: git sees it at neither end, so a stale row is empty.
+    r.write("gone.txt", "x\n");
+    assert_eq!(diff_sides(r.path(), "HEAD", None, "gone.txt", None).unwrap(), text("", ""));
 }
 
 #[test]
@@ -1086,6 +1091,10 @@ fn a_worktree_re_added_at_its_path_lists_against_its_own_index() {
     add("three", &first);
     let listed = changed_from(&first, "HEAD").unwrap();
     assert!(listed.is_empty(), "{listed:?}");
+    // Re-added under the same admin name, its copy went with the old admin dir.
+    r.git(&["worktree", "remove", "--force", first.to_str().unwrap()]);
+    add("four", &first);
+    assert!(changed_from(&first, "HEAD").unwrap().is_empty());
 }
 
 /// Run git in `dir`, asserting success.

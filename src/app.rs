@@ -5142,12 +5142,15 @@ fn is_markdown_path(path: &str) -> bool {
 
 /// `path`'s worktree text, regular files only: over the budget, the notice, never read.
 fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate::diff::Notice> {
-    use std::io::Read;
+    use std::io::{ErrorKind, Read};
     let at = repo.join(path);
     let meta = match std::fs::metadata(&at) {
         Ok(meta) if meta.is_file() => meta,
         Ok(_) => return Ok(String::new()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        // Gone, or a parent turned into a file (which Windows also reports as not found).
+        Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+            return Ok(String::new());
+        }
         Err(_) => return Err(crate::diff::Notice::Unreadable),
     };
     if crate::diff::over_byte_budget(usize::try_from(meta.len()).unwrap_or(usize::MAX)) {
