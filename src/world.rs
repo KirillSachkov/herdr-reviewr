@@ -83,6 +83,11 @@ pub struct ScopeBuild {
 
 /// Build the snapshot for `input`; the changeset is built on every tab.
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
+    build_at(input, None)
+}
+
+/// [`build`], reusing `written`, a worktree tree written this instant, as `last-turn`'s new end.
+fn build_at(input: &WorldInput, written: Option<String>) -> Result<WorldSnapshot> {
     // Outside a repo, paint the quiet empty state, not an error every poll.
     if !git::is_repo(&input.repo) {
         return Ok(WorldSnapshot {
@@ -96,7 +101,8 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     }
     // One read of HEAD serves the snapshot and the uncommitted diff's old end.
     let head = git::head_oid(&input.repo);
-    let ScopeBuild { branch_base, pick_status, ends, changed } = scope_build(input, head.clone())?;
+    let ScopeBuild { branch_base, pick_status, ends, changed } =
+        scope_build(input, head.clone(), written)?;
     let changed_map = annotate(&changed);
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
@@ -112,7 +118,7 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     if !git::is_repo(&input.repo) {
         return Ok(ScopeBuild::plain(Vec::new()));
     }
-    scope_build(input, git::head_oid(&input.repo))
+    scope_build(input, git::head_oid(&input.repo), None)
 }
 
 impl ScopeBuild {
@@ -122,16 +128,23 @@ impl ScopeBuild {
     }
 }
 
-/// [`build_changed`] against `head`, as the caller read it, inside a repo.
-fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
-    let plain = ScopeBuild::plain;
+/// [`build_changed`] against `head`, as the caller read it, inside a repo; `written`, a tree of
+/// the worktree written this instant, spares `last-turn` a second snapshot.
+fn scope_build(
+    input: &WorldInput,
+    head: Option<String>,
+    written: Option<String>,
+) -> Result<ScopeBuild> {
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
             Some(t) => {
-                let now = git::snapshot_worktree(&input.repo)?;
+                let now = match written {
+                    Some(tree) => tree,
+                    None => git::snapshot_worktree(&input.repo)?,
+                };
                 at_ends(&input.repo, DiffEnds { old: t.to_string(), new: Some(now) })
             }
-            None => Ok(plain(Vec::new())),
+            None => Ok(ScopeBuild::plain(Vec::new())),
         },
         Scope::Uncommitted => {
             let base = git::diff_base(head);
@@ -147,13 +160,13 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
                 .and_then(|w| git::merge_base(&input.repo, w.oid()));
             let build = match merge_base {
                 Some(base) => at_ends(&input.repo, DiffEnds { old: base, new: None })?,
-                None => plain(Vec::new()),
+                None => ScopeBuild::plain(Vec::new()),
             };
             Ok(ScopeBuild { branch_base: resolution.status, ..build })
         }
         Scope::Commits => {
             // A tag without a pick builds the empty changeset.
-            let Some(pick) = &input.commit_pick else { return Ok(plain(Vec::new())) };
+            let Some(pick) = &input.commit_pick else { return Ok(ScopeBuild::plain(Vec::new())) };
             build_pick(&input.repo, pick)
         }
     }
@@ -170,14 +183,14 @@ fn at_ends(repo: &Path, ends: DiffEnds) -> Result<ScopeBuild> {
 
 /// The pick's changeset, verdict and ends in one pass; a `gone` pick has neither.
 fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
-    let build = |verdict, subject, count, changed, ends| ScopeBuild {
-        branch_base: git::BaseStatus::default(),
-        pick_status: Some(PickStatus { verdict, subject, count }),
-        ends,
-        changed,
+    let gone = |sha: &str| {
+        let status = PickStatus {
+            verdict: PickVerdict::Gone(sha.to_string()),
+            subject: String::new(),
+            count: 0,
+        };
+        ScopeBuild { pick_status: Some(status), ..ScopeBuild::plain(Vec::new()) }
     };
-    let gone =
-        |sha: &str| build(PickVerdict::Gone(sha.to_string()), String::new(), 0, vec![], None);
     if !git::commit_exists(repo, &pick.newest) {
         return Ok(gone(&pick.newest));
     }
@@ -196,7 +209,7 @@ fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
     } else {
         PickVerdict::OffBranch
     };
-    Ok(build(verdict, subject, count, at.changed, at.ends))
+    Ok(ScopeBuild { pick_status: Some(PickStatus { verdict, subject, count }), ..at })
 }
 
 /// The changed files keyed by path.
@@ -242,6 +255,8 @@ pub struct TurnHost {
     root: PathBuf,
     /// Each agent `cwd` with a resolved top level, mapped to whether it is a member.
     resolved: HashMap<String, bool>,
+    /// The worktree tree the last sample wrote, which that job's `last-turn` build reuses.
+    written: Option<String>,
 }
 
 /// One sample's outcome: whether a turn ended, and whether agents are present.
@@ -289,7 +304,7 @@ impl TurnHost {
     /// Resume the persisted baseline of `repo`, which must be the git top level.
     pub fn open(repo: PathBuf) -> Self {
         let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
-        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new() }
+        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new(), written: None }
     }
 
     pub fn baseline(&self) -> Option<&str> {
@@ -298,7 +313,13 @@ impl TurnHost {
 
     /// Sample the agents over the herdr CLI and advance the baseline.
     pub fn sample(&mut self) -> TurnReport {
+        self.written = None;
         self.observe_agents(crate::herdr::agent_samples().ok().as_deref())
+    }
+
+    /// The worktree tree this sample wrote, once.
+    pub fn take_written(&mut self) -> Option<String> {
+        self.written.take()
     }
 
     /// Advance the baseline from one enumeration; `None`, a failed one, holds the last state.
@@ -344,6 +365,7 @@ impl TurnHost {
             match git::snapshot_worktree(&self.repo) {
                 // A fresh candidate cannot have diverged yet; the next poll checks.
                 Ok(sha) => {
+                    self.written = Some(sha.clone());
                     self.tracker.set_candidate(sha);
                     return transition.ended;
                 }
@@ -355,13 +377,15 @@ impl TurnHost {
             return transition.ended;
         };
         match git::snapshot_worktree(&self.repo) {
-            Ok(now) if now != candidate => {
-                self.tracker.promote();
-                if let Err(e) = git::write_baseline_ref(&self.repo, &candidate) {
-                    logln!("turn baseline ref write failed: {e}");
+            Ok(now) => {
+                if now != candidate {
+                    self.tracker.promote();
+                    if let Err(e) = git::write_baseline_ref(&self.repo, &candidate) {
+                        logln!("turn baseline ref write failed: {e}");
+                    }
                 }
+                self.written = Some(now);
             }
-            Ok(_) => {}
             Err(e) => logln!("turn divergence check failed: {e}"),
         }
         transition.ended
@@ -418,7 +442,9 @@ pub fn spawn(
                 }
                 let turn = job.sample_turn.then(|| host.sample());
                 job.input.turn_baseline = host.baseline().map(str::to_string);
-                let snapshot = job.input.tab.is_file_tab().then(|| build(&job.input));
+                // The sample's own snapshot is this instant's worktree: `last-turn` reuses it.
+                let written = host.take_written();
+                let snapshot = job.input.tab.is_file_tab().then(|| build_at(&job.input, written));
                 let completion = WorldCompletion {
                     generation: job.generation,
                     input: job.input,
@@ -439,6 +465,32 @@ mod tests {
     use super::{Membership, classify, worktree_cwd};
     use crate::herdr::AgentSample;
     use crate::turn::{Status, WorktreeState};
+
+    #[test]
+    fn a_last_turn_build_reuses_the_tree_its_sample_wrote() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let baseline = crate::git::snapshot_worktree(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        let input = super::WorldInput {
+            repo: dir.path().to_path_buf(),
+            tab: crate::app::Tab::Changes,
+            scope: crate::model::Scope::LastTurn,
+            base: None,
+            base_epoch: 0,
+            turn_baseline: Some(baseline.clone()),
+            commit_pick: None,
+            toggled_dirs: std::collections::HashSet::new(),
+        };
+        // Handed the baseline as this instant's tree, the build diffs it, never a fresh snapshot.
+        let reused = super::scope_build(&input, None, Some(baseline.clone())).unwrap();
+        assert!(reused.changed.is_empty(), "{:?}", reused.changed);
+        assert_eq!(reused.ends.and_then(|e| e.new), Some(baseline));
+        let own = super::scope_build(&input, None, None).unwrap();
+        assert_eq!(own.changed.len(), 1, "without a written tree it snapshots the edit");
+    }
 
     fn working_at(cwd: &str) -> AgentSample {
         AgentSample { cwd: Some(cwd.into()), status: Status::Working }

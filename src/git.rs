@@ -1,4 +1,5 @@
-//! Git access; the only writes are private refs under `refs/worktree/reviewr/`.
+//! Git access; the only writes are private refs under `refs/worktree/reviewr/` and the index
+//! copies under `<git dir>/reviewr/` (AGENTS.md, No writes).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
