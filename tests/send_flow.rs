@@ -448,6 +448,16 @@ fn a_long_review_sends_whole_and_one_over_the_cap_refuses() {
         assert_eq!(socket.requests().len(), sent, "nothing reached herdr");
         app.store = herdr_reviewr::model::CommentStore::default();
     }
+
+    // The cap counts the line breaks as sent: 192 KiB escaped with LF, 320 KiB with CRLF.
+    write_comment(&mut app, &"x\n".repeat(64 * 1024));
+    press(&mut app, KeyCode::Char('s'), area, &keymap);
+    let want = if cfg!(windows) {
+        "review too large to send, press y to copy"
+    } else {
+        "sent 1 comment to claude"
+    };
+    assert_eq!(app.status, want);
 }
 
 /// No `HERDR_SOCKET_PATH` is no herdr to send to.

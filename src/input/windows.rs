@@ -89,19 +89,22 @@ impl VtConsole for WinConsole {
         Ok(records
             .into_iter()
             .filter_map(|record| match record {
-                // A zero unit is a key the terminal sent no byte for, such as a bare modifier.
-                InputRecord::KeyEvent(key) if key.key_down && key.u_char != 0 => {
-                    Some(Record::Unit(key.u_char))
-                }
-                // The buffer size counts from zero, and crossterm adds one to match unix.
-                InputRecord::WindowBufferSizeEvent(size) => Some(Record::Resize(
-                    (i32::from(size.size.x) + 1) as u16,
-                    (i32::from(size.size.y) + 1) as u16,
-                )),
+                InputRecord::KeyEvent(key) => key_unit(key.key_down, key.u_char),
+                InputRecord::WindowBufferSizeEvent(size) => Some(resized(size.size.x, size.size.y)),
                 _ => None,
             })
             .collect())
     }
+}
+
+/// A key record's byte: only a press carries one, and a zero unit is a key sent as no byte.
+fn key_unit(key_down: bool, u_char: u16) -> Option<Record> {
+    (key_down && u_char != 0).then_some(Record::Unit(u_char))
+}
+
+/// The buffer size counts from zero, and crossterm adds one to match unix.
+fn resized(x: i16, y: i16) -> Record {
+    Record::Resize((i32::from(x) + 1) as u16, (i32::from(y) + 1) as u16)
 }
 
 /// Wait until the console has input or `timeout` passes; crossterm keeps its own wait private.
@@ -141,4 +144,17 @@ fn write_out(sequence: &str) {
     let mut stdout = io::stdout().lock();
     let _ = stdout.write_all(sequence.as_bytes());
     let _ = stdout.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Record, key_unit, resized};
+
+    #[test]
+    fn a_console_record_maps_to_its_byte_or_size() {
+        assert_eq!(key_unit(true, u16::from(b'a')), Some(Record::Unit(u16::from(b'a'))));
+        assert_eq!(key_unit(false, u16::from(b'a')), None, "a release would type it twice");
+        assert_eq!(key_unit(true, 0), None, "a bare modifier sends no byte");
+        assert_eq!(resized(79, 23), Record::Resize(80, 24));
+    }
 }

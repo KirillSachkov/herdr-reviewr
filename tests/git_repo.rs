@@ -995,9 +995,13 @@ fn a_dead_processs_index_copy_is_swept() {
     let live = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap();
     let held = std::fs::File::create(live.path().join("lock")).unwrap();
     held.lock().unwrap();
+    // A copy still being made has no lock yet, and is young.
+    let making = tempfile::Builder::new().prefix("reviewr-index-").tempdir().unwrap();
+    std::fs::write(making.path().join("index"), "seeding").unwrap();
     herdr_reviewr::git::sweep_dead_copies();
     assert!(!dead.exists(), "{} survived", dead.display());
     assert!(live.path().exists(), "a live copy was swept");
+    assert!(making.path().exists(), "a copy being made was swept");
 }
 
 #[test]

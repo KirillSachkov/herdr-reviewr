@@ -9544,6 +9544,31 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
 }
 
 #[test]
+fn an_untracked_or_renamed_crlf_file_reads_like_git() {
+    // The two paths the line-ending table leaves out: a new file, and a rename rewritten in CRLF.
+    let r = Repo::init();
+    r.git(&["config", "core.autocrlf", "true"]);
+    r.write("old.txt", "one\ntwo\n");
+    r.commit_all("init");
+    r.git(&["mv", "old.txt", "moved.txt"]);
+    r.write("moved.txt", "one\r\ntwo\r\n");
+    r.write("new.txt", "a\r\nb\r\n");
+
+    let mut app = app_on(&r);
+    app.select_file(file_row_of(&app, "new.txt").expect("new.txt listed")).unwrap();
+    assert_eq!(change_rows(&app), ["+a", "+b"], "an added CRLF line is no CR change");
+    app.focus = Focus::Diff;
+    app.diff_cursor = 0;
+    app.start_comment();
+    typed(&mut app, "why?");
+    app.submit_comment();
+    let all: Vec<&herdr_reviewr::model::Comment> = app.store.iter().collect();
+    assert!(!herdr_reviewr::export::format_all(&all).contains('\r'));
+    app.select_file(file_row_of(&app, "moved.txt").expect("moved.txt listed")).unwrap();
+    assert!(change_rows(&app).is_empty(), "{:?}", change_rows(&app));
+}
+
+#[test]
 fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
     // A file only in the turn's snapshots is one edited line, never deleted.
     let r = Repo::init();
