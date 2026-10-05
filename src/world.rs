@@ -449,14 +449,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_agent_at_the_root_in_another_case_is_a_member() {
-        let dir = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir.path())
-            .args(["init", "-q"])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let (dir, _) = crate::test_support::test_repo();
         let crate::git::Worktree::Root(root) = crate::git::worktree_of(dir.path()) else {
             panic!("a fresh repository resolves to a worktree root");
         };

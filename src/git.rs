@@ -2103,14 +2103,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         assert_eq!(worktree_of(outside.path()), Worktree::Outside);
         // Compared through std canonicalization, an oracle independent of `worktree_of`.
-        let repo = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(["init", "-q"])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let (repo, _) = crate::test_support::test_repo();
         let Worktree::Root(root) = worktree_of(repo.path()) else {
             panic!("a fresh repository resolves to a worktree root");
         };
@@ -2121,13 +2114,7 @@ mod tests {
     #[test]
     fn core_editor_reads_the_configured_value_verbatim() {
         // The repository's own level, so the test reads the same on every runner.
-        let repo = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let status =
-                std::process::Command::new("git").arg("-C").arg(repo.path()).args(args).status();
-            assert!(status.unwrap().success());
-        };
-        git(&["init", "-q"]);
+        let (repo, git) = crate::test_support::test_repo();
         let value = r#""C:\Program Files\Microsoft VS Code\Code.exe" --wait"#;
         git(&["config", "core.editor", value]);
         assert_eq!(super::core_editor(repo.path()).as_deref(), Some(value));

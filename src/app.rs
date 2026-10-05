@@ -5056,6 +5056,7 @@ mod tests {
     use super::{App, Mode};
     use crate::config::NavigatorPosition;
     use crate::model::{Comment, CommitPick, Scope, Side};
+    use crate::test_support::test_repo;
     use crate::world::{PickStatus, PickVerdict};
     use std::path::PathBuf;
 
@@ -5700,22 +5701,6 @@ mod tests {
     /// Git commands the current thread has built so far.
     fn git_commands() -> usize {
         crate::git::GIT_COMMANDS.with(std::cell::Cell::get)
-    }
-
-    /// A fresh repository on `main` with an identity, and a runner for git in it.
-    fn test_repo() -> (tempfile::TempDir, impl Fn(&[&str]) -> String) {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().to_path_buf();
-        let git = move |args: &[&str]| {
-            let out = std::process::Command::new("git").arg("-C").arg(&repo).args(args).output();
-            let out = out.unwrap();
-            assert!(out.status.success(), "git {args:?}");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
-        git(&["init", "-q", "-b", "main"]);
-        git(&["config", "user.email", "t@t"]);
-        git(&["config", "user.name", "t"]);
-        (dir, git)
     }
 
     #[test]

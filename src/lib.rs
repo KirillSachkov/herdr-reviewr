@@ -26,6 +26,8 @@ pub(crate) mod rendered;
 pub mod search;
 pub mod selection;
 pub mod snippet;
+#[cfg(test)]
+mod test_support;
 pub mod theme;
 pub mod turn;
 pub mod ui;
