@@ -1302,10 +1302,15 @@ struct Section<'a> {
 }
 
 impl Section<'_> {
+    /// The lines before the first hunk, where no body line can pass for a header.
+    fn header(&self) -> impl Iterator<Item = &str> {
+        self.body.lines().take_while(|l| !l.starts_with("@@ "))
+    }
+
     /// Whether the section is `quoted`'s: its `---`/`+++` names or its binary verdict name it.
     fn names(&self, quoted: &str) -> bool {
         let name = |line: &str| line.trim_end_matches(['\n', '\t']) == quoted;
-        self.body.lines().take_while(|l| !l.starts_with("@@ ")).any(|l| {
+        self.header().any(|l| {
             l.strip_prefix("--- ").or_else(|| l.strip_prefix("+++ ")).is_some_and(name)
                 || l.strip_prefix("Binary files ").is_some_and(|rest| {
                     rest.starts_with(&format!("{quoted} and "))
@@ -1316,12 +1321,12 @@ impl Section<'_> {
 
     /// Whether the section gives the file content on the new side.
     fn adds(&self) -> bool {
-        !self.body.lines().any(|l| l == "+++ /dev/null" || l.starts_with("deleted file mode"))
+        !self.header().any(|l| l == "+++ /dev/null" || l.starts_with("deleted file mode"))
     }
 
     /// Whether the section had the file on the old side.
     fn removes(&self) -> bool {
-        !self.body.lines().any(|l| l == "--- /dev/null" || l.starts_with("new file mode"))
+        !self.header().any(|l| l == "--- /dev/null" || l.starts_with("new file mode"))
     }
 }
 
@@ -2015,7 +2020,8 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     if let Some(&count) = counts.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
         return count;
     }
-    let count = count_lines(&at, buf);
+    // A failed read counts zero for now and is read again next poll, never remembered.
+    let Ok(count) = count_lines(&at, buf) else { return Some(0) };
     let mut counts = counts.lock().unwrap_or_else(PoisonError::into_inner);
     if counts.len() >= 10_000 {
         counts.clear();
@@ -2024,10 +2030,10 @@ fn untracked_additions(repo: &Path, path: &str, buf: &mut [u8]) -> Option<u32> {
     count
 }
 
-/// `at`'s line count, `None` where git would call it binary.
-fn count_lines(at: &Path, buf: &mut [u8]) -> Option<u32> {
+/// `at`'s line count, `None` where git would call it binary; `Err` when it could not be read.
+fn count_lines(at: &Path, buf: &mut [u8]) -> std::io::Result<Option<u32>> {
     use std::io::Read;
-    let Ok(mut file) = std::fs::File::open(at) else { return Some(0) };
+    let mut file = std::fs::File::open(at)?;
     // Counted a buffer at a time, so a large file never sits in memory whole.
     let (mut newlines, mut read, mut last) = (0usize, 0usize, None);
     loop {
@@ -2035,12 +2041,12 @@ fn count_lines(at: &Path, buf: &mut [u8]) -> Option<u32> {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return Some(0),
+            Err(e) => return Err(e),
         };
         let chunk = &buf[..n];
         // git's own sniff: a NUL within the first 8000 bytes.
         if read < 8000 && chunk[..n.min(8000 - read)].contains(&0) {
-            return None; // binary — git reports no line additions
+            return Ok(None); // binary — git reports no line additions
         }
         #[allow(clippy::naive_bytecount)]
         let count = chunk.iter().filter(|&&b| b == b'\n').count();
@@ -2050,7 +2056,7 @@ fn count_lines(at: &Path, buf: &mut [u8]) -> Option<u32> {
     }
     // Lines = newline count, plus one for a final line with no trailing newline.
     let trailing = usize::from(last.is_some_and(|b| b != b'\n'));
-    Some(u32::try_from(newlines + trailing).unwrap_or(u32::MAX))
+    Ok(Some(u32::try_from(newlines + trailing).unwrap_or(u32::MAX)))
 }
 
 // --- pure parsers (unit-tested without a repo) ---------------------------------
@@ -2145,7 +2151,12 @@ fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
     let known = KNOWN.get_or_init(Mutex::default);
     let named = oids.iter().copied().filter(|oid| oid.bytes().any(|b| b != b'0'));
     let unknown: Vec<&str> = {
-        let known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
+        // A turn's snapshots mint new blobs every poll, so the cache stays bounded, cleared
+        // before this batch asks so none of its sizes go missing.
+        if known.len() >= 100_000 {
+            known.clear();
+        }
         named.clone().filter(|oid| !known.contains_key(*oid)).collect()
     };
     if !unknown.is_empty() {
@@ -2153,10 +2164,6 @@ fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
         let args = ["cat-file", "--batch-check=%(objectname) %(objectsize)"];
         let out = git_stdin(repo, &args, &input)?;
         let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
-        // A turn's snapshots mint new blobs every poll, so the cache stays bounded.
-        if known.len() >= 100_000 {
-            known.clear();
-        }
         for (oid, size) in out.lines().filter_map(|line| line.split_once(' ')) {
             if let Ok(size) = size.parse() {
                 known.insert(oid.to_string(), size);

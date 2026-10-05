@@ -160,8 +160,19 @@ fn a_file_that_replaced_a_directory_reads_only_its_own_sides() {
         diff_sides(r.path(), "HEAD~1", Some("HEAD"), "bar", None).unwrap(),
         text("plain\n", "")
     );
-    // Names git quotes or ends with a tab still find their own section.
-    for name in ["say \"hi\".txt", "two words.txt"] {
+    // A body line spelled like a header is still body.
+    r.write("q.sql", "-- /dev/null\nkeep\n");
+    r.commit_all("q");
+    r.write("q.sql", "keep\n++ /dev/null\n");
+    let sides = diff_sides(r.path(), "HEAD", None, "q.sql", None).unwrap();
+    assert_eq!(sides, text("-- /dev/null\nkeep\n", "keep\n++ /dev/null\n"));
+    // Names git quotes or ends with a tab still find their own section; Windows forbids `"`.
+    let names: &[&str] = if cfg!(unix) {
+        &["say \"hi\".txt", "back\\slash.txt", "two words.txt"]
+    } else {
+        &["two words.txt"]
+    };
+    for &name in names {
         r.write(name, "one\n");
         r.commit_all("add");
         r.write(name, "two\n");

@@ -11,9 +11,9 @@ edition=3816 # Windows 11 Home/Pro/Edu, ARM64
 c() { curl -sS --fail -A "$ua" "$@"; }
 c -o /dev/null "https://vlscppe.microsoft.com/tags?org_id=y6jn8c31&session_id=$sid"
 mdt="$(c "https://ov-df.microsoft.com/mdt.js?instanceId=$inst&PageId=si&session_id=$sid")"
-# awk reads to the end, so grep never dies of a closed pipe under pipefail.
-w="$(printf '%s' "$mdt" | grep -Eo '[?&]w=[A-F0-9]+' | awk 'NR==1' | cut -d= -f2)"
-rticks="$(printf '%s' "$mdt" | grep -Eo 'rticks="\+?[0-9]+' | awk 'NR==1' | tr -cd '0-9')"
+# awk reads to the end and a miss is empty, so pipefail never stops on either.
+w="$(printf '%s' "$mdt" | { grep -Eo '[?&]w=[A-F0-9]+' || true; } | awk 'NR==1' | cut -d= -f2)"
+rticks="$(printf '%s' "$mdt" | { grep -Eo 'rticks="\+?[0-9]+' || true; } | awk 'NR==1' | tr -cd '0-9')"
 c -o /dev/null "https://ov-df.microsoft.com/?session_id=$sid&CustomerId=$inst&PageId=si&w=$w&mdt=$(($(date +%s) * 1000))&rticks=$rticks"
 skus="$(c "https://www.microsoft.com/software-download-connector/api/getskuinformationbyproductedition?profile=$prof&productEditionId=$edition&SKU=undefined&friendlyFileName=undefined&Locale=en-US&sessionID=$sid")"
 sku="$(printf '%s' "$skus" | python3 -c 'import json,sys; print(next(s["Id"] for s in json.load(sys.stdin)["Skus"] if s["Language"] == "English"))')"

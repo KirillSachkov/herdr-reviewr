@@ -60,7 +60,7 @@ pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     cmd
 }
 
-/// Resolve the reviewer's own program as their shell would: their PATH first, the bins last.
+/// Resolve the reviewer's own program on their PATH first, the bins last; never in the cwd.
 pub(crate) fn user_command(program: impl AsRef<OsStr>) -> Option<Command> {
     let program = program.as_ref();
     let path = appended_path(env::var_os("PATH").as_deref());
