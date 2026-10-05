@@ -187,7 +187,8 @@ fn run_editor(
         Ok(command) => command,
         // Two causes, and the second would otherwise be told to set what it set.
         Err(editor::NoEditor::Unset) => {
-            app.status = "no editor: set `editor` in the config, or $EDITOR".into();
+            app.status =
+                "no editor: set `editor` in the config, $EDITOR, or git's core.editor".into();
             return Ok(());
         }
         Err(editor::NoEditor::NamesNoProgram) => {
