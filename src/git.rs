@@ -1272,8 +1272,7 @@ pub fn diff_sides(
         let holds = |s: &&Section<'_>| if new_side { s.adds() } else { s.removes() };
         match sections.iter().filter(holds).find(|s| s.names(&quoted)).map(|s| parse_sides(s.body))
         {
-            None => Side::Absent,
-            Some(None) => Side::Hunkless,
+            None | Some(None) => Side::Absent,
             Some(Some(DiffSides::Binary)) => Side::Binary,
             Some(Some(DiffSides::Text { old, new })) => {
                 Side::Text(if new_side { new } else { old })
@@ -1285,15 +1284,15 @@ pub fn diff_sides(
     Ok(match (old_side, new_side, source) {
         (Side::Binary, _, _) | (_, Side::Binary, _) => DiffSides::Binary,
         // Unchanged, or a change with no hunk (a mode, an empty file): one text both sides.
-        (Side::Absent | Side::Hunkless, Side::Absent | Side::Hunkless, None) => {
+        (Side::Absent, Side::Absent, None) => {
             let text = file_content(repo, new.unwrap_or(old), path);
             DiffSides::Text { old: text.clone(), new: text }
         }
         (old_side, new_side, source) => DiffSides::Text {
             old: match (old_side, source) {
                 (Side::Text(text), _) => text,
-                // A copy's source is unchanged, so git printed nothing for it.
-                (Side::Absent, Some(source)) => file_content(repo, old, source),
+                // A copy's source is unchanged, so git printed nothing for it; it must exist.
+                (Side::Absent, Some(source)) => git(repo, &["show", &format!("{old}:{source}")])?,
                 _ => String::new(),
             },
             new: match new_side {
@@ -1306,10 +1305,8 @@ pub fn diff_sides(
 
 /// One side of a file as `git diff` printed it.
 enum Side {
-    /// No section names the file on this side.
+    /// No section names the file on this side with a hunk: unchanged, a mode change, an empty file.
     Absent,
-    /// A section without a hunk: a mode change, or an empty file.
-    Hunkless,
     Text(String),
     Binary,
 }
@@ -1541,7 +1538,7 @@ pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // refresh only saves time, so a conflict or a stale lock that fails it is ignored.
     IndexCopy::with(repo, |session| {
         let _ = session.git(repo, &["update-index", "-q", "--unmerged", "--refresh"]);
-        index.seed(&session.path())
+        index.seed(&session.path()).map(drop)
     })?;
     index.git(repo, &["add", "-A"])?;
     Ok(index.git(repo, &["write-tree"])?.trim().to_string())
@@ -1588,7 +1585,10 @@ impl IndexCopy {
             *kept = Some(Self::new(repo)?);
         }
         let copy = kept.as_mut().expect("filled above");
-        copy.seed(&real)?;
+        // A split index names a shared index in the git dir; the copy stands alone instead.
+        if copy.seed(&real)? {
+            copy.git(repo, &["update-index", "--no-split-index"])?;
+        }
         f(copy)
     }
 
@@ -1608,8 +1608,9 @@ impl IndexCopy {
         Ok(Self { dir, _live: live, seeded: None })
     }
 
-    /// Copy the index at `real` again if it changed since the last copy, keeping its mtime.
-    fn seed(&mut self, real: &Path) -> Result<()> {
+    /// Copy the index at `real` again if it changed since the last copy, keeping its mtime;
+    /// whether it copied.
+    fn seed(&mut self, real: &Path) -> Result<bool> {
         use std::io::{Read, Seek, SeekFrom};
         let mut from = match std::fs::File::open(real) {
             Ok(file) => file,
@@ -1617,7 +1618,7 @@ impl IndexCopy {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let _ = std::fs::remove_file(self.path());
                 self.seeded = None;
-                return Ok(());
+                return Ok(false);
             }
             // Any other failure is no answer: an empty index would list every file deleted.
             Err(e) => return Err(e).context("reading the index"),
@@ -1629,7 +1630,7 @@ impl IndexCopy {
         from.read_exact(&mut tail).context("reading the index")?;
         let stamp = Stamp { modified: meta.modified().context("reading the index")?, tail };
         if self.seeded.as_ref() == Some(&stamp) {
-            return Ok(());
+            return Ok(false);
         }
         from.rewind().context("reading the index")?;
         let mut to = std::fs::File::create(self.path()).context("creating the index copy")?;
@@ -1637,7 +1638,7 @@ impl IndexCopy {
         // The copy keeps the index's mtime, which git's racy-clean check reads.
         let _ = to.set_modified(stamp.modified);
         self.seeded = Some(stamp);
-        Ok(())
+        Ok(true)
     }
 
     fn path(&self) -> PathBuf {
@@ -1647,7 +1648,9 @@ impl IndexCopy {
     /// Like [`git`], on the copy, with the diff refresh on.
     fn git(&self, repo: &Path, args: &[&str]) -> Result<String> {
         let mut cmd = git_command(repo);
-        cmd.args(["-c", "diff.autoRefreshIndex=true"]).env("GIT_INDEX_FILE", self.path());
+        // Unsplit, so no write lands a shared index beside the real one.
+        cmd.args(["-c", "diff.autoRefreshIndex=true", "-c", "core.splitIndex=false"])
+            .env("GIT_INDEX_FILE", self.path());
         run(cmd, args)
     }
 }
@@ -2043,8 +2046,8 @@ fn diff_unset(repo: &Path, paths: &[&str]) -> Result<HashSet<String>> {
 /// reviewr's own read bound, at git's default `core.bigFileThreshold`: past it, binary unread.
 const BIG_FILE_THRESHOLD: u64 = 512 * 1024 * 1024;
 
-/// Line counts by file, size, and modification time: what an untracked file held when counted.
-type Counts = HashMap<(PathBuf, u64, Option<std::time::SystemTime>), Option<u32>>;
+/// Line counts by repo-relative path, size, and mtime: what an untracked file held when counted.
+type Counts = HashMap<(String, u64, Option<std::time::SystemTime>), Option<u32>>;
 
 /// Each repo's counts from its last build.
 static COUNTS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Arc<Counts>>>> = OnceLock::new();
@@ -2068,7 +2071,8 @@ fn untracked_additions(
         return None;
     }
     // A file unchanged since its last count is not read again.
-    let key = (at.clone(), meta.len(), meta.modified().ok());
+    let modified = meta.modified().ok();
+    let key = (path.to_string(), meta.len(), modified);
     let count = match known.get(&key) {
         Some(&count) => count,
         // A failed read counts zero for now and is read again next poll, never remembered.
@@ -2077,7 +2081,12 @@ fn untracked_additions(
             Err(_) => return Some(0),
         },
     };
-    fresh.insert(key, count);
+    // A file written in the last two seconds could change again within its mtime's tick, as
+    // git's racy-clean rule says, so its count waits to be remembered.
+    let settled = modified.and_then(|m| m.elapsed().ok()).is_some_and(|age| age.as_secs() >= 2);
+    if settled {
+        fresh.insert(key, count);
+    }
     count
 }
 

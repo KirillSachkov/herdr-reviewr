@@ -1049,31 +1049,64 @@ fn index_copies_live_in_the_git_dir_and_a_seeded_snapshot_is_the_worktree() {
 }
 
 #[test]
-fn a_turn_snapshot_holds_through_a_merge_conflict() {
+fn a_split_index_gets_no_new_shared_index_from_reviewr() {
     let r = Repo::init();
-    r.write("f.txt", "base\n");
+    r.git(&["config", "core.splitIndex", "true"]);
+    for name in ["a.txt", "b.txt", "c.txt"] {
+        r.write(name, "one\n");
+    }
     r.commit_all("init");
-    r.git(&["checkout", "-q", "-b", "side"]);
-    r.write("f.txt", "side\n");
-    r.commit_all("side");
-    r.git(&["checkout", "-q", "main"]);
-    r.write("f.txt", "main\n");
-    r.commit_all("main");
-    // The merge stops on the conflict, leaving `f.txt` unmerged in the index.
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(r.path())
-        .args(["merge", "-q", "side"])
-        .output();
+    let shared = || -> Vec<String> {
+        let names = std::fs::read_dir(r.path().join(".git")).unwrap().flatten();
+        let mut names: Vec<String> = names
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("sharedindex."))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = shared();
+    // Touched and edited, so every refresh has stat info to write.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    r.write("a.txt", "one\n");
+    r.write("b.txt", "two\n");
     changed_from(r.path(), "HEAD").unwrap();
-    let snapshot = herdr_reviewr::git::snapshot_worktree(r.path());
-    let snapshot = snapshot.expect("an agent mid-merge stops turn tracking");
-    // The tree holds the worktree's conflict-marked file, as git's own `add -A` records it.
-    let scratch = tempfile::tempdir().unwrap();
-    let own = scratch.path().join("index");
-    let env = [("GIT_INDEX_FILE", own.to_str().unwrap())];
-    r.git_env(&["add", "-A"], &env);
-    assert_eq!(snapshot, r.git_env(&["write-tree"], &env).trim());
+    herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
+    changed_from(r.path(), "HEAD").unwrap();
+    assert_eq!(shared(), before, "reviewr wrote a shared index into .git");
+}
+
+#[test]
+fn a_turn_snapshot_holds_through_a_merge_conflict() {
+    // With the session copy already made by a listing, and with the snapshot making it.
+    for listed_first in [true, false] {
+        let r = Repo::init();
+        r.write("f.txt", "base\n");
+        r.commit_all("init");
+        r.git(&["checkout", "-q", "-b", "side"]);
+        r.write("f.txt", "side\n");
+        r.commit_all("side");
+        r.git(&["checkout", "-q", "main"]);
+        r.write("f.txt", "main\n");
+        r.commit_all("main");
+        // The merge stops on the conflict, leaving `f.txt` unmerged in the index.
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(r.path())
+            .args(["merge", "-q", "side"])
+            .output();
+        if listed_first {
+            changed_from(r.path(), "HEAD").unwrap();
+        }
+        let snapshot = herdr_reviewr::git::snapshot_worktree(r.path());
+        let snapshot = snapshot.expect("an agent mid-merge stops turn tracking");
+        // The tree holds the worktree's conflict-marked file, as git's own `add -A` records it.
+        let scratch = tempfile::tempdir().unwrap();
+        let own = scratch.path().join("index");
+        let env = [("GIT_INDEX_FILE", own.to_str().unwrap())];
+        r.git_env(&["add", "-A"], &env);
+        assert_eq!(snapshot, r.git_env(&["write-tree"], &env).trim(), "{listed_first}");
+    }
 }
 
 #[test]
@@ -1166,6 +1199,33 @@ fn untracked_files_in_a_new_directory_are_listed_individually() {
     assert!(by.contains_key("docs/new/b.md"));
     assert!(!by.contains_key("docs/new/"), "the bare directory is not an entry");
     assert_eq!(by["docs/new/a.md"].kind, ChangeKind::Untracked);
+}
+
+#[test]
+fn an_untracked_files_count_follows_its_edits() {
+    let r = Repo::init();
+    r.write("seed.rs", "x\n");
+    r.commit_all("init");
+    let count = || {
+        let files = changed_from(r.path(), "HEAD").unwrap();
+        files.iter().find(|f| f.path == "notes.txt").map(|f| f.additions)
+    };
+    r.write("notes.txt", "a\nb\n");
+    assert_eq!(count(), Some(2));
+    // Rewritten at the same size within its mtime's tick: never the remembered count.
+    let at = r.path().join("notes.txt");
+    let stamp = std::fs::metadata(&at).unwrap().modified().unwrap();
+    r.write("notes.txt", "abc\n");
+    std::fs::File::options().write(true).open(&at).unwrap().set_modified(stamp).unwrap();
+    assert_eq!(count(), Some(1), "a fresh file's count was remembered");
+    r.write("notes.txt", "a\nb\nc\n");
+    assert_eq!(count(), Some(3));
+    // A settled file is counted once, then still matches after its edit.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+    std::fs::File::options().write(true).open(&at).unwrap().set_modified(old).unwrap();
+    assert_eq!(count(), Some(3));
+    r.write("notes.txt", "a\nb\nc\nd\n");
+    assert_eq!(count(), Some(4));
 }
 
 #[test]

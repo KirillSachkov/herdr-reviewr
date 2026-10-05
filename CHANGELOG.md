@@ -17,7 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Send cap**: a send over 256 KiB on the wire refuses with a copy hint, since herdr cannot read more in time.
 - **Send failures say why**: the status names the cause, such as `claude closed` or `herdr didn't answer`, then the copy key.
 - **Index copies under `.git/reviewr/`**: reviewr lists changes and snapshots turns on its own copy of the index, so it needs write access to the git dir.
-- **A file git can't read** shows a notice instead of an empty diff.
+- **A file reviewr can't read** shows a notice instead of an empty diff.
 
 ### Fixed
 - **No index rewrites**: reading a diff no longer refreshes `.git/index` behind the agent's back.

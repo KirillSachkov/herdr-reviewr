@@ -5174,7 +5174,7 @@ fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate:
     let cap = crate::diff::MAX_BYTES as u64 + 1;
     match std::fs::File::open(at).and_then(|f| f.take(cap).read_to_end(&mut bytes)) {
         Ok(_) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
-        Err(_) => Ok(String::new()),
+        Err(_) => Err(crate::diff::Notice::Unreadable),
     }
 }
 
@@ -5975,6 +5975,27 @@ mod tests {
         app.set_diff("a.txt".to_string());
         assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable));
         assert!(app.diff.rows.is_empty());
+    }
+
+    /// An untracked file the disk refuses to read is the notice, never an empty addition.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_untracked_file_is_a_notice() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, git) = test_repo();
+        let repo = dir.path();
+        std::fs::write(repo.join("seed.txt"), "x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let locked = repo.join("locked.txt");
+        std::fs::write(&locked, "secret\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+        app.reload().unwrap();
+        app.set_diff("locked.txt".to_string());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable));
     }
 
     /// An over-budget rename's notice keeps its source and its Diff view.

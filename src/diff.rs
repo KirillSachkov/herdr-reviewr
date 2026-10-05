@@ -166,7 +166,7 @@ impl Row {
 pub enum Notice {
     Binary,
     TooLarge,
-    /// git failed to read the sides; the next refresh tries again.
+    /// A side failed to read, through git or from disk; the next refresh tries again.
     Unreadable,
 }
 
@@ -177,7 +177,7 @@ impl Notice {
         match self {
             Self::Binary => "binary file · no line comments",
             Self::TooLarge => "file too large to show",
-            Self::Unreadable => "git couldn't read this file",
+            Self::Unreadable => "couldn't read this file",
         }
     }
 }
