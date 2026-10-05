@@ -1519,12 +1519,19 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // A fresh copy each time: `add -A` stages into it, and a killed git leaves its lock behind.
     let index = IndexCopy::new(repo)?;
-    // Seeded from the session copy, refreshed, so `add -A` hashes only what really changed.
+    // Seeded from the session copy, refreshed, so `add -A` hashes only what really changed. The
+    // refresh only saves time, so a conflict or a stale lock that fails it is ignored.
     IndexCopy::with(repo, |session| {
-        session.git(repo, &["update-index", "-q", "--refresh"])?;
-        if session.path().exists() {
-            std::fs::copy(session.path(), index.path()).context("seeding the snapshot index")?;
-        }
+        let _ = session.git(repo, &["update-index", "-q", "--unmerged", "--refresh"]);
+        let Ok(modified) = std::fs::metadata(session.path()).and_then(|m| m.modified()) else {
+            return Ok(());
+        };
+        std::fs::copy(session.path(), index.path()).context("seeding the snapshot index")?;
+        // The copy keeps its source's mtime, which git's racy-clean check reads.
+        let _ = std::fs::File::options()
+            .write(true)
+            .open(index.path())
+            .and_then(|f| f.set_modified(modified));
         Ok(())
     })?;
     index.git(repo, &["add", "-A"])?;

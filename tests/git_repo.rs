@@ -1049,6 +1049,30 @@ fn index_copies_live_in_the_git_dir_and_a_seeded_snapshot_is_the_worktree() {
 }
 
 #[test]
+fn a_turn_snapshot_holds_through_a_merge_conflict() {
+    let r = Repo::init();
+    r.write("f.txt", "base\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "side"]);
+    r.write("f.txt", "side\n");
+    r.commit_all("side");
+    r.git(&["checkout", "-q", "main"]);
+    r.write("f.txt", "main\n");
+    r.commit_all("main");
+    // The merge stops on the conflict, leaving `f.txt` unmerged in the index.
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(r.path())
+        .args(["merge", "-q", "side"])
+        .output();
+    changed_from(r.path(), "HEAD").unwrap();
+    assert!(
+        herdr_reviewr::git::snapshot_worktree(r.path()).is_ok(),
+        "an agent mid-merge stops turn tracking"
+    );
+}
+
+#[test]
 fn every_changed_file_carries_the_size_of_each_side_git_stores() {
     let r = Repo::init();
     // Windows forbids a newline, and a colon, in a file name.
