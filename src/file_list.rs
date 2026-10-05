@@ -56,11 +56,10 @@ impl From<&ChangedFile> for Annotation {
     }
 }
 
-/// A navigator entry: a path, its rename source, and its annotation when changed.
+/// A navigator entry: a path, and its annotation when changed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Entry {
     pub path: String,
-    pub previous_path: Option<String>,
     pub annotation: Option<Annotation>,
     /// Whether git ignores this path — drives dimming in `All files`.
     pub ignored: bool,
@@ -73,7 +72,6 @@ impl Entry {
     pub fn from_changed(f: &ChangedFile) -> Self {
         Self {
             path: f.path.clone(),
-            previous_path: f.previous_path.clone(),
             annotation: Some(Annotation::from(f)),
             ignored: false,
             is_dir: false,
@@ -310,25 +308,13 @@ mod tests {
     #[test]
     fn an_unannotated_entry_renders_without_a_marker() {
         // An `All files` entry from a bare path renders without a marker or stats.
-        let entry = Entry {
-            path: "a.rs".into(),
-            previous_path: None,
-            annotation: None,
-            ignored: false,
-            is_dir: false,
-        };
+        let entry = Entry { path: "a.rs".into(), annotation: None, ignored: false, is_dir: false };
         let rows = build(&[entry], &HashSet::new(), false);
         assert!(matches!(rows[0].kind, RowKind::File { annotation: None, .. }));
     }
 
     fn plain(path: &str) -> Entry {
-        Entry {
-            path: path.into(),
-            previous_path: None,
-            annotation: None,
-            ignored: false,
-            is_dir: false,
-        }
+        Entry { path: path.into(), annotation: None, ignored: false, is_dir: false }
     }
 
     fn has_change(row: &super::Row) -> bool {
@@ -373,13 +359,7 @@ mod tests {
     }
 
     fn ignored_dir(path: &str) -> Entry {
-        Entry {
-            path: path.into(),
-            previous_path: None,
-            annotation: None,
-            ignored: true,
-            is_dir: true,
-        }
+        Entry { path: path.into(), annotation: None, ignored: true, is_dir: true }
     }
 
     #[test]
@@ -393,13 +373,8 @@ mod tests {
 
     #[test]
     fn an_ignored_file_marks_its_row_ignored() {
-        let entry = Entry {
-            path: "build.log".into(),
-            previous_path: None,
-            annotation: None,
-            ignored: true,
-            is_dir: false,
-        };
+        let entry =
+            Entry { path: "build.log".into(), annotation: None, ignored: true, is_dir: false };
         let rows = build(&[entry], &HashSet::new(), false);
         assert!(rows[0].ignored, "an ignored file row is dimmed");
         assert!(matches!(rows[0].kind, RowKind::File { .. }));

@@ -1277,29 +1277,32 @@ impl App {
             self.clear_open_view();
             return;
         };
-        self.open_path_in_tab(entry.path, entry.previous_path);
+        self.open_path_in_tab(entry.path);
     }
 
     /// Open `path`: its diff in `Changes`, its content in `All files`.
-    fn open_path_in_tab(&mut self, path: String, previous_path: Option<String>) {
+    fn open_path_in_tab(&mut self, path: String) {
         match self.tab {
             Tab::AllFiles => self.set_file_view(&path),
             // `Changes` (the `PR` tab never opens a file in the read pane).
-            _ => self.set_diff(path, previous_path),
+            _ => self.set_diff(path),
         }
     }
 
+    /// `path`'s rename or copy source in the landed changeset.
+    fn rename_source(&self, path: &str) -> Option<String> {
+        self.changeset.files.get(path).and_then(|a| a.previous_path.clone())
+    }
+
     /// Build the diff for `path`, visible in the tree or not.
-    fn set_diff(&mut self, path: String, previous_path: Option<String>) {
+    fn set_diff(&mut self, path: String) {
         // Folds key by line number, so a different file starts with all collapsed.
         if self.diff_path.as_deref() != Some(path.as_str()) {
             self.expanded_folds.clear();
             self.open_fresh();
         }
         self.diff_path = Some(path.clone());
-        // The rename source from the landed build, the painted row's only as a fallback.
-        let previous_path =
-            self.changeset.files.get(&path).map_or(previous_path, |a| a.previous_path.clone());
+        let previous_path = self.rename_source(&path);
         let (old, new) = match self.content_sides(&path) {
             Sides::Text { old, new } => {
                 self.diff = self.cache.get(path, previous_path, &old, &new, &self.highlighter);
@@ -2798,8 +2801,8 @@ impl App {
             }
             // A notice holds no hunk.
             let Sides::Text { old, new } = self.content_sides(&entry.path) else { continue };
-            let diff =
-                self.cache.get(entry.path, entry.previous_path, &old, &new, &self.highlighter);
+            let source = self.rename_source(&entry.path);
+            let diff = self.cache.get(entry.path, source, &old, &new, &self.highlighter);
             if hunk_row(&diff.rows, None, forward).is_some() {
                 return Some(row);
             }
@@ -3289,7 +3292,7 @@ impl App {
             && let Some(e) = self.entries.iter().find(|e| e.path == file).cloned()
         {
             self.reset_diff_view();
-            self.open_path_in_tab(e.path, e.previous_path);
+            self.open_path_in_tab(e.path);
             if let Some(fi) = self.file_row_of_path(&file) {
                 self.file_cursor = fi;
             }
@@ -5618,14 +5621,12 @@ mod tests {
         let mut app = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         app.entries.push(crate::file_list::Entry {
             path: "src/lib.rs".into(),
-            previous_path: None,
             annotation: None,
             ignored: false,
             is_dir: false,
         });
         app.entries.push(crate::file_list::Entry {
             path: "src/other.rs".into(),
-            previous_path: None,
             annotation: None,
             ignored: false,
             is_dir: false,
@@ -5922,7 +5923,7 @@ mod tests {
         let open = |app: &mut App| {
             app.reload().unwrap();
             let before = git_commands();
-            app.set_diff("big.txt".to_string(), None);
+            app.set_diff("big.txt".to_string());
             assert_eq!(git_commands() - before, 0, "the oversize file was read through git");
             assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
         };
@@ -5950,7 +5951,7 @@ mod tests {
         // A stale row's path has no diff at the landed ends.
         app.reload().unwrap();
         let before = git_commands();
-        app.set_diff("gone.txt".to_string(), None);
+        app.set_diff("gone.txt".to_string());
         assert_eq!(git_commands() - before, 0, "a path outside the changeset was read");
     }
 
@@ -5968,7 +5969,7 @@ mod tests {
         app.reload().unwrap();
         // The landed ends name a commit git no longer has.
         app.changeset.ends = Some(crate::world::DiffEnds { old: "0".repeat(40), new: None });
-        app.set_diff("a.txt".to_string(), None);
+        app.set_diff("a.txt".to_string());
         assert_eq!(app.diff.state, crate::diff::FileState::Unreadable);
         assert!(app.diff.rows.is_empty());
     }
@@ -5985,7 +5986,7 @@ mod tests {
 
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
-        app.set_diff("moved.txt".to_string(), None);
+        app.set_diff("moved.txt".to_string());
         assert_eq!(app.diff.state, crate::diff::FileState::TooLarge);
         assert_eq!(app.diff.previous_path.as_deref(), Some("big.txt"));
         assert_eq!(app.diff.view, crate::diff::View::Diff);
@@ -6008,7 +6009,7 @@ mod tests {
 
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
         app.reload().unwrap();
-        app.set_diff("link".to_string(), None);
+        app.set_diff("link".to_string());
         assert_eq!(app.diff.state, crate::diff::FileState::Normal);
         assert!(app.diff.rows.iter().any(|r| r.marker() == '+'));
     }
@@ -6031,26 +6032,23 @@ mod tests {
         std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
 
         let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
-        let cost = |app: &mut App, path: &str, previous: Option<&str>| {
+        let cost = |app: &mut App, path: &str| {
             let before = git_commands();
-            app.set_diff(path.to_string(), previous.map(str::to_string));
+            app.set_diff(path.to_string());
             git_commands() - before
         };
         app.reload().unwrap();
-        let uncommitted = (
-            cost(&mut app, "a.txt", None),
-            cost(&mut app, "new.txt", None),
-            cost(&mut app, "moved.txt", Some("same.txt")),
-        );
+        let uncommitted =
+            (cost(&mut app, "a.txt"), cost(&mut app, "new.txt"), cost(&mut app, "moved.txt"));
         app.set_scope(Scope::Branch).unwrap();
-        let branch = cost(&mut app, "a.txt", None);
+        let branch = cost(&mut app, "a.txt");
         app.sync_turn_baseline(Some(baseline));
         app.set_scope(Scope::LastTurn).unwrap();
-        let last_turn = cost(&mut app, "a.txt", None);
+        let last_turn = cost(&mut app, "a.txt");
         app.commit_pick = Some(CommitPick::single(&base));
         app.scope = Scope::Commits;
         app.reload().unwrap();
-        let commits = cost(&mut app, "a.txt", None);
+        let commits = cost(&mut app, "a.txt");
         // One `git diff` per tracked file, a rename's source included.
         assert_eq!(uncommitted, (1, 0, 1), "a CRLF edit, an untracked file, a pure rename");
         assert_eq!((branch, last_turn, commits), (1, 1, 1));

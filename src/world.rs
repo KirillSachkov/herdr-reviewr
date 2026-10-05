@@ -207,7 +207,6 @@ pub(crate) fn all_files_entries(
     let to_entry = |w: git::WorktreeEntry| Entry {
         annotation: changed.get(&w.path).cloned(),
         path: w.path,
-        previous_path: None,
         ignored: w.ignored,
         is_dir: w.is_dir,
     };

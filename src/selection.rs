@@ -235,7 +235,6 @@ mod tests {
         use crate::file_list::{Entry, Row as FileRow, RowKind};
         let entries = vec![Entry {
             path: "sub/two.rs".into(),
-            previous_path: None,
             annotation: None,
             ignored: false,
             is_dir: false,
