@@ -144,11 +144,11 @@ fn main() {
             }),
         );
     } else {
-        // No uncommitted changes: still time the git-show side against the median file.
+        // No uncommitted changes: still time the sides read against the median file.
         row(
-            "diff open sides only (git show, clean repo)",
+            "diff open sides only (clean repo)",
             sample(5, || {
-                git::file_content(&repo, "HEAD", &median_file);
+                git::diff_sides(&repo, "HEAD", None, &median_file, None).unwrap();
             }),
         );
     }

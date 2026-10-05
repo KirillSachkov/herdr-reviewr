@@ -4581,7 +4581,8 @@ fn outside_a_repo_the_build_yields_the_quiet_empty_snapshot() {
     let app = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None);
     let snapshot = herdr_reviewr::world::build(&app.world_input()).unwrap();
     assert!(snapshot.entries.is_empty(), "no error, no entries — the empty state stays quiet");
-    assert!(herdr_reviewr::world::build_changed(&app.world_input()).unwrap().changed.is_empty());
+    let build = herdr_reviewr::world::build_changed(&app.world_input()).unwrap();
+    assert!(build.changeset.files.is_empty());
 }
 
 #[test]

@@ -2390,7 +2390,7 @@ impl App {
             let build = crate::world::build_changed(&self.world_input())?;
             self.adopt_branch_base(build.branch_base);
             self.adopt_pick_status(build.pick_status);
-            self.changeset = Changeset::new(&build.changed, build.ends);
+            self.changeset = build.changeset;
             // Re-mark the badges in place, so none belongs to the old base.
             for entry in &mut self.entries {
                 entry.annotation = self.changeset.files.get(&entry.path).cloned();
@@ -5144,8 +5144,11 @@ fn is_markdown_path(path: &str) -> bool {
 fn worktree_content(repo: &std::path::Path, path: &str) -> Result<String, crate::diff::Notice> {
     use std::io::Read;
     let at = repo.join(path);
-    let Some(meta) = std::fs::metadata(&at).ok().filter(std::fs::Metadata::is_file) else {
-        return Ok(String::new());
+    let meta = match std::fs::metadata(&at) {
+        Ok(meta) if meta.is_file() => meta,
+        Ok(_) => return Ok(String::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(_) => return Err(crate::diff::Notice::Unreadable),
     };
     if crate::diff::over_byte_budget(usize::try_from(meta.len()).unwrap_or(usize::MAX)) {
         return Err(crate::diff::Notice::TooLarge);
@@ -5958,25 +5961,30 @@ mod tests {
         assert!(app.diff.rows.is_empty());
     }
 
-    /// An untracked file the disk refuses to read is the notice, never an empty addition.
+    /// An untracked file the disk refuses to read or stat is the notice, never an empty addition.
     #[cfg(unix)]
     #[test]
     fn an_unreadable_untracked_file_is_a_notice() {
         use std::os::unix::fs::PermissionsExt;
-        let (dir, git) = test_repo();
-        let repo = dir.path();
-        std::fs::write(repo.join("seed.txt"), "x\n").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-q", "-m", "init"]);
-        let locked = repo.join("locked.txt");
-        std::fs::write(&locked, "secret\n").unwrap();
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // The file itself unreadable, then its directory unsearchable.
+        for (path, locked, mode) in [("locked.txt", "locked.txt", 0o000), ("d/f.txt", "d", 0o600)] {
+            let (dir, git) = test_repo();
+            let repo = dir.path();
+            std::fs::write(repo.join("seed.txt"), "x\n").unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", "init"]);
+            std::fs::create_dir_all(repo.join("d")).unwrap();
+            std::fs::write(repo.join(path), "secret\n").unwrap();
 
-        let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
-        app.reload().unwrap();
-        app.set_diff("locked.txt".to_string());
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable));
+            let mut app = App::new(repo.to_path_buf(), Scope::Uncommitted, None);
+            app.reload().unwrap();
+            let locked = repo.join(locked);
+            let restore = std::fs::metadata(&locked).unwrap().permissions();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode)).unwrap();
+            app.set_diff(path.to_string());
+            std::fs::set_permissions(&locked, restore).unwrap();
+            assert_eq!(app.diff.notice, Some(crate::diff::Notice::Unreadable), "{path}");
+        }
     }
 
     /// An over-budget rename's notice keeps its source and its Diff view.

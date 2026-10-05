@@ -117,6 +117,7 @@ pub fn run() -> Result<()> {
     }
     let result = event_loop(&mut terminal, &mut app, &cfg);
     herdr::clear_pane_label();
+    git::end_sessions();
     result
 }
 

@@ -8,9 +8,9 @@ use std::path::Path;
 use common::Repo;
 use herdr_reviewr::git::{
     DiffSides, ResolvedBase, abbreviate_oid, all_files, changed_between, changed_from,
-    checked_out_branch, default_branch_name, delete_base_pick, diff_sides, file_content,
-    list_branches, merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
-    resolve_commit, snapshot_worktree, write_base_pick, write_baseline_ref,
+    checked_out_branch, default_branch_name, delete_base_pick, diff_sides, list_branches,
+    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
+    snapshot_worktree, write_base_pick, write_baseline_ref,
 };
 use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
 use herdr_reviewr::world::{WorldInput, build_changed};
@@ -25,12 +25,17 @@ fn changed_files(
     scope: Scope,
     base: Option<&str>,
 ) -> anyhow::Result<Vec<ChangedFile>> {
-    Ok(build_changed(&world_input(repo, scope, base, None))?.changed)
+    Ok(build_changed(&world_input(repo, scope, base, None))?
+        .changeset
+        .files
+        .into_values()
+        .collect())
 }
 
 /// `last-turn`'s changeset against the baseline `tree`, as the world worker builds it.
 fn changed_against_tree(repo: &Path, tree: &str) -> anyhow::Result<Vec<ChangedFile>> {
-    Ok(build_changed(&world_input(repo, Scope::LastTurn, None, Some(tree)))?.changed)
+    let build = build_changed(&world_input(repo, Scope::LastTurn, None, Some(tree)))?;
+    Ok(build.changeset.files.into_values().collect())
 }
 
 fn world_input(repo: &Path, scope: Scope, base: Option<&str>, turn: Option<&str>) -> WorldInput {
@@ -97,6 +102,29 @@ fn a_diffs_sides_are_the_committed_blob_and_the_text_git_would_store() {
             assert_eq!(sides, DiffSides::Text { old, new }, "{case}");
         }
     }
+}
+
+#[test]
+fn a_submodule_bump_reads_as_git_prints_it_and_an_empty_file_as_empty() {
+    let r = Repo::init();
+    r.write("seed.txt", "x\n");
+    r.commit_all("init");
+    let (a, b) = ("1".repeat(40), "2".repeat(40));
+    r.git(&["update-index", "--add", "--cacheinfo", &format!("160000,{a},sub")]);
+    r.git(&["commit", "-q", "-m", "sub at a"]);
+    let at_a = r.git(&["rev-parse", "HEAD"]).trim().to_string();
+    r.git(&["update-index", "--cacheinfo", &format!("160000,{b},sub")]);
+    r.git(&["commit", "-q", "-m", "sub at b"]);
+    let text = |old: &str, new: &str| DiffSides::Text { old: old.into(), new: new.into() };
+
+    let bump = diff_sides(r.path(), &at_a, Some("HEAD"), "sub", None).unwrap();
+    assert_eq!(
+        bump,
+        text(&format!("Subproject commit {a}\n"), &format!("Subproject commit {b}\n"))
+    );
+    r.write("empty.txt", "");
+    r.git(&["add", "empty.txt"]);
+    assert_eq!(diff_sides(r.path(), "HEAD", None, "empty.txt", None).unwrap(), text("", ""));
 }
 
 #[test]
@@ -298,25 +326,11 @@ fn lists_every_change_kind_with_stats() {
 }
 
 #[test]
-fn file_content_reads_the_committed_version_not_the_worktree() {
-    let r = Repo::init();
-    r.write("a.rs", "alpha\nbeta\ngamma\n");
-    r.commit_all("init");
-    r.write("a.rs", "alpha\nBETA\ngamma\n"); // the worktree moves on
-
-    // The old side of a diff: HEAD's content, not the working tree.
-    assert_eq!(file_content(r.path(), "HEAD", "a.rs"), "alpha\nbeta\ngamma\n");
-}
-
-#[test]
-fn file_content_is_empty_for_a_path_absent_at_that_rev() {
+fn an_untracked_file_counts_its_lines_as_additions() {
     let r = Repo::init();
     r.write("seed.rs", "x\n");
     r.commit_all("init");
-    r.write("fresh.rs", "line one\nline two\n"); // untracked — not in HEAD
-
-    // An added/untracked file has no old side, so its HEAD content is empty.
-    assert_eq!(file_content(r.path(), "HEAD", "fresh.rs"), "");
+    r.write("fresh.rs", "line one\nline two\n");
     let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
     assert_eq!(by_path(&files)["fresh.rs"].additions, 2);
 }
@@ -1046,6 +1060,38 @@ fn index_copies_live_in_the_git_dir_and_a_seeded_snapshot_is_the_worktree() {
     let env = [("GIT_INDEX_FILE", own.to_str().unwrap())];
     r.git_env(&["add", "-A"], &env);
     assert_eq!(snapshot, r.git_env(&["write-tree"], &env).trim());
+    // Quitting takes the session copies with it.
+    herdr_reviewr::git::end_sessions();
+    let left = std::fs::read_dir(&home).unwrap().flatten();
+    let left: Vec<_> = left.map(|e| e.file_name()).collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_worktree_re_added_at_its_path_lists_against_its_own_index() {
+    let r = Repo::init();
+    r.write("a.txt", "one\n");
+    r.commit_all("init");
+    let out = tempfile::tempdir().unwrap();
+    let (first, other) = (out.path().join("a/wt"), out.path().join("b/wt"));
+    let add = |branch: &str, at: &Path| {
+        r.git(&["worktree", "add", "-q", "-b", branch, at.to_str().unwrap()]);
+    };
+    add("one", &first);
+    assert!(changed_from(&first, "HEAD").unwrap().is_empty());
+    r.git(&["worktree", "remove", "--force", first.to_str().unwrap()]);
+    // The other worktree takes the freed admin dir and stages a change there.
+    add("two", &other);
+    git_in(&other, &["rm", "-q", "--cached", "a.txt"]);
+    add("three", &first);
+    let listed = changed_from(&first, "HEAD").unwrap();
+    assert!(listed.is_empty(), "{listed:?}");
+}
+
+/// Run git in `dir`, asserting success.
+fn git_in(dir: &Path, args: &[&str]) {
+    let status = std::process::Command::new("git").current_dir(dir).args(args).status().unwrap();
+    assert!(status.success(), "git {args:?}");
 }
 
 #[test]
@@ -1226,6 +1272,15 @@ fn an_untracked_files_count_follows_its_edits() {
     assert_eq!(count(), Some(3));
     r.write("notes.txt", "a\nb\nc\nd\n");
     assert_eq!(count(), Some(4));
+    // Settled, then rewritten at its size with the old mtime put back, as `cp -p` does.
+    std::fs::File::options().write(true).open(&at).unwrap().set_modified(old).unwrap();
+    assert_eq!(count(), Some(4));
+    r.write("notes.txt", "abcdefg\n");
+    std::fs::File::options().write(true).open(&at).unwrap().set_modified(old).unwrap();
+    // Git keys on ctime too, which unix keeps and no write can set back.
+    if cfg!(unix) {
+        assert_eq!(count(), Some(1), "a restored mtime hid the rewrite");
+    }
 }
 
 #[test]
@@ -1261,7 +1316,7 @@ fn git_access_never_mutates_the_repo() {
     let status_before = r.git(&["status", "--porcelain"]);
 
     let _ = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
-    let _ = file_content(r.path(), "HEAD", "a.rs");
+    let _ = diff_sides(r.path(), "HEAD", None, "a.rs", None).unwrap();
     let _ = changed_files(r.path(), Scope::Branch, Some("main")).unwrap();
 
     assert_eq!(head_before, r.git(&["rev-parse", "HEAD"]), "HEAD unchanged");

@@ -26,6 +26,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Line numbers after a stray CR**: a carriage return inside a line no longer shifts the diff's rows off git's numbering.
 - **Quick double toggle**: two fast presses open reviewr and then close it, and never stack two panes.
 - **PR link**: `o` opens only an http(s) pull request URL.
+- **Submodule bumps**: a moved submodule shows its old and new commit, as `git diff` does, instead of an empty diff.
 
 ## [0.44.0] — 2026-10-03
 
