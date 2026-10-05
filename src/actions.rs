@@ -161,7 +161,7 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 const BINARY: &str = env!("CARGO_PKG_NAME");
 
 /// How long an action waits for its workspace's lock: a holder's five herdr calls all wedged, its
-/// visibility wait, and three seconds for its last poll pause and two git reads on a cold disk.
+/// visibility wait, and three seconds of slack, typically enough for its last poll pause and git reads.
 const LOCK_BOUND: Duration = herdr::CALL_BOUND
     .saturating_mul(5)
     .saturating_add(VISIBLE_BOUND)
