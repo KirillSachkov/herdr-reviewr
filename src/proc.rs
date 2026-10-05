@@ -1,11 +1,17 @@
-//! Small helpers for locating and naming external command-line tools.
+//! External command-line tools: located, named, and run within a bound.
 
 use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use process_wrap::std::CommandWrap;
 
 /// Host bin dirs a stripped PATH may omit; none on Windows, where `\\usr\\bin` is plantable.
 #[cfg(unix)]
@@ -123,12 +129,103 @@ pub fn on_path(name: &str) -> bool {
     resolve_on_host(OsStr::new(name)).is_some()
 }
 
+/// How one bounded run of a tool failed.
+#[derive(Debug)]
+pub(crate) enum RunError {
+    /// The program is not there to run.
+    NotFound,
+    /// It ran and exited non-zero; `stderr` carries its diagnostic.
+    Failed { stderr: String },
+    /// Spawning or waiting failed at the OS level.
+    Io(String),
+    /// The caller cancelled it mid-flight.
+    Cancelled,
+    /// It outlived its deadline.
+    TimedOut,
+}
+
+/// Run `cmd` in its own process tree to its stdout; a cancel or the deadline ends the whole tree.
+pub(crate) fn run_tree(
+    cmd: Command,
+    cancelled: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<String, RunError> {
+    let mut cmd = CommandWrap::from(cmd);
+    // No stdin: the terminal belongs to the pane.
+    cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.wrap(process_wrap::std::ProcessGroup::leader());
+    #[cfg(windows)]
+    cmd.wrap(process_wrap::std::JobObject);
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(RunError::NotFound),
+        Err(error) => return Err(RunError::Io(error.to_string())),
+    };
+    // Drained while polling, so a large answer cannot block the child.
+    let stdout = read_all(child.stdout().take());
+    let stderr = read_all(child.stderr().take());
+    // Done once the tool exits and its pipes close; a lingering descendant is ended once.
+    let mut ended = false;
+    let status = loop {
+        let stop = if cancelled.load(Ordering::Acquire) {
+            Some(RunError::Cancelled)
+        } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Some(RunError::TimedOut)
+        } else {
+            None
+        };
+        if let Some(stop) = stop {
+            // The readers are left to finish as the ended tree closes their pipes.
+            let _ = child.start_kill();
+            let _ = child.wait();
+            return Err(stop);
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if stdout.is_finished() && stderr.is_finished() => break status,
+            Ok(Some(_)) if !ended => {
+                ended = true;
+                let _ = child.start_kill();
+            }
+            Ok(_) => thread::sleep(Duration::from_millis(5)),
+            Err(error) => {
+                let _ = child.start_kill();
+                let _ = child.wait();
+                return Err(RunError::Io(error.to_string()));
+            }
+        }
+    };
+    let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&stdout).into_owned());
+    }
+    Err(RunError::Failed { stderr: String::from_utf8_lossy(&stderr).into_owned() })
+}
+
+/// Read `pipe` to its end on a thread of its own.
+fn read_all(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        bytes
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{COMMON_BINS, appended_path, prepended_path, program_name, resolve_on};
+    use super::{
+        COMMON_BINS, RunError, appended_path, prepended_path, program_name, resolve_on, run_tree,
+    };
     use std::env;
     use std::ffi::{OsStr, OsString};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     fn path_of(dirs: &[&str]) -> OsString {
         env::join_paths(dirs).unwrap()
@@ -251,6 +348,91 @@ mod tests {
         std::fs::write(dir.path().join("notes"), []).unwrap();
         let path = env::join_paths([dir.path()]).unwrap();
         assert!(resolve_on(&path, OsStr::new("notes")).is_none());
+    }
+
+    /// A tool whose grandchild holds its pipes, and that waits on it when `waits`.
+    #[cfg(unix)]
+    fn tool_with_grandchild(_dir: &Path, ready: &Path, waits: bool) -> Command {
+        let script = if waits {
+            r#"echo answer; sleep 60 & touch "$1"; wait"#
+        } else {
+            r#"echo answer; sleep 60 & touch "$1""#
+        };
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script, "tool"]).arg(ready);
+        cmd
+    }
+
+    /// The same tool as a batch file, the shape `az.cmd` has.
+    #[cfg(windows)]
+    fn tool_with_grandchild(dir: &Path, ready: &Path, waits: bool) -> Command {
+        let mut script = String::from(
+            "@echo off\r\necho answer\r\nstart /b \"\" ping -n 61 127.0.0.1 >nul\r\n\
+             echo ready> \"%~1\"\r\n",
+        );
+        if waits {
+            script.push_str("ping -n 61 127.0.0.1 >nul\r\n");
+        }
+        let path = dir.join("tool.cmd");
+        std::fs::write(&path, script).unwrap();
+        let mut cmd = Command::new(path);
+        cmd.arg(ready);
+        cmd
+    }
+
+    /// Run `cmd` on its own thread, cancelled through `cancelled`.
+    fn spawn_run(
+        cmd: Command,
+        cancelled: Arc<AtomicBool>,
+        deadline: Option<Instant>,
+    ) -> mpsc::Receiver<Result<String, RunError>> {
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || done_tx.send(run_tree(cmd, &cancelled, deadline)));
+        done_rx
+    }
+
+    /// Wait until the tool's grandchild exists.
+    fn await_ready(ready: &Path) {
+        let started = Instant::now();
+        while !ready.exists() {
+            assert!(started.elapsed() < Duration::from_secs(10), "never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+
+    #[test]
+    fn a_cancel_ends_the_tools_whole_process_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let done =
+            spawn_run(tool_with_grandchild(dir.path(), &ready, true), cancelled.clone(), None);
+        await_ready(&ready);
+        cancelled.store(true, Ordering::Release);
+        let result = done.recv_timeout(Duration::from_secs(5)).expect("the cancel ends the run");
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn the_deadline_ends_a_tool_that_never_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let cmd = tool_with_grandchild(dir.path(), &ready, true);
+        let done = spawn_run(cmd, Arc::default(), Some(deadline));
+        let result = done.recv_timeout(Duration::from_secs(7)).expect("the deadline ends the run");
+        assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
+    }
+
+    #[test]
+    fn a_tool_that_exits_is_done_though_a_grandchild_holds_its_pipes() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmd = tool_with_grandchild(dir.path(), &dir.path().join("ready"), false);
+        // Never cancelled and no deadline: the tool's own exit has to end the run.
+        let done = spawn_run(cmd, Arc::default(), None);
+        let result = done.recv_timeout(Duration::from_secs(10)).expect("the tool's exit ends it");
+        assert_eq!(result.map(|out| out.trim().to_string()).ok().as_deref(), Some("answer"));
     }
 
     /// A bare name reaches a batch shim through PATHEXT.

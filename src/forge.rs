@@ -1,14 +1,12 @@
 //! The read-only forge kernel: fetch input, per-forge dispatch, the shared snapshot, and GitHub.
 
-use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
+use std::process::Command;
+use std::sync::atomic::AtomicBool;
 
-use process_wrap::std::CommandWrap;
 use serde_json::Value;
+
+use crate::proc::RunError;
 
 /// What the `PR` tab shows: the resolved snapshot, or a degraded state with its own remedy.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -306,84 +304,6 @@ impl PrSnapshot {
     }
 }
 
-/// How one forge-CLI invocation failed, before any forge-specific classification.
-#[derive(Debug)]
-enum CliError {
-    /// The CLI binary is not on `PATH`.
-    NotFound,
-    /// The CLI ran and exited non-zero; `stderr` carries its diagnostic.
-    Failed { stderr: String },
-    /// Spawning or waiting failed at the OS level.
-    Io(String),
-    /// The coordinator superseded this fetch mid-flight.
-    Cancelled,
-}
-
-/// Run one forge CLI in its own process tree, so a cancel kills every descendant.
-fn run_cli(cmd: Command, cancelled: &AtomicBool) -> Result<String, CliError> {
-    let mut cmd = CommandWrap::from(cmd);
-    // No stdin: the terminal belongs to the pane.
-    cmd.command_mut().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(unix)]
-    cmd.wrap(process_wrap::std::ProcessGroup::leader());
-    #[cfg(windows)]
-    cmd.wrap(process_wrap::std::JobObject);
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CliError::NotFound);
-        }
-        Err(error) => return Err(CliError::Io(error.to_string())),
-    };
-
-    // Drain both pipes while polling, so a large answer cannot block the child.
-    let mut stdout = child.stdout().take().expect("piped stdout");
-    let mut stderr = child.stderr().take().expect("piped stderr");
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        bytes
-    });
-    // Done once the CLI exits and its pipes close; a lingering descendant is ended once.
-    let mut ended = false;
-    let status = loop {
-        if cancelled.load(Ordering::Acquire) {
-            let _ = child.start_kill();
-        }
-        match child.try_wait() {
-            Ok(Some(status)) if stdout_reader.is_finished() && stderr_reader.is_finished() => {
-                break status;
-            }
-            Ok(Some(_)) if !ended => {
-                ended = true;
-                let _ = child.start_kill();
-            }
-            Ok(_) => thread::sleep(Duration::from_millis(5)),
-            Err(error) => {
-                let _ = child.start_kill();
-                let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(CliError::Io(error.to_string()));
-            }
-        }
-    };
-    let stdout = stdout_reader.join().unwrap_or_default();
-    let stderr = stderr_reader.join().unwrap_or_default();
-    if cancelled.load(Ordering::Acquire) {
-        return Err(CliError::Cancelled);
-    }
-    if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).into_owned());
-    }
-    Err(CliError::Failed { stderr: String::from_utf8_lossy(&stderr).into_owned() })
-}
-
 /// Run explicitly targeted `gh` arguments in `repo` and return stdout or a classified failure.
 fn gh(repo: &Path, host: &str, args: &[&str], cancelled: &AtomicBool) -> Result<String, GhError> {
     let mut cmd = crate::proc::command("gh");
@@ -423,12 +343,13 @@ pub(crate) fn run_provider<E>(
     classify: impl FnOnce(&str) -> E,
     other: impl Fn(String) -> E,
 ) -> Result<String, E> {
-    match run_cli(cmd, cancelled) {
+    // A fetch has no deadline of its own: the coordinator cancels one it superseded.
+    match crate::proc::run_tree(cmd, cancelled, None) {
         Ok(stdout) => Ok(stdout),
-        Err(CliError::NotFound) => Err(not_found),
-        Err(CliError::Failed { stderr }) => Err(classify(&stderr)),
-        Err(CliError::Io(error)) => Err(other(error)),
-        Err(CliError::Cancelled) => Err(other("request cancelled".to_string())),
+        Err(RunError::NotFound) => Err(not_found),
+        Err(RunError::Failed { stderr }) => Err(classify(&stderr)),
+        Err(RunError::Io(error)) => Err(other(error)),
+        Err(RunError::Cancelled | RunError::TimedOut) => Err(other("request cancelled".into())),
     }
 }
 
@@ -2011,82 +1932,5 @@ mod tests {
         );
         assert_eq!(&args[..4], ["api", "graphql", "--hostname", "github.example.com"]);
         assert!(args.windows(2).any(|pair| pair == ["-f", "o=owner"]));
-    }
-
-    /// A provider whose grandchild holds its pipes.
-    #[cfg(unix)]
-    fn provider_with_grandchild(_dir: &Path, ready: &Path, waits: bool) -> Command {
-        let script = if waits {
-            r#"echo answer; sleep 60 & touch "$1"; wait"#
-        } else {
-            r#"echo answer; sleep 60 & touch "$1""#
-        };
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", script, "provider"]).arg(ready);
-        cmd
-    }
-
-    /// The same provider as a batch file, the shape `az.cmd` has.
-    #[cfg(windows)]
-    fn provider_with_grandchild(dir: &Path, ready: &Path, waits: bool) -> Command {
-        let mut script = String::from(
-            "@echo off\r\necho answer\r\nstart /b \"\" ping -n 61 127.0.0.1 >nul\r\n\
-             echo ready> \"%~1\"\r\n",
-        );
-        if waits {
-            script.push_str("ping -n 61 127.0.0.1 >nul\r\n");
-        }
-        let path = dir.join("provider.cmd");
-        std::fs::write(&path, script).unwrap();
-        let mut cmd = Command::new(path);
-        cmd.arg(ready);
-        cmd
-    }
-
-    /// Run `cmd` as a fetch on its own thread, cancelled through `cancelled`.
-    fn spawn_fetch(
-        cmd: Command,
-        cancelled: std::sync::Arc<AtomicBool>,
-    ) -> std::sync::mpsc::Receiver<Result<String, CliError>> {
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || done_tx.send(run_cli(cmd, &cancelled)));
-        done_rx
-    }
-
-    #[test]
-    fn cancelling_a_fetch_ends_the_providers_whole_process_tree() {
-        use std::time::Instant;
-
-        let dir = tempfile::tempdir().unwrap();
-        let ready = dir.path().join("ready");
-        let cmd = provider_with_grandchild(dir.path(), &ready, true);
-        let cancelled = std::sync::Arc::new(AtomicBool::new(false));
-        let done = spawn_fetch(cmd, cancelled.clone());
-
-        // Cancel once the grandchild exists.
-        let started = Instant::now();
-        while !ready.exists() {
-            assert!(started.elapsed() < Duration::from_secs(10), "never started");
-            thread::sleep(Duration::from_millis(10));
-        }
-        thread::sleep(Duration::from_millis(300));
-        cancelled.store(true, Ordering::Release);
-
-        let result = done
-            .recv_timeout(Duration::from_secs(5))
-            .expect("still reading the grandchild's pipes after the cancel");
-        assert!(matches!(result, Err(CliError::Cancelled)), "{result:?}");
-    }
-
-    #[test]
-    fn a_provider_that_exits_is_done_though_a_grandchild_holds_its_pipes() {
-        let dir = tempfile::tempdir().unwrap();
-        let cmd = provider_with_grandchild(dir.path(), &dir.path().join("ready"), false);
-        // Never cancelled: the provider's own exit has to end the fetch.
-        let done = spawn_fetch(cmd, std::sync::Arc::default());
-        let result = done
-            .recv_timeout(Duration::from_secs(10))
-            .expect("still reading the grandchild's pipes after the provider exited");
-        assert_eq!(result.map(|out| out.trim().to_string()).ok().as_deref(), Some("answer"));
     }
 }
