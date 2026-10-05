@@ -137,14 +137,14 @@ fn call(args: &[&str]) -> Result<String, HerdrError> {
     use crate::proc::RunError;
     let mut cmd = crate::proc::command(herdr_bin());
     cmd.args(args);
-    let never = std::sync::atomic::AtomicBool::new(false);
-    match crate::proc::run_tree(cmd, &never, Some(Instant::now() + CALL_BOUND)) {
+    let deadline = Instant::now() + CALL_BOUND;
+    match crate::proc::run_tree(cmd, || Instant::now() >= deadline) {
         Ok(stdout) => Ok(stdout),
         Err(RunError::Failed { stderr }) => {
             logln!("herdr {args:?} failed: {}", stderr.trim());
             Err(HerdrError::refused(error_code(&stderr)))
         }
-        Err(RunError::TimedOut) => {
+        Err(RunError::Stopped) => {
             logln!("herdr {args:?} unanswered after {CALL_BOUND:?}");
             Err(HerdrError::Unanswered)
         }

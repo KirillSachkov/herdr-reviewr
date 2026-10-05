@@ -344,12 +344,12 @@ pub(crate) fn run_provider<E>(
     other: impl Fn(String) -> E,
 ) -> Result<String, E> {
     // A fetch has no deadline of its own: the coordinator cancels one it superseded.
-    match crate::proc::run_tree(cmd, cancelled, None) {
+    match crate::proc::run_tree(cmd, || cancelled.load(std::sync::atomic::Ordering::Acquire)) {
         Ok(stdout) => Ok(stdout),
         Err(RunError::NotFound) => Err(not_found),
         Err(RunError::Failed { stderr }) => Err(classify(&stderr)),
         Err(RunError::Io(error)) => Err(other(error)),
-        Err(RunError::Cancelled | RunError::TimedOut) => Err(other("request cancelled".into())),
+        Err(RunError::Stopped) => Err(other("request cancelled".into())),
     }
 }
 
