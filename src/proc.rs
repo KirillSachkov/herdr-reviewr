@@ -178,10 +178,8 @@ pub(crate) fn run_tree(
         if let Some(stop) = stop {
             // The readers are left to finish as the ended tree closes their pipes.
             let _ = child.start_kill();
-            // Once ended, the tool was reaped already; a job's wait would block on drained news.
-            if !ended {
-                let _ = child.wait();
-            }
+            // The tool alone: a job's own wait blocks on news an earlier poll already drained.
+            let _ = child.inner_mut().wait();
             return Err(stop);
         }
         match child.try_wait() {
@@ -193,7 +191,7 @@ pub(crate) fn run_tree(
             Ok(_) => thread::sleep(Duration::from_millis(5)),
             Err(error) => {
                 let _ = child.start_kill();
-                let _ = child.wait();
+                let _ = child.inner_mut().wait();
                 return Err(RunError::Io(error.to_string()));
             }
         }

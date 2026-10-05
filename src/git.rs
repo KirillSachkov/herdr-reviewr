@@ -1241,6 +1241,9 @@ pub fn diff_sides(
         // An empty context line prints as a lone space, whatever the user set.
         "-c",
         "diff.suppressBlankEmpty=false",
+        // A user's huge value would overflow git's hunk split the same way as the context.
+        "-c",
+        "diff.interHunkContext=0",
         // A path is a path, never a glob: `a[1].txt` must not match `a1.txt`.
         "--literal-pathspecs",
         "diff",
