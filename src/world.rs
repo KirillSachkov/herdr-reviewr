@@ -127,16 +127,13 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
             Some(t) => {
                 let now = git::snapshot_worktree(&input.repo)?;
-                let changed = git::changed_between(&input.repo, t, &now)?;
-                let ends = DiffEnds { old: t.to_string(), new: Some(now) };
-                Ok(ScopeBuild { ends: Some(ends), ..plain(changed) })
+                at_ends(&input.repo, DiffEnds { old: t.to_string(), new: Some(now) })
             }
             None => Ok(plain(Vec::new())),
         },
         Scope::Uncommitted => {
             let base = head.unwrap_or_else(|| git::EMPTY_TREE.to_string());
-            let changed = git::changed_from(&input.repo, &base)?;
-            Ok(ScopeBuild { ends: Some(DiffEnds { old: base, new: None }), ..plain(changed) })
+            at_ends(&input.repo, DiffEnds { old: base, new: None })
         }
         Scope::Branch => {
             // A resolve failure fails the build, keeping the stale frame.
@@ -146,14 +143,11 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
                 .winner
                 .as_ref()
                 .and_then(|w| git::merge_base(&input.repo, w.oid()));
-            let (changed, ends) = match merge_base {
-                Some(base) => (
-                    git::changed_from(&input.repo, &base)?,
-                    Some(DiffEnds { old: base, new: None }),
-                ),
-                None => (Vec::new(), None),
+            let build = match merge_base {
+                Some(base) => at_ends(&input.repo, DiffEnds { old: base, new: None })?,
+                None => plain(Vec::new()),
             };
-            Ok(ScopeBuild { branch_base: resolution.status, ends, ..plain(changed) })
+            Ok(ScopeBuild { branch_base: resolution.status, ..build })
         }
         Scope::Commits => {
             // A tag without a pick builds the empty changeset.
@@ -161,6 +155,20 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
             build_pick(&input.repo, pick)
         }
     }
+}
+
+/// The changeset between `ends`, carried beside them: the ends a file's diff reads are its input.
+fn at_ends(repo: &Path, ends: DiffEnds) -> Result<ScopeBuild> {
+    let changed = match &ends.new {
+        None => git::changed_from(repo, &ends.old)?,
+        Some(new) => git::changed_between(repo, &ends.old, new)?,
+    };
+    Ok(ScopeBuild {
+        branch_base: git::BaseStatus::default(),
+        pick_status: None,
+        ends: Some(ends),
+        changed,
+    })
 }
 
 /// The pick's changeset, verdict and ends in one pass; a `gone` pick has neither.
@@ -184,15 +192,14 @@ fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
     }
     let subject = git::commit_subject(repo, &pick.newest).unwrap_or_default();
     let count = git::run_length_from(repo, &old, &pick.oldest, &pick.newest).unwrap_or(0);
-    let changed = git::changed_between(repo, &old, &pick.newest)?;
+    let at = at_ends(repo, DiffEnds { old, new: Some(pick.newest.clone()) })?;
     // The oldest is an ancestor of the newest, so one reachability check covers the run.
     let verdict = if git::is_reachable(repo, &pick.newest) {
         PickVerdict::Live
     } else {
         PickVerdict::OffBranch
     };
-    let ends = DiffEnds { old, new: Some(pick.newest.clone()) };
-    Ok(build(verdict, subject, count, changed, Some(ends)))
+    Ok(build(verdict, subject, count, at.changed, at.ends))
 }
 
 /// The changed files keyed by path.
