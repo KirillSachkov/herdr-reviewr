@@ -28,29 +28,42 @@ pub enum Tier {
     NewDoc,
     Named,
     EditedDoc,
+    /// Named in the agent's last answer, not changed by the session: a link to follow.
+    Linked,
     Code,
 }
 
 impl Tier {
-    pub const ALL: [Tier; 7] = [
-        Tier::Report,
-        Tier::Declared,
-        Tier::Plan,
-        Tier::NewDoc,
-        Tier::Named,
-        Tier::EditedDoc,
-        Tier::Code,
-    ];
+    /// The list group a tier shows under (decision 15).
+    pub fn group(self) -> Group {
+        match self {
+            Tier::Report => Group::Report,
+            Tier::Declared | Tier::Plan | Tier::NewDoc | Tier::Named => Group::Artifacts,
+            Tier::EditedDoc => Group::Other,
+            Tier::Linked => Group::Links,
+            Tier::Code => Group::Code,
+        }
+    }
+}
 
+/// The groups of the `Session` list, in order (decision 15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Group {
+    Report,
+    Artifacts,
+    Other,
+    Links,
+    Code,
+}
+
+impl Group {
     pub fn label(self) -> &'static str {
         match self {
-            Tier::Report => "Отчёт",
-            Tier::Declared => "Объявлены агентом",
-            Tier::Plan => "Планы и спеки",
-            Tier::NewDoc => "Новые документы",
-            Tier::Named => "Упомянуты в ответе",
-            Tier::EditedDoc => "Изменённые документы",
-            Tier::Code => "Код и конфигурация",
+            Group::Report => "Отчёт",
+            Group::Artifacts => "Артефакты",
+            Group::Other => "Прочее",
+            Group::Links => "Ссылки из ответа",
+            Group::Code => "Код",
         }
     }
 
@@ -237,8 +250,11 @@ impl SessionView {
         if let Some(s) = &self.summary {
             let _ = write!(out, "## О чём\n\n{}\n\n## Что сделано\n\n", s.about);
             for done in &s.done {
-                let files: Vec<String> =
-                    done.files.iter().map(|f| format!("`{}`", short_path(f))).collect();
+                let files: Vec<String> = done
+                    .files
+                    .iter()
+                    .map(|f| format!("[{}](<{}>)", short_path(f), f.display()))
+                    .collect();
                 let tail = if files.is_empty() {
                     String::new()
                 } else {
@@ -299,7 +315,7 @@ pub fn rows<S: BuildHasher>(
     let tiers: BTreeMap<&str, &Artifact> =
         view.artifacts.iter().map(|a| (a.key.as_str(), a)).collect();
     let mut out = Vec::new();
-    let mut groups: BTreeMap<Tier, Vec<usize>> = BTreeMap::new();
+    let mut groups: BTreeMap<Group, Vec<usize>> = BTreeMap::new();
     for (index, entry) in entries.iter().enumerate() {
         if entry.path == SUMMARY {
             out.push(Row {
@@ -309,15 +325,15 @@ pub fn rows<S: BuildHasher>(
                 ignored: false,
             });
         } else if let Some(a) = tiers.get(entry.path.as_str()) {
-            groups.entry(a.tier).or_default().push(index);
+            groups.entry(a.tier.group()).or_default().push(index);
         }
     }
-    for (tier, indices) in groups {
-        let path = tier.group_path();
+    for (group, indices) in groups {
+        let path = group.group_path();
         let expanded = !collapsed.contains(&path);
         out.push(Row {
             depth: 0,
-            name: format!("{} · {}", tier.label(), indices.len()),
+            name: format!("{} · {}", group.label(), indices.len()),
             kind: RowKind::Dir { path, expanded, has_change: false },
             ignored: false,
         });
@@ -446,6 +462,15 @@ fn artifacts(repo: &Path, agent: &Agent, trace: &desk::Trace) -> Vec<Artifact> {
                 letter: None,
                 note: Some(note.clone()),
             });
+        }
+    }
+    // Files the last answer names but the session never changed: links to follow.
+    let git_root = agent_desk::git::root(&agent.cwd).ok();
+    for token in pick::path_tokens(&trace.last_answer) {
+        let Some(path) = pick::resolve(&token, &agent.cwd, git_root.as_deref()) else { continue };
+        if !out.iter().any(|a| a.abs == path) {
+            let key = key_of(&root, &path);
+            out.push(Artifact { key, abs: path, tier: Tier::Linked, letter: None, note: None });
         }
     }
     out.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.key.cmp(&b.key)));
@@ -683,6 +708,65 @@ impl crate::export::ExportTarget for Prompt {
     }
 }
 
+/// A link to a local file: its path and line, from `a.md`, `~/x.md:12`, `/abs/y.rs#L3`.
+/// `None` for a URL with a scheme or a path that names no file.
+pub fn resolve_link(target: &str, base: &Path, repo: &Path) -> Option<(PathBuf, Option<usize>)> {
+    let target = target.strip_prefix("file://").unwrap_or(target).trim();
+    let scheme = target
+        .split_once(':')
+        .is_some_and(|(s, _)| s.len() > 1 && s.chars().all(|c| c.is_ascii_alphabetic()));
+    if scheme || target.starts_with('#') {
+        return None;
+    }
+    let (path, line) = match target.split_once("#L").or_else(|| target.rsplit_once(':')) {
+        Some((path, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            (path, n.parse().ok())
+        }
+        _ => (target, None),
+    };
+    pick::resolve(&percent_decode(path), base, Some(repo)).map(|p| (p, line))
+}
+
+/// `%20` and the like, as markdown link destinations spell spaces.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Add `path` to the list's links, for a link followed to a file outside the repo.
+pub fn with_link(view: &SessionView, repo: &Path, path: &Path) -> SessionView {
+    let mut view = view.clone();
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let key = key_of(&root, path);
+    if !view.artifacts.iter().any(|a| a.key == key) {
+        let abs = path.to_path_buf();
+        view.artifacts.push(Artifact { key, abs, tier: Tier::Linked, letter: None, note: None });
+    }
+    view
+}
+
+/// Whether this pane runs inside Herdr, where a session can exist; standalone it never does.
+pub fn available() -> bool {
+    std::env::var_os("HERDR_PANE_ID").is_some_and(|p| !p.is_empty())
+}
+
 /// One Herdr CLI call's JSON answer.
 fn herdr(args: &[&str]) -> Option<Value> {
     let bin = std::env::var("HERDR_BIN_PATH")
@@ -759,10 +843,10 @@ mod tests {
             ..SessionView::default()
         };
         let entries = view.entries();
-        let collapsed: HashSet<String> = [Tier::Code.group_path()].into();
+        let collapsed: HashSet<String> = [Group::Code.group_path()].into();
         let names: Vec<String> =
             rows(&view, &entries, &collapsed).into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Сводка", "Новые документы · 1", "docs/a.md", "Код и конфигурация · 1"]);
+        assert_eq!(names, ["Сводка", "Артефакты · 1", "docs/a.md", "Код · 1"]);
     }
 
     #[test]

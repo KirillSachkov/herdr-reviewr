@@ -68,9 +68,9 @@ fn the_tab_lists_the_summary_then_artifacts_by_tier_with_code_folded() {
     assert!(out.contains("4 Сессия"), "the active tab is named:\n{out}");
     assert!(out.contains("Нужно от вас: принять план"), "the need line tops the tab:\n{out}");
     assert!(out.contains("Сводка"), "the summary leads the list:\n{out}");
-    assert!(out.contains("Новые документы · 1"), "a tier group:\n{out}");
+    assert!(out.contains("Артефакты · 1"), "a tier group:\n{out}");
     assert!(out.contains("plan.md"), "its file:\n{out}");
-    assert!(out.contains("Код и конфигурация · 1"), "code has a group:\n{out}");
+    assert!(out.contains("Код · 1"), "code has a group:\n{out}");
     assert!(!out.contains("main.rs"), "code starts folded:\n{out}");
 }
 
@@ -175,4 +175,26 @@ fn an_alert_shows_its_label_and_drops_the_marker() {
     assert!(text.iter().any(|l| l.contains("⚠ Warning")), "{text:?}");
     assert!(text.iter().any(|l| l.contains("Нужно решение.")), "{text:?}");
     assert!(!text.iter().any(|l| l.contains("[!WARNING]")), "{text:?}");
+}
+
+#[test]
+fn a_local_link_opens_its_file_in_files_or_under_the_session_links() {
+    let r = Repo::init();
+    let mut app = session_app(&r);
+    // A repo file opens in `All files`, at its line.
+    assert!(app.open_local("docs/plan.md:3"));
+    assert_eq!(app.tab, Tab::AllFiles);
+    assert_eq!(app.diff_path.as_deref(), Some("docs/plan.md"));
+    // A file outside the repo joins the session's links and opens there.
+    let outside = tempfile::tempdir().unwrap();
+    let note = outside.path().canonicalize().unwrap().join("note.md");
+    std::fs::write(&note, "# Заметка\n\nвне репозитория\n").unwrap();
+    assert!(app.open_local(&format!("file://{}", note.display())));
+    assert_eq!(app.tab, Tab::Session);
+    let out = render(&app);
+    assert!(out.contains("Ссылки из ответа · 1"), "{out}");
+    assert!(out.contains("вне репозитория"), "{out}");
+    // A URL and a missing path are not local files.
+    assert!(!app.open_local("https://example.com/a.md"));
+    assert!(!app.open_local("no/such/file.md"));
 }

@@ -1254,16 +1254,19 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
 }
 
 /// The tab labels, each led by its hint key; the third is `PR` or `MR`.
-/// Own fork: `Session` shows only while active, so the upstream bar keeps its width.
+/// Own fork: `Session` leads inside Herdr; standalone it shows only while active, keeping upstream's bar.
 fn tab_labels(keymap: &Keymap, forge: crate::git::Forge, active: Tab) -> Vec<(Tab, String)> {
     use crate::keymap::Action as K;
-    let mut labels = vec![
+    let session = (Tab::Session, format!("{} Сессия", keymap.hint(K::TabSession).label()));
+    let lead = crate::session::available();
+    let mut labels = if lead { vec![session.clone()] } else { Vec::new() };
+    labels.extend([
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
         (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
         (Tab::Pr, format!("{} {}", keymap.hint(K::TabPr).label(), forge.abbr())),
-    ];
-    if active == Tab::Session {
-        labels.push((Tab::Session, format!("{} Сессия", keymap.hint(K::TabSession).label())));
+    ]);
+    if !lead && active == Tab::Session {
+        labels.push(session);
     }
     labels
 }
@@ -1556,7 +1559,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                         } else {
                             "/"
                         };
-                    let name = format!("{}{slash}", elide_head(&row.name, budget));
+                    let name = format!("{}{slash}", elide_middle(&row.name, budget));
                     let mut spans = vec![
                         Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on))),
                         Span::styled(name, name_style),
@@ -1611,7 +1614,9 @@ fn file_row_item(row: &FileRowSpec<'_>, width: usize, on: Fill, p: &Palette) -> 
     let stats = stats_str(additions, deletions);
     let gap = if stats.is_empty() { 0 } else { 2 };
     let fixed = indent.width() + marker.width() + stats.width() + gap;
-    let shown = elide_head(name, width.saturating_sub(fixed).max(1));
+    // Own fork: a navigator name keeps its start and end; a search hit keeps upstream's head cut.
+    let room = width.saturating_sub(fixed).max(1);
+    let shown = if emphasis.is_empty() { elide_middle(name, room) } else { elide_head(name, room) };
 
     let mut spans = vec![Span::styled(indent.to_string(), text_style(p, on))];
     if let Some(a) = annotation {
@@ -1692,6 +1697,39 @@ fn remap_emphasis(spans: &[(u32, u32)], name: &str, shown: &str) -> Vec<(u32, u3
         .filter(|&&(_, e)| e > tail_start)
         .map(|&(s, e)| (prefix + s.saturating_sub(tail_start), prefix + (e - tail_start)))
         .collect()
+}
+
+/// Own fork: `name` cut in the middle to `max` columns, so its start and its end both read.
+fn elide_middle(name: &str, max: usize) -> String {
+    if name.width() <= max {
+        return name.to_string();
+    }
+    if max < 8 {
+        return elide_head(name, max);
+    }
+    let room = max - 1;
+    let tail_room = room / 2;
+    let mut tail = String::new();
+    let mut w = 0;
+    for ch in name.chars().rev() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > tail_room {
+            break;
+        }
+        tail.insert(0, ch);
+        w += cw;
+    }
+    let mut head = String::new();
+    let mut hw = 0;
+    for ch in name.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if hw + cw > room - w {
+            break;
+        }
+        head.push(ch);
+        hw += cw;
+    }
+    format!("{}…{}", head.trim_end(), tail.trim_start())
 }
 
 /// Elide `name`'s head to `max` columns, cutting at a `/` where it can.

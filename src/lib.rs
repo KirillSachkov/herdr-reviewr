@@ -92,6 +92,10 @@ pub fn run() -> Result<()> {
         logln!("startup reload failed: {e:#}");
         app.status = format!("load failed: {e}");
     }
+    // Own fork: inside Herdr the pane opens on its `Session` tab.
+    if initial_config.is_ok() && crate::session::available() {
+        let _ = app.set_tab(crate::app::Tab::Session);
+    }
     // An old command line hears what changed instead of quietly doing something else.
     if let Some(note) = &cfg.removed_flag {
         app.status.clone_from(note);
@@ -2014,6 +2018,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         Tab => app.toggle_focus(),
         // `esc` peels one layer: selection, armed crossing, footer expansion.
         Esc => app.escape(),
+        // Own fork: `enter` follows the first link on the rendered line under the cursor.
+        Enter if app.focus == Focus::Diff => app.follow_cursor_link(),
         _ => {}
     }
     Ok(())

@@ -4349,10 +4349,12 @@ fn a_collapsed_changes_folder_wears_no_dot_and_reserves_nothing() {
     assert_eq!(row, format!("▾ {wide}/"), "the exact-fit name is whole on Changes");
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
-    assert_eq!(
-        files_row(&app, "…"),
-        format!("▸ …{}/ •", &wide[3..]),
-        "the reserve elides two columns"
+    // Own fork: names elide in the middle, keeping both ends.
+    let row = files_row(&app, "…");
+    assert_eq!(row.chars().count(), format!("▸ …{}/ •", &wide[3..]).chars().count());
+    assert!(
+        row.starts_with("▸ n") && row.ends_with("n/ •"),
+        "the reserve elides two columns: {row}"
     );
 }
 
@@ -4395,7 +4397,8 @@ fn a_long_folder_name_leaves_room_for_the_dot() {
     enter_tab(&mut app, Tab::AllFiles);
     assert!(dot_at_edge(&app, "…"), "{:?}", files_row(&app, "…"));
     let row = files_row(&app, "…");
-    assert!(row.starts_with("▸ …") && row.contains("this_width/ •"), "head-elided: {row:?}");
+    // Own fork: the middle goes, both ends stay.
+    assert!(row.starts_with("▸ a_dir") && row.contains("this_width/ •"), "elided: {row:?}");
     let collapsed_name = row.trim_end_matches(" •").to_string();
 
     app.focus = Focus::Files;

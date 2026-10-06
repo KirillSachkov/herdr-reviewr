@@ -2121,6 +2121,10 @@ impl App {
 
     /// Follow a link: `#anchor` scrolls to its heading, `http(s)` opens a browser.
     pub fn open_link(&mut self, url: &str) {
+        // Own fork: a link to a local file opens it here.
+        if self.open_local(url) {
+            return;
+        }
         if let Some(fragment) = url.strip_prefix('#') {
             // Normalized like the slugs, so `#Set-Up!` finds its heading.
             self.jump_to_anchor(&crate::markdown::slug_text(fragment));
@@ -2831,11 +2835,91 @@ impl App {
         if self.tab == Tab::Session {
             // Code starts folded once per session; the reviewer's toggles then stay.
             if id.is_some() && self.session_seeded != id {
-                self.toggled_dirs.insert(crate::session::Tier::Code.group_path());
+                self.toggled_dirs.insert(crate::session::Group::Code.group_path());
                 self.session_seeded = id;
             }
             self.request_world_refresh(false);
         }
+    }
+
+    /// Own fork: open the local file `target` names — in-repo in `All files`, elsewhere in `Session`.
+    /// Returns whether `target` named a local file.
+    pub fn open_local(&mut self, target: &str) -> bool {
+        let shown = self.diff_path.as_deref().map(|p| self.repo.join(p));
+        let base =
+            shown.as_deref().and_then(std::path::Path::parent).unwrap_or(&self.repo).to_path_buf();
+        let Some((abs, line)) = crate::session::resolve_link(target, &base, &self.repo) else {
+            return false;
+        };
+        if self.composing() {
+            return true;
+        }
+        let root = self.repo.canonicalize().unwrap_or_else(|_| self.repo.clone());
+        let opened = match abs.strip_prefix(&root) {
+            Ok(rel) => self.open_in_files(&rel.to_string_lossy().replace('\\', "/")),
+            Err(_) => self.open_in_session(&abs),
+        };
+        if let Err(e) = opened {
+            self.status = e.to_string();
+            return true;
+        }
+        self.focus = Focus::Diff;
+        if let Some(line) = line {
+            self.diff_cursor = line.saturating_sub(1).min(self.visible.len().saturating_sub(1));
+            self.reveal_diff = true;
+            self.reveal_center = true;
+        }
+        true
+    }
+
+    /// Own fork: follow the first link on the rendered line under the cursor (`enter`).
+    pub fn follow_cursor_link(&mut self) {
+        let Some(Row::Rendered { kind: RenderedKind::Block { line, .. }, .. }) =
+            self.visible.get(self.diff_cursor)
+        else {
+            return;
+        };
+        let url = self.rendered_meta(*line).and_then(|m| m.links.first()).map(|l| l.url.clone());
+        if let Some(url) = url {
+            self.open_link(&url);
+        }
+    }
+
+    /// Own fork: show repo file `rel` in `All files`, its folders opened.
+    fn open_in_files(&mut self, rel: &str) -> Result<()> {
+        self.set_tab(Tab::AllFiles)?;
+        let mut dir = rel;
+        let mut expanded = false;
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            expanded |= self.set_dir_expanded(parent, true);
+            dir = parent;
+        }
+        if expanded {
+            self.rebuild_file_rows();
+        }
+        self.reset_diff_view();
+        self.set_file_view(rel);
+        if let Some(row) = self.file_row_of_path(rel) {
+            self.file_cursor = row;
+            self.reveal_files = true;
+        }
+        Ok(())
+    }
+
+    /// Own fork: show `abs`, outside the repo, under the `Session` tab's links.
+    fn open_in_session(&mut self, abs: &std::path::Path) -> Result<()> {
+        let view = crate::session::with_link(&self.session, &self.repo, abs);
+        self.set_tab(Tab::Session)?;
+        self.land_session(view);
+        self.reload()?;
+        let key = abs.to_string_lossy().into_owned();
+        self.reset_diff_view();
+        self.set_file_view(&key);
+        if let Some(row) = self.file_row_of_path(&key) {
+            self.file_cursor = row;
+            self.reveal_files = true;
+        }
+        Ok(())
     }
 
     /// Own fork: mark the session view as loading, keeping what it shows.
