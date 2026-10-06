@@ -13,6 +13,7 @@ pub mod forge;
 pub mod git;
 pub mod gitlab;
 pub mod herdr;
+pub mod herdr_socket;
 pub mod highlight;
 mod input;
 pub mod keymap;
@@ -24,6 +25,7 @@ pub mod model;
 pub mod proc;
 pub(crate) mod rendered;
 pub mod roles;
+pub mod schedule;
 pub mod search;
 pub mod selection;
 pub mod snippet;
@@ -33,6 +35,8 @@ mod text;
 pub mod theme;
 pub mod turn;
 pub mod ui;
+pub mod wake;
+pub mod watch;
 pub mod world;
 
 use std::io;
@@ -61,16 +65,14 @@ use crate::export::Clipboard;
 use crate::keymap::Keymap;
 use crate::model::Scope;
 
-/// The note a slow config-dir lookup paints until it answers.
-const RESOLVING_NOTE: &str = "resolving plugin config…";
-
 /// Entry point: parse config, set up the terminal, run the loop, restore.
 pub fn run() -> Result<()> {
     let mut cfg = Config::from_env();
     log::init();
-    // Environment only: the herdr CLI fallback waits until after the first paint (issue #4).
-    cfg.plugin_config_dir = config::resolve_config_dir(|| None);
-    let mut initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
+    // The config settles before the first paint, so the first frame is the final layout; a wedged
+    // herdr holds it at most 2s, then the defaults paint (issue #4).
+    cfg.plugin_config_dir = config::resolve_config_dir(herdr::plugin_config_dir);
+    let initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
@@ -82,41 +84,19 @@ pub fn run() -> Result<()> {
         return Err(error.into());
     }
     // A cosmetic label; identity is the process.
-    herdr::label_pane();
-    // With no environment directory, ask herdr now; a wedged herdr leaves the defaults.
-    let cli_dir = cfg
-        .plugin_config_dir
-        .is_none()
-        .then(|| {
-            herdr::plugin_config_dir_with(|| {
-                app.status = RESOLVING_NOTE.into();
-                let _ = terminal.draw(|f| ui::render(f, &app));
-            })
-        })
-        .flatten();
-    if let Some(dir) = cli_dir {
-        cfg.plugin_config_dir = Some(dir.into());
-        initial_config = config::plugin_config(cfg.plugin_config_dir.as_deref());
-        app = app_for(&cfg, &initial_config);
-        if let Err(error) = terminal.draw(|f| ui::render(f, &app)) {
-            restore_terminal();
-            herdr::clear_pane_label();
-            return Err(error.into());
-        }
-    }
-    // A slow lookup that then resolved nothing leaves its note behind; retract it.
-    if app.status == RESOLVING_NOTE {
-        app.status.clear();
-        let _ = terminal.draw(|f| ui::render(f, &app));
-    }
+    herdr::label_pane(&app.herdr.ids);
     if initial_config.is_ok()
         && let Err(e) = app.reload()
     {
         logln!("startup reload failed: {e:#}");
         app.status = format!("load failed: {e}");
     }
+    // An old command line hears what changed instead of quietly doing something else.
+    if let Some(note) = &cfg.removed_flag {
+        app.status.clone_from(note);
+    }
     let result = event_loop(&mut terminal, &mut app, &cfg);
-    herdr::clear_pane_label();
+    herdr::clear_pane_label(&app.herdr.ids);
     git::end_sessions();
     result
 }
@@ -241,7 +221,7 @@ fn run_editor(
             } else {
                 format!("editor exited with {status}")
             };
-            app.request_world_refresh(false, false);
+            app.request_world_refresh(false);
             app.refresh_commanded = true;
         }
         Err(e) => app.status = format!("editor failed: {e}"),
@@ -278,13 +258,7 @@ fn app_for(cfg: &Config, initial_config: &Result<PluginConfig, config::PluginCon
 fn ready_app(cfg: &Config, plugin_config: PluginConfig) -> App {
     let repo = repo_root(cfg);
     let scope = plugin_config.default_scope();
-    logln!(
-        "start repo={} poll={:?} base={:?} scope={}",
-        repo.display(),
-        cfg.poll,
-        cfg.base,
-        scope.name()
-    );
+    logln!("start repo={} base={:?} scope={}", repo.display(), cfg.base, scope.name());
     let mut app = App::new(repo, scope, cfg.base.clone());
     app.seed_from_config(&plugin_config);
     app.set_plugin_config(plugin_config);
@@ -510,7 +484,8 @@ fn drain_pr_shutdown(
     }
 }
 
-fn schedule_poll_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
+/// Probe the PR's local input again, when the PR tab is the one on screen.
+fn schedule_pr_probe(pr: &mut PrCoordinator, tab: crate::app::Tab) {
     if tab == crate::app::Tab::Pr {
         pr.probe_pending = true;
     }
@@ -524,10 +499,6 @@ enum ConfigGate {
 }
 
 impl ConfigGate {
-    fn ready(self) -> bool {
-        self != Self::Blocked
-    }
-
     fn pr_unchanged(self) -> bool {
         !matches!(self, Self::Blocked | Self::Changed { pr_changed: true, .. })
     }
@@ -658,26 +629,55 @@ impl PrRefresh {
     }
 }
 
-/// Land a world completion; its snapshot reconciles only while it matches. True if it was live.
+/// The world job dispatched last, which a superseded completion's work is measured against.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LiveJob {
+    pub generation: u64,
+    pub full: bool,
+    pub reveal: bool,
+    /// When it went out, while it has not landed.
+    pub running: Option<Instant>,
+    /// Whether it builds a snapshot (no `PR` tab), so the glyph may light for it.
+    pub builds: bool,
+}
+
+/// What landing a world completion did; the paths of one that did not land are still owed.
+#[derive(Debug)]
+pub enum Landing {
+    /// A newer job went out after it; what that job does not read again goes back to the pacer.
+    Superseded(crate::world::Refresh),
+    Landed,
+    /// The view moved on, or the config is invalid: discarded whole, its paths still owed.
+    Discarded(crate::world::Refresh),
+    /// The build failed: the stale frame stays, retried on a backoff.
+    Failed(crate::world::Refresh),
+}
+
+impl Landing {
+    /// Whether it was the live generation, which clears the in-flight marker.
+    pub fn live(&self) -> bool {
+        !matches!(self, Self::Superseded(_))
+    }
+}
+
+/// Land a world completion; its snapshot reconciles only while it matches.
 pub fn land_world_completion(
     app: &mut App,
     completion: crate::world::WorldCompletion,
-    generation: u64,
-) -> bool {
-    app.sync_turn_baseline(completion.input.turn_baseline.clone());
-    if let Some(turn) = completion.turn.as_ref() {
-        app.sync_agents_present(turn.agents_present);
-        if turn.ended {
-            // A turn may have pushed or merged.
-            app.request_pr_refresh(crate::app::RefreshKind::Ambient);
-        }
-    }
-    if completion.generation != generation {
-        // Re-arm a superseded switch's reveal.
+    live: &LiveJob,
+) -> Landing {
+    // A switch the reviewer made re-reveals once its view lands.
+    let owed = |app: &mut App| {
         if completion.reveal {
-            app.request_world_refresh(false, true);
+            app.request_world_refresh(true);
         }
-        return false;
+    };
+    if completion.generation != live.generation {
+        if !live.reveal {
+            owed(app);
+        }
+        let unread = if live.full { crate::world::Refresh::default() } else { completion.refresh };
+        return Landing::Superseded(unread);
     }
     match completion.snapshot {
         Some(Ok(snapshot))
@@ -689,14 +689,107 @@ pub fn land_world_completion(
                 app.settle_tab_entry();
                 app.reveal_files = true;
             }
+            Landing::Landed
         }
-        // The view moved on: discard and refresh, keeping the reveal.
-        Some(Ok(_)) => app.request_world_refresh(false, completion.reveal),
-        // A failed refresh keeps the stale frame.
-        Some(Err(e)) => app.status = format!("refresh failed: {e}"),
-        None => {}
+        Some(Ok(_)) => {
+            owed(app);
+            Landing::Discarded(completion.refresh)
+        }
+        Some(Err(e)) => {
+            app.status = format!("refresh failed: {e}");
+            Landing::Failed(completion.refresh)
+        }
+        None => Landing::Landed,
     }
-    true
+}
+
+/// Land what the watcher reported: the pacer, the PR probe and search follow it. Whether the
+/// config must be read again.
+fn land_watch_event(
+    event: crate::watch::WatchEvent,
+    app: &App,
+    pacer: &mut crate::schedule::Pacer,
+    pr: &mut PrCoordinator,
+    search: Option<&mpsc::Sender<crate::search::SearchJob>>,
+) -> bool {
+    use crate::watch::WatchEvent;
+    let now = Instant::now();
+    match event {
+        // Whatever changed before the stream went live was never seen: catch up once.
+        WatchEvent::Ready => {
+            pacer.set_watcher_down(false, now);
+            pacer.on_batch(crate::world::Refresh::Full, now);
+            true
+        }
+        WatchEvent::Batch(batch) => {
+            logln!(
+                "watch paths={} git={:?} rescan={}",
+                batch.worktree.len(),
+                batch.git,
+                batch.rescan
+            );
+            if batch.git.iter().any(|g| g.moves_pr_input()) {
+                schedule_pr_probe(pr, app.tab);
+            }
+            // The search engine has no watcher of its own: new ignore rules rescan it.
+            let rules = batch.git.contains(&crate::watch::GitChange::IgnoreRules);
+            let job = if batch.rescan || rules {
+                Some(crate::search::SearchJob::Rescan)
+            } else {
+                let paths: Vec<String> = batch.files.iter().cloned().collect();
+                (!paths.is_empty()).then_some(crate::search::SearchJob::Changed { paths })
+            };
+            if let (Some(search), Some(job)) = (search, job) {
+                let _ = search.send(job);
+            }
+            pacer.on_batch(crate::world::Refresh::from_batch(&batch), now);
+            batch.config
+        }
+        WatchEvent::Unavailable(reason) => {
+            logln!("watch unavailable: {reason}");
+            pacer.set_watcher_down(true, now);
+            false
+        }
+    }
+}
+
+/// What landing a herdr event asks of the loop.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// The visibility the pane moved to, if it moved.
+    pub visible: Option<bool>,
+    /// `last-turn` on screen needs rebuilding, paced like a watcher batch.
+    pub rebuild: bool,
+}
+
+/// Land what the herdr connection reported.
+pub fn land_herdr_event(app: &mut App, event: crate::herdr_socket::HerdrEvent) -> Heard {
+    use crate::herdr_socket::HerdrEvent;
+    match event {
+        HerdrEvent::Session(session) => {
+            let visible = app.sync_herdr_session(session.me.clone(), session.visible);
+            if visible.is_some() {
+                logln!("herdr session me={:?} visible={}", session.me, session.visible);
+            }
+            Heard { visible, rebuild: false }
+        }
+        HerdrEvent::Turn(turn) => {
+            let ended = turn.ended;
+            let rebuild = app.sync_turn(turn);
+            if ended {
+                // A turn may have pushed or merged; a hidden pane fetches once shown.
+                app.request_pr_refresh(crate::app::RefreshKind::Ambient);
+            }
+            Heard { visible: None, rebuild }
+        }
+        // Until herdr is back, assume the pane is on screen: stale work costs less than a stale view.
+        HerdrEvent::Lost => Heard { visible: app.sync_herdr_session(None, true), rebuild: false },
+        HerdrEvent::TooOld(version) => {
+            logln!("herdr {version} is older than reviewr needs");
+            app.herdr_too_old();
+            Heard::default()
+        }
+    }
 }
 
 /// Land a search completion unless stale. True if it was live.
@@ -722,48 +815,65 @@ fn glyph_clears(lit_for: Duration) -> bool {
     lit_for >= INDICATOR_MIN_SHOW
 }
 
-/// The wake while a worker owes a completion.
-const WORKER_TIGHT_WAKE: Duration = Duration::from_millis(15);
-
-/// The wake while a world job is in flight: tight only for a building one.
-fn world_wake(builds: bool) -> Duration {
-    if builds { WORKER_TIGHT_WAKE } else { Duration::from_millis(100) }
-}
-
-/// Draw, then wait up to the poll deadline for input; refresh on each tick.
+/// Draw, then sleep until input, a worker's result, or the nearest armed deadline.
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Result<()> {
-    let poll = cfg.poll;
-    let mut last_poll = Instant::now();
+    // The config is read at the first frame and again only when the watcher says it changed.
+    let mut config_dirty = true;
     // When the last mouse event came, and whether it sat on the pane's edge.
     let mut last_mouse = Instant::now();
     let mut mouse_exited = false;
     let mut last_pr_poll = Instant::now();
+    // The loop sleeps on terminal input and this wake, which every worker's result and (on unix)
+    // every window resize sets; nothing polls a channel.
+    let wake = crate::wake::Wake::new()?;
+    #[cfg(unix)]
+    wake.sys().watch_resizes()?;
+    let waker = wake.waker();
     // Probes and forge reads run on workers.
-    let (probe_tx, probe_rx) =
-        mpsc::channel::<(u64, Result<crate::forge::PrFetchInput, crate::forge::PrInputError>)>();
-    let (recovery_tx, recovery_rx) = mpsc::channel::<(u64, PluginConfig, App)>();
+    let (probe_tx, probe_rx) = crate::wake::channel::<(
+        u64,
+        Result<crate::forge::PrFetchInput, crate::forge::PrInputError>,
+    )>(&waker);
+    let (recovery_tx, recovery_rx) = crate::wake::channel::<(u64, PluginConfig, App)>(&waker);
     let mut recovery_inflight = false;
-    let (pr_tx, pr_rx) = mpsc::channel::<TaggedPr>();
+    let (pr_tx, pr_rx) = crate::wake::channel::<TaggedPr>(&waker);
     let mut pr = PrCoordinator::new(app.plugin_config().is_some());
     // The world worker builds input-tagged jobs; the loop reconciles their completions.
     let (world_tx, world_job_rx) = mpsc::channel::<crate::world::WorldJob>();
-    let (world_res_tx, world_rx) = mpsc::channel::<crate::world::WorldCompletion>();
-    let _world_worker = crate::world::spawn(
-        crate::world::TurnHost::open(app.repo.clone()),
-        world_job_rx,
-        world_res_tx,
-    );
+    let (world_res_tx, world_rx) = crate::wake::channel::<crate::world::WorldCompletion>(&waker);
+    let _world_worker = crate::world::spawn(app.repo.clone(), world_job_rx, world_res_tx);
+    // herdr pushes focus, this pane's moves, and agent statuses; outside herdr nothing connects.
+    let (herdr_tx, herdr_rx) = crate::wake::channel::<crate::herdr_socket::HerdrEvent>(&waker);
+    let herdr = herdr::connection_target().and_then(|(socket, pane)| {
+        crate::herdr_socket::Connection::start(socket, pane, app.repo.clone(), herdr_tx)
+            .inspect_err(|e| logln!("herdr connection did not start: {e}"))
+            .ok()
+    });
+    // What changed in the worktree, its git files and the config.
+    let (watch_tx, watch_rx) = crate::wake::channel::<crate::watch::WatchEvent>(&waker);
+    // Its writes reach turn tracking directly, so a terminal editor holding the loop delays nothing.
+    let feed = herdr.as_ref().map(crate::herdr_socket::Connection::feed);
+    let mut watch =
+        crate::watch::Watch::start(&app.repo, cfg.plugin_config_dir.as_deref(), watch_tx, feed);
+    // Input showed the pane: its edge is handled with herdr's, after the repaint.
+    let mut shown_by_input: Option<bool> = None;
+    // A resize can leave the screen unlike what was last drawn, even at the same size (herdr
+    // reflows the pane): the next frame is drawn whole, not as a difference.
+    let mut repaint_whole = false;
+    // Input that showed the pane, held for the repaint; clicks aimed at the stale frame dropped.
+    let mut held: std::collections::VecDeque<Event> = std::collections::VecDeque::new();
     // Window editors reviewr launched, reaped at the next press.
     let mut open_editors: Vec<std::process::Child> = Vec::new();
-    let mut world_generation = 0_u64;
-    let mut world_inflight: Option<(Instant, bool)> = None;
+    // The last dispatched world job, which completions are tagged against.
+    let mut world_live = LiveJob::default();
+    // When a background refresh may run: batches gather, then wait out the debounce and the budget.
+    let mut pacer = crate::schedule::Pacer::default();
     // Spawned on first search, so the index costs nothing until then.
     let mut search_worker: Option<(
         mpsc::Sender<crate::search::SearchJob>,
         mpsc::Receiver<crate::search::SearchCompletion>,
     )> = None;
     let mut search_generation = 0_u64;
-    let mut search_inflight = false;
     // When the tab-strip glyph turned on — the minimum-display clock.
     let mut glyph_since: Option<Instant> = None;
     let mut config_epoch = 0_u64;
@@ -776,14 +886,15 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if let Ok((epoch, target, mut recovered)) = recovery_rx.try_recv() {
                 recovery_inflight = false;
                 if epoch == config_epoch {
-                    match config::plugin_config(cfg.plugin_config_dir.as_deref()) {
-                        Ok(current) if current == target => {
+                    let now = config::plugin_config(cfg.plugin_config_dir.as_deref());
+                    match recovery_verdict(&target, now) {
+                        Recovery::Swap => {
                             recovered.carry_authored_state_from(app);
                             *app = recovered;
                             pr.recover();
                         }
-                        Ok(_) => {}
-                        Err(error) => {
+                        Recovery::Again => config_dirty = true,
+                        Recovery::Invalid(error) => {
                             let message = error.to_string();
                             if app.config_error() != Some(message.as_str()) {
                                 config_epoch = config_epoch.wrapping_add(1);
@@ -795,18 +906,21 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 }
             }
 
+            app.catch_up_held_view();
             let size = terminal.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
-            // Every frame starts from one validated config snapshot.
-            reconcile_plugin_config(
-                app,
-                cfg,
-                area,
-                &mut config_epoch,
-                &recovery_tx,
-                &mut recovery_inflight,
-                &mut pr,
-            );
+            // A frame reads the config only when it changed; a hidden pane reads it once shown.
+            if app.pane_visible() && std::mem::take(&mut config_dirty) {
+                reconcile_plugin_config(
+                    app,
+                    cfg,
+                    area,
+                    &mut config_epoch,
+                    &recovery_tx,
+                    &mut recovery_inflight,
+                    &mut pr,
+                );
+            }
             if pr.wait_started.is_some_and(|started| started.elapsed() >= INDICATOR_DELAY) {
                 app.set_pr_refreshing(true);
                 pr.wait_started = None;
@@ -818,7 +932,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             let glyph_due = if app.tab == crate::app::Tab::Pr {
                 app.pr_refreshing()
             } else {
-                world_indicator(world_inflight.map(|(started, builds)| (started.elapsed(), builds)))
+                world_indicator(world_live.running.map(|at| (at.elapsed(), world_live.builds)))
             };
             let mut glyph_wake = None;
             if glyph_due {
@@ -863,14 +977,44 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             }
             app.bound_file_scroll(file_vp);
             let painted_frame = PaintedFrameSnapshot::capture(app);
-            terminal.draw(|f| ui::render(f, app))?;
+            // A hidden pane paints nothing: herdr keeps its last frame, and showing it draws again.
+            // A painted age repaints when it rolls over, while on screen.
+            let mut age_due = None;
+            if app.pane_visible() {
+                if std::mem::take(&mut repaint_whole) {
+                    invalidate_screen(terminal)?;
+                }
+                terminal.draw(|f| age_due = ui::render_frame(f, app))?;
+            }
+            let age_due = age_due.map(|due| Instant::now() + due);
 
             // A navigator drag holds the drain; the channel is the queue.
             if !app.gates_world_drain() {
                 let mut landed = false;
-                while let Ok(completion) = world_rx.try_recv() {
-                    if land_world_completion(app, completion, world_generation) {
-                        world_inflight = None;
+                loop {
+                    let completion = match world_rx.try_recv() {
+                        Ok(completion) => completion,
+                        // A worker that died mid-job never lands it: say so, and stop waiting.
+                        Err(mpsc::TryRecvError::Disconnected) if world_live.running.is_some() => {
+                            world_live.running = None;
+                            app.status = "refresh worker unavailable".to_string();
+                            break;
+                        }
+                        Err(_) => break,
+                    };
+                    let took = completion.took;
+                    let landing = land_world_completion(app, completion, &world_live);
+                    if landing.live() {
+                        world_live.running = None;
+                    }
+                    let now = Instant::now();
+                    match landing {
+                        Landing::Superseded(owed) | Landing::Discarded(owed) => {
+                            pacer.on_batch(owed, now);
+                        }
+                        Landing::Failed(owed) => pacer.on_failed(owed, now),
+                        // Only a background build spends the budget; any landing ends a backoff.
+                        Landing::Landed => pacer.on_landed(took, now),
                     }
                     landed = true;
                 }
@@ -879,32 +1023,54 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 }
             }
 
+            while let Ok(event) = watch_rx.try_recv() {
+                let search = search_worker.as_ref().map(|(tx, _)| tx);
+                config_dirty |= land_watch_event(event, app, &mut pacer, &mut pr, search);
+            }
+            let mut heard = false;
+            let mut moved = shown_by_input.take();
+            while let Ok(event) = herdr_rx.try_recv() {
+                let landed = land_herdr_event(app, event);
+                moved = landed.visible.or(moved);
+                // A new baseline rebuilds `last-turn` like a watcher batch.
+                if landed.rebuild {
+                    pacer.on_batch(crate::world::Refresh::Full, Instant::now());
+                }
+                heard = true;
+            }
+            // A hidden pane holds no search index; the next search builds it again.
+            if moved == Some(false) {
+                search_worker = None;
+            }
+            if let Some(visible) = moved {
+                logln!("visible={visible}");
+                pacer.set_visible(visible);
+                watch.set_visible(visible);
+            }
+            // What the screen shows beyond the watcher's defaults: ignored entries, a local base.
+            watch.show(app.shown_ignored());
+            watch.set_refs(app.watched_refs());
+            if heard {
+                continue;
+            }
+
             if let Some((_, rx)) = &search_worker
                 && let Ok(completion) = rx.try_recv()
             {
-                if land_search_completion(app, completion, search_generation) {
-                    // A warming engine re-runs itself, so stay awake for its results.
-                    search_inflight = app
-                        .search
-                        .as_ref()
-                        .is_some_and(|s| s.phase == crate::app::SearchPhase::Indexing);
-                }
+                land_search_completion(app, completion, search_generation);
                 // Repaint at once, not at the next wake.
                 continue;
             }
-            // A closed search owes no landing, or a warming engine would spin the loop.
-            if app.search.is_none() {
-                search_inflight = false;
-            }
 
-            // Query after the paint, so typing paints at input speed.
-            if std::mem::take(&mut app.search_dirty)
+            // Query after the paint, so typing paints at input speed; a hidden pane queries nothing.
+            if app.pane_visible()
+                && std::mem::take(&mut app.search_dirty)
                 && app.mode == crate::app::Mode::Search
                 && app.config_error().is_none()
             {
                 let (tx, _) = search_worker.get_or_insert_with(|| {
                     let (job_tx, job_rx) = mpsc::channel();
-                    let (res_tx, res_rx) = mpsc::channel();
+                    let (res_tx, res_rx) = crate::wake::channel(&waker);
                     crate::search::spawn(
                         app.repo.clone(),
                         crate::search::cache_dir(),
@@ -915,10 +1081,10 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 });
                 search_generation = search_generation.wrapping_add(1);
                 let query = app.search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
-                search_inflight = tx
+                let sent = tx
                     .send(crate::search::SearchJob::Query { generation: search_generation, query })
                     .is_ok();
-                if !search_inflight
+                if !sent
                     && let Some(s) = app.search.as_mut()
                     && !matches!(s.phase, crate::app::SearchPhase::Error(_))
                 {
@@ -934,31 +1100,52 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 let _ = tx.send(crate::search::SearchJob::Track { path });
             }
 
+            // The reviewer's refresh carries the paced paths along; a background one waits for its
+            // deadline and for the last one to land.
+            let due =
+                world_live.running.is_none().then(|| pacer.take_due(Instant::now())).flatten();
+            // While the watcher is down, the stand-in reads the config too, even with a refresh
+            // held by an invalid one.
+            config_dirty |= due.is_some() && pacer.watcher_down();
+            let gathered =
+                if app.world_request.is_some() { due.or_else(|| pacer.take_now()) } else { due };
+            if let Some(refresh) = gathered {
+                app.request_paced_refresh(refresh);
+            }
             // Refresh after the paint, so a switch stays instant.
             if app.world_request.is_some() && app.config_error().is_none() {
                 let request = app.world_request.take().expect("checked above");
-                world_generation = world_generation.wrapping_add(1);
-                let job = crate::world::WorldJob {
-                    generation: world_generation,
-                    input: app.world_input(),
-                    sample_turn: request.sample_turn,
+                let input = app.world_input();
+                world_live = LiveJob {
+                    generation: world_live.generation.wrapping_add(1),
+                    full: request.refresh.is_full(),
                     reveal: request.reveal,
+                    running: Some(Instant::now()),
+                    // The `PR` tab builds nothing.
+                    builds: input.tab.is_file_tab(),
                 };
-                // The `PR` tab's poll only samples.
-                let builds = job.input.tab.is_file_tab();
-                world_inflight = if world_tx.send(job).is_ok() {
-                    Some((Instant::now(), builds))
-                } else {
+                let job = crate::world::WorldJob {
+                    generation: world_live.generation,
+                    input,
+                    reveal: request.reveal,
+                    refresh: request.refresh,
+                };
+                logln!("refresh {:?} background={}", job.refresh, request.background);
+                pacer.on_dispatched(request.background);
+                if world_tx.send(job).is_err() {
                     // A dead worker must not pin the in-flight marker.
                     app.status = "refresh worker unavailable".to_string();
-                    None
-                };
+                    world_live.running = None;
+                }
             }
 
             // Triggers first, so a commanded one supersedes a completion before it paints.
-            let fallback_poll = app.tab == crate::app::Tab::Pr && last_pr_poll.elapsed() >= PR_POLL;
-            let refresh =
-                app.pr_pending.take().or(fallback_poll.then_some(crate::app::RefreshKind::Ambient));
+            // A hidden pane fetches nothing: a trigger waits for it to be shown.
+            let fallback_poll = app.pane_visible()
+                && app.tab == crate::app::Tab::Pr
+                && last_pr_poll.elapsed() >= PR_POLL;
+            let pending = if app.pane_visible() { app.pr_pending.take() } else { None };
+            let refresh = pending.or(fallback_poll.then_some(crate::app::RefreshKind::Ambient));
             if let Some(kind) = refresh {
                 last_pr_poll = Instant::now();
                 pr.request_refresh(kind);
@@ -1021,7 +1208,7 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 }
             }
 
-            if pr.can_start_probe(app.plugin_config().is_some()) {
+            if app.pane_visible() && pr.can_start_probe(app.plugin_config().is_some()) {
                 pr.probe_pending = false;
                 let (tx, repo, base, plugin_config, epoch) = (
                     probe_tx.clone(),
@@ -1042,7 +1229,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 });
             }
 
-            if pr.active_fetch.is_none()
+            if app.pane_visible()
+                && pr.active_fetch.is_none()
                 && pr.active_probe_epoch.is_none()
                 && !pr.probe_pending
                 && let Some((generation, input)) = pr.refresh.take_fetch()
@@ -1070,22 +1258,29 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                     let _ = tx.send(TaggedPr { generation, config_epoch: epoch, input, view });
                 });
             }
-            // Wake at the status-expiry boundary too, so it clears on time when idle.
-            let poll_left = poll.saturating_sub(last_poll.elapsed());
-            let mut timeout = if app.status.is_empty() {
-                poll_left
-            } else {
-                poll_left.min(STATUS_TTL.saturating_sub(status_at.elapsed()))
-            };
-            // Wake often while work is in flight, so results paint promptly.
-            if pr.active_fetch.is_some() || pr.active_probe_epoch.is_some() {
-                timeout = timeout.min(Duration::from_millis(100));
+            // Only armed one-shot deadlines wake an idle loop; with none, it sleeps until something
+            // happens. A status line fades on time.
+            let mut timeout = Duration::MAX;
+            if !app.status.is_empty() {
+                timeout = timeout.min(STATUS_TTL.saturating_sub(status_at.elapsed()));
             }
-            if let Some((_, builds)) = world_inflight {
-                timeout = timeout.min(world_wake(builds));
+            if let Some(due) = age_due {
+                timeout = timeout.min(due.saturating_duration_since(Instant::now()));
             }
-            if search_inflight {
-                timeout = timeout.min(WORKER_TIGHT_WAKE);
+            // The PR tab refetches every minute while it is on screen.
+            if app.pane_visible() && app.tab == crate::app::Tab::Pr {
+                timeout = timeout.min(PR_POLL.saturating_sub(last_pr_poll.elapsed()));
+            }
+            // Workers wake the loop when their results land, so nothing in flight needs a timer,
+            // except the glyph lighting a building job past its delay.
+            if let Some(due) = pacer.next_deadline().filter(|_| world_live.running.is_none()) {
+                timeout = timeout.min(due.saturating_duration_since(Instant::now()));
+            }
+            if let Some(started) = world_live.running.filter(|_| world_live.builds) {
+                let left = INDICATOR_DELAY.saturating_sub(started.elapsed());
+                if !left.is_zero() {
+                    timeout = timeout.min(left);
+                }
             }
             if let Some(wake) = glyph_wake {
                 timeout = timeout.min(wake.max(Duration::from_millis(15)));
@@ -1102,11 +1297,33 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if app.gesture_active() && mouse_exited {
                 timeout = timeout.min(EXIT_DEADLINE.saturating_sub(last_mouse.elapsed()));
             }
-            if input::poll(timeout)? {
+            // crossterm may hold input it already read, so ask it first and sleep only when it
+            // has none.
+            let ready = !held.is_empty() || input::poll(Duration::ZERO)? || {
+                let reason = input::wait(&wake, Some(timeout).filter(|t| *t != Duration::MAX))?;
+                logln!("wake {reason:?}");
+                reason == crate::wake::Woke::Input
+            };
+            if ready {
                 if !painted_frame.still_current(app) {
                     continue;
                 }
-                let event = input::read()?;
+                let event = match held.pop_front() {
+                    Some(event) => event,
+                    None => input::read()?,
+                };
+                // The reviewer's input reaching a hidden pane shows it; a resize is only the terminal.
+                if !matches!(event, Event::Resize(..)) && app.note_input() {
+                    shown_by_input = Some(true);
+                    // Paint first: keys act on what is seen, clicks aimed at the stale frame drop.
+                    let mut buffered = vec![event];
+                    while input::poll(Duration::ZERO)? {
+                        buffered.push(input::read()?);
+                    }
+                    held.extend(buffered.into_iter().filter(|e| !matches!(e, Event::Mouse(_))));
+                    continue;
+                }
+                repaint_whole |= matches!(event, Event::Resize(..));
                 if app.config_error().is_some() {
                     handle_blocked_event(app, &event);
                     continue;
@@ -1178,32 +1395,6 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             // Stillness inside the pane is a held button; only an edge exit completes.
             if app.gesture_active() && mouse_exited && last_mouse.elapsed() >= EXIT_DEADLINE {
                 complete_gesture(app, area, &Clipboard);
-            }
-            if last_poll.elapsed() >= poll {
-                let config_gate = reconcile_plugin_config(
-                    app,
-                    cfg,
-                    area,
-                    &mut config_epoch,
-                    &recovery_tx,
-                    &mut recovery_inflight,
-                    &mut pr,
-                );
-                if !config_gate.ready() {
-                    last_poll = Instant::now();
-                    continue;
-                }
-                schedule_poll_probe(&mut pr, app.tab);
-                // One job samples first, so its build sees the turn it promoted.
-                app.request_world_refresh(true, false);
-                logln!(
-                    "poll files={} composing={} diff_cursor={} scroll={}",
-                    app.entries.len(),
-                    app.composing(),
-                    app.diff_cursor,
-                    app.diff_scroll
-                );
-                last_poll = Instant::now();
             }
         }
         Ok(())
@@ -1311,7 +1502,7 @@ fn reconcile_plugin_config(
     cfg: &Config,
     area: Rect,
     config_epoch: &mut u64,
-    recovery_tx: &mpsc::Sender<(u64, PluginConfig, App)>,
+    recovery_tx: &crate::wake::Sender<(u64, PluginConfig, App)>,
     recovery_inflight: &mut bool,
     pr: &mut PrCoordinator,
 ) -> ConfigGate {
@@ -1353,6 +1544,27 @@ fn reconcile_plugin_config(
     ConfigGate::Changed { pr_changed }
 }
 
+/// What a finished recovery does, by the config on disk now.
+#[derive(Debug)]
+enum Recovery {
+    /// It still reads as the recovery's target: the recovered app takes over.
+    Swap,
+    /// It was saved again meanwhile: read it once more, which starts a fresh recovery.
+    Again,
+    Invalid(config::PluginConfigError),
+}
+
+fn recovery_verdict(
+    target: &PluginConfig,
+    now: Result<PluginConfig, config::PluginConfigError>,
+) -> Recovery {
+    match now {
+        Ok(now) if now == *target => Recovery::Swap,
+        Ok(_) => Recovery::Again,
+        Err(error) => Recovery::Invalid(error),
+    }
+}
+
 /// Whether a config observation ends a gesture: a reflow, or a failure that blocks the body.
 #[must_use]
 fn config_ends_gesture(previous: &PluginConfig, observed: Option<&PluginConfig>) -> bool {
@@ -1369,7 +1581,7 @@ fn apply_plugin_config_observation(
     app: &mut App,
     cfg: &Config,
     epoch: &mut u64,
-    recovery_tx: &mpsc::Sender<(u64, PluginConfig, App)>,
+    recovery_tx: &crate::wake::Sender<(u64, PluginConfig, App)>,
     recovery_inflight: &mut bool,
     observed: Result<PluginConfig, config::PluginConfigError>,
 ) -> bool {
@@ -1677,7 +1889,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         match action {
             K::Quit => app.request_quit(),
             K::Refresh => {
-                app.request_world_refresh(false, false);
+                app.request_world_refresh(false);
                 app.refresh_commanded = true;
             }
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
@@ -1939,7 +2151,7 @@ fn finish_text_drag(
             _ => {}
         }
         // The release continues the multi-click chain; only a non-release end resets it.
-        app.lift_gesture_freeze();
+        app.catch_up_held_view();
     } else {
         complete_gesture(app, area, target);
     }
@@ -2424,10 +2636,27 @@ mod refresh_tests {
     use super::{
         ActiveFetch, FETCH_HANG, PaintedFrameSnapshot, PrCoordinator, PrEffect, PrRefresh,
         TaggedPr, apply_plugin_config_observation, apply_pr_probe_result, drain_pr_shutdown,
-        glyph_clears, handle_blocked_event, handle_resize, ready_app, schedule_poll_probe,
-        world_indicator, world_wake,
+        glyph_clears, handle_blocked_event, handle_resize, ready_app, schedule_pr_probe,
+        world_indicator,
     };
     use crate::app::{App, Tab};
+
+    #[test]
+    fn a_recovery_saved_over_twice_recovers_to_the_newest_config() {
+        use super::{Recovery, recovery_verdict};
+        let dir = tempfile::tempdir().unwrap();
+        let read = |body: &str| {
+            std::fs::write(dir.path().join("config.toml"), body).unwrap();
+            crate::config::plugin_config(Some(dir.path()))
+        };
+        let target = read("theme = \"nord\"\n").unwrap();
+        let same = read("theme = \"nord\"\n");
+        assert!(matches!(recovery_verdict(&target, same), Recovery::Swap), "the fix landed");
+        let resaved = read("theme = \"gruvbox\"\n");
+        assert!(matches!(recovery_verdict(&target, resaved), Recovery::Again), "read again");
+        let broken = read("theme = 3\n");
+        assert!(matches!(recovery_verdict(&target, broken), Recovery::Invalid(_)), "still broken");
+    }
 
     #[test]
     fn the_indicator_lights_only_for_a_building_job_past_the_delay() {
@@ -2451,12 +2680,6 @@ mod refresh_tests {
         assert!(glyph_clears(Duration::from_millis(300)), "past the hold it goes dark");
     }
 
-    #[test]
-    fn the_in_flight_wake_is_tight_only_for_a_building_job() {
-        use std::time::Duration;
-        assert_eq!(world_wake(true), Duration::from_millis(15));
-        assert_eq!(world_wake(false), Duration::from_millis(100));
-    }
     use crate::config::{Config, plugin_config_in};
     use crate::forge::{PrFetchInput, PrView};
     use crate::git::RepositoryIdentity;
@@ -2633,7 +2856,7 @@ mod refresh_tests {
         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
         app.set_plugin_config(plugin_config_in(config_dir.path()).unwrap());
         let painted = PaintedFrameSnapshot::capture(&app);
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::wake::channel(&crate::wake::Waker::detached());
         let mut epoch = 0;
         let mut recovery_inflight = false;
 
@@ -3100,10 +3323,10 @@ mod refresh_tests {
     #[test]
     fn normal_poll_schedules_repository_probe_only_on_the_pr_tab() {
         let mut coordinator = PrCoordinator::new(false);
-        schedule_poll_probe(&mut coordinator, Tab::Changes);
+        schedule_pr_probe(&mut coordinator, Tab::Changes);
         assert!(!coordinator.probe_pending);
 
-        schedule_poll_probe(&mut coordinator, Tab::Pr);
+        schedule_pr_probe(&mut coordinator, Tab::Pr);
         assert!(coordinator.probe_pending);
     }
 
@@ -3184,7 +3407,7 @@ mod refresh_tests {
         std::fs::write(config_dir.path().join("config.toml"), "auto_open = false\n").unwrap();
         let cfg = Config::parse([repo.path().display().to_string()]);
         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::wake::channel(&crate::wake::Waker::detached());
         let mut epoch = 0;
         let mut recovery_inflight = false;
 
@@ -3228,7 +3451,7 @@ mod refresh_tests {
         // The user switches in-session; a reread with a different default must not move it.
         app.set_scope(Scope::LastTurn).unwrap();
         std::fs::write(&path, "default_scope = \"uncommitted\"\n").unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::wake::channel(&crate::wake::Waker::detached());
         let mut epoch = 0;
         let mut recovery_inflight = false;
         assert!(apply_plugin_config_observation(
@@ -3278,7 +3501,7 @@ mod refresh_tests {
         cfg.plugin_config_dir = Some(config_dir.path().to_path_buf());
         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
         app.set_plugin_config(crate::config::plugin_config_in(config_dir.path()).unwrap());
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = crate::wake::channel(&crate::wake::Waker::detached());
         let mut epoch = 0;
         let mut recovery_inflight = false;
         let mut pr = PrCoordinator::new(true);
@@ -3329,7 +3552,7 @@ mod refresh_tests {
         std::fs::write(&path, "unknown = true\n").unwrap();
         let cfg = Config::parse([repo.path().display().to_string()]);
         let mut app = App::new(repo.path().to_path_buf(), Scope::Uncommitted, None);
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crate::wake::channel(&crate::wake::Waker::detached());
         let mut epoch = 0;
         let mut recovery_inflight = false;
 

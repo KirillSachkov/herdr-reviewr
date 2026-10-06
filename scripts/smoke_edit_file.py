@@ -95,7 +95,7 @@ def make_editor(bindir, argv_log, name, holds=0):
 
 
 class Session:
-    def __init__(self, binary, repo, editor, visual=None, config_dir=None, poll=600000):
+    def __init__(self, binary, repo, editor, visual=None, config_dir=None):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         env = {**os.environ, "TERM": "xterm-256color"}
@@ -112,7 +112,7 @@ class Session:
         # Never the machine's own: an empty directory is the missing-file default.
         env["HERDR_PLUGIN_CONFIG_DIR"] = config_dir or NO_CONFIG
         self.proc = subprocess.Popen(
-            [binary, repo, "--poll", str(poll)],
+            [binary, repo],
             stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
         )
         os.close(slave)
@@ -240,9 +240,8 @@ def main():
             body = f.read()
         check("the editor's write lands in the worktree", EDITED_LINE.decode() in body)
 
-        # The return refreshes the changeset itself. This session polls every 600s, so nothing
-        # ambient can paint the new line: only `run_editor`'s own request puts it on screen.
-        check("the edit is on screen without waiting for a poll",
+        # The return refreshes the changeset itself, before any watcher batch could paint the line.
+        check("the edit is on screen without waiting for the watcher",
               EDITED_LINE in plain(after),
               "the diff still shows the pre-edit file after the editor returned")
 
@@ -285,14 +284,14 @@ def main():
         s.close()
 
         # A window editor holds the file open as a reviewer's does, so the checks below run with
-        # it still open, on a real poll, since the poll is what shows the write.
+        # it still open: the watcher is what shows the write.
         gui_log = os.path.join(home, "argv-gui.txt")
         gui = make_editor(bindir, gui_log, "code", holds=12)
         # Its own repository, so the earlier session's write is not already on screen.
         gui_root = os.path.join(home, "gui-repo")
         os.makedirs(gui_root)
         make_repo(gui_root)
-        s = Session(binary, gui_root, gui, poll=1000)
+        s = Session(binary, gui_root, gui)
         s.drain()
         gui_mark = len(s.seen)
         s.press_bounded("e", 2.0)
@@ -313,8 +312,8 @@ def main():
         check("so its own output never reaches the screen",
               b"FAKE-EDITOR-IS-ON-SCREEN" not in gui_after)
         check("the pane says it opened the file", b"opened" in gui_after)
-        # `tab` moves focus to the diff, which rewrites the footer's primary action — a change
-        # only the key can cause, unlike the ambient repaints this session's 1s poll produces.
+        # `tab` moves focus to the diff, which rewrites the footer's primary action: a change only
+        # the key can cause.
         check("the pane answers keys while the editor holds the file",
               b"comment" in plain(s.press_bounded("\t", 1.5)))
         # Nothing is watching the editor, so the pane rests: no wake of its own, no redraw.
@@ -324,12 +323,12 @@ def main():
         # `ps -o time=` is exact on macOS and whole seconds on Linux; either catches a loop waking
         # at a deadline already past.
         check("and rests while it waits", burned < 0.2, f"burned {burned:.2f}s of cpu in 2s")
-        # Nothing waits for the editor to close: the poll shows the write while the file is
+        # Nothing waits for the editor to close: the watcher shows the write while the file is
         # still out, with no keypress from the reviewer.
         opened_at = time.perf_counter()
         while EDITED_LINE not in plain(s.seen[gui_mark:]) and time.perf_counter() - opened_at < 8:
             s.drain(quiet=0.3, timeout=1.0)
-        check("the poll shows the write with the file still out",
+        check("the watcher shows the write with the file still out",
               EDITED_LINE in plain(s.seen[gui_mark:]))
         # A file still out opens again rather than being refused: the reviewer has moved on to
         # another line and wants the editor to follow.

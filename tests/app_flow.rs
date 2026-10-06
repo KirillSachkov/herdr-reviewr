@@ -2555,28 +2555,58 @@ fn agent_in(cwd: &Path, status: Status) -> AgentSample {
     AgentSample { cwd: Some(cwd.to_string_lossy().into_owned()), status }
 }
 
+/// The members among `samples` folded into turn tracking, as the herdr connection does.
+fn observed(
+    host: &mut herdr_reviewr::turn::TurnHost,
+    samples: Option<&[AgentSample]>,
+) -> herdr_reviewr::turn::TurnReport {
+    let statuses = samples.and_then(|samples| {
+        let names: Vec<String> = (0..samples.len()).map(|i| i.to_string()).collect();
+        let panes: Vec<(&str, Option<&str>)> =
+            names.iter().zip(samples).map(|(n, s)| (n.as_str(), s.cwd.as_deref())).collect();
+        let members = host.members(&panes)?;
+        Some(
+            members.iter().map(|m| samples[m.parse::<usize>().unwrap()].status).collect::<Vec<_>>(),
+        )
+    });
+    host.observe_statuses(statuses.as_deref(), std::time::Instant::now())
+}
+
 /// One enumeration on the turn host, mirrored into the app as a landing would.
 fn observe_agents(
     app: &mut App,
-    host: &mut herdr_reviewr::world::TurnHost,
+    host: &mut herdr_reviewr::turn::TurnHost,
     samples: Option<&[AgentSample]>,
 ) {
-    let report = host.observe_agents(samples);
-    app.sync_turn_baseline(host.baseline().map(str::to_string));
-    app.sync_agents_present(report.agents_present);
+    app.sync_turn(observed(host, samples));
+}
+
+/// A write the watcher reports well after the turn's start snapshot, fed to turn tracking.
+fn write_in_turn(
+    app: &mut App,
+    host: &mut herdr_reviewr::turn::TurnHost,
+    r: &Repo,
+    path: &str,
+    body: &str,
+) {
+    r.write(path, body);
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let paths = Some([path.to_string()].into());
+    host.on_worktree_change(&herdr_reviewr::turn::Wrote { first: later, last: later, paths });
+    app.sync_turn(host.status());
 }
 
 /// An app and turn host on one resolved top level, as `run` builds them.
 /// The raw temp path would split them: macOS resolves `/var` to `/private/var`.
-fn turn_setup(r: &Repo) -> (App, herdr_reviewr::world::TurnHost) {
+fn turn_setup(r: &Repo) -> (App, herdr_reviewr::turn::TurnHost) {
     let root = herdr_reviewr::git::toplevel(r.path()).expect("a repo");
-    (App::new(root.clone(), Scope::LastTurn, None), herdr_reviewr::world::TurnHost::open(root))
+    (App::new(root.clone(), Scope::LastTurn, None), herdr_reviewr::turn::TurnHost::open(root))
 }
 
 /// The single-agent case the older tests drive: one agent at the worktree root.
 fn observe_turn(
     app: &mut App,
-    host: &mut herdr_reviewr::world::TurnHost,
+    host: &mut herdr_reviewr::turn::TurnHost,
     repo: &Path,
     status: Option<Status>,
 ) {
@@ -2605,7 +2635,7 @@ fn last_turn_shows_a_change_producing_turn() {
     let (mut app, mut host) = turn_setup(&r);
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working)); // turn start: candidate = "one"
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working)); // first change promotes the baseline
     app.reload().unwrap();
     assert!(!app.awaiting_turn(), "the baseline is now set");
@@ -2621,7 +2651,7 @@ fn a_question_only_turn_keeps_the_previous_turns_diff() {
     // Turn A edits a file.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
     // Turn B is a question — no file change.
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
@@ -2642,10 +2672,10 @@ fn a_permission_pause_stays_one_turn() {
     let (mut app, mut host) = turn_setup(&r);
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working)); // turn start: candidate = "one"
-    r.write("a.rs", "one\nbefore\n"); // edit before the prompt
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\nbefore\n"); // edit before the prompt
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Blocked)); // permission prompt promotes baseline = "one"
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working)); // resume — must NOT re-baseline
-    r.write("a.rs", "one\nbefore\nafter\n"); // edit after the prompt
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\nbefore\nafter\n"); // edit after the prompt
     observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
     app.reload().unwrap();
     let a = app.entries.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
@@ -2662,8 +2692,7 @@ fn the_baseline_survives_a_restart() {
         let (mut app, mut host) = turn_setup(&r);
         observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
         observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
-        r.write("a.rs", "one\ntwo\n");
-        observe_turn(&mut app, &mut host, r.path(), Some(Status::Working)); // promotes and persists the ref
+        write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n"); // promotes and persists the ref
     }
     // A restarted pane resumes the persisted baseline.
     let (mut restarted, _) = turn_setup(&r);
@@ -2679,7 +2708,7 @@ fn no_agent_status_pauses_tracking() {
     r.commit_all("init");
     let (mut app, mut host) = turn_setup(&r);
     observe_turn(&mut app, &mut host, r.path(), None); // no herdr / no resolvable agent
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_turn(&mut app, &mut host, r.path(), None);
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "without a status signal the baseline never forms");
@@ -2701,14 +2730,14 @@ fn two_agents_in_one_worktree_produce_one_turn() {
         &mut host,
         Some(&[agent_in(&root, Status::Working), agent_in(&root, Status::Idle)]),
     );
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     // Agent B joins mid-turn. A restart here would drop the "two" edit from the diff.
     observe_agents(
         &mut app,
         &mut host,
         Some(&[agent_in(&root, Status::Working), agent_in(&root, Status::Working)]),
     );
-    r.write("a.rs", "one\ntwo\nthree\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\nthree\n");
     observe_agents(
         &mut app,
         &mut host,
@@ -2732,9 +2761,9 @@ fn a_turn_ends_only_once_every_agent_rests() {
 
     observe_agents(&mut app, &mut host, Some(&both(Status::Idle, Status::Idle)));
     observe_agents(&mut app, &mut host, Some(&both(Status::Working, Status::Working)));
-    let still_working = host.observe_agents(Some(&both(Status::Idle, Status::Working)));
+    let still_working = observed(&mut host, Some(&both(Status::Idle, Status::Working)));
     assert!(!still_working.ended, "one agent still working keeps the turn open");
-    let rested = host.observe_agents(Some(&both(Status::Idle, Status::Done)));
+    let rested = observed(&mut host, Some(&both(Status::Idle, Status::Done)));
     assert!(rested.ended, "the turn ends once every agent rests");
 }
 
@@ -2749,9 +2778,9 @@ fn a_prompt_answered_into_rest_still_ends_the_turn() {
 
     observe_agents(&mut app, &mut host, Some(&[agent_in(&root, Status::Idle)]));
     observe_agents(&mut app, &mut host, Some(&[agent_in(&root, Status::Working)]));
-    let held = host.observe_agents(Some(&[agent_in(&root, Status::Blocked)]));
+    let held = observed(&mut host, Some(&[agent_in(&root, Status::Blocked)]));
     assert!(!held.ended, "the permission prompt holds the turn open");
-    let rested = host.observe_agents(Some(&[agent_in(&root, Status::Idle)]));
+    let rested = observed(&mut host, Some(&[agent_in(&root, Status::Idle)]));
     assert!(rested.ended, "answering the prompt into idle ends the turn");
 }
 
@@ -2767,7 +2796,7 @@ fn an_empty_worktree_rests_so_the_first_agent_starts_a_turn() {
     // The first agent to arrive and work starts a turn, since the empty worktree rested.
     observe_agents(&mut app, &mut host, Some(&[agent_in(r.path(), Status::Working)]));
     assert_eq!(app.turn_wait_message(), "waiting for the first turn", "the agent is a member");
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_agents(&mut app, &mut host, Some(&[agent_in(r.path(), Status::Working)]));
 
     app.reload().unwrap();
@@ -2794,7 +2823,7 @@ fn an_agent_in_a_second_worktree_of_the_repository_is_not_a_member() {
         "a second worktree resolves to its own top level"
     );
 
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_agents(&mut app, &mut host, Some(&[agent_in(&sibling, Status::Working)]));
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "a non-member's work never forms this worktree's baseline");
@@ -2811,7 +2840,7 @@ fn an_agent_whose_cwd_is_not_an_absolute_path_is_not_a_member() {
 
     observe_agents(&mut app, &mut host, Some(&[nowhere(""), nowhere("sub")]));
     assert_eq!(app.agents_present(), Some(false), "neither spelling names a worktree");
-    r.write("a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
     observe_agents(&mut app, &mut host, Some(&[nowhere("")]));
     app.reload().unwrap();
     assert!(app.awaiting_turn(), "a non-member never forms this worktree's baseline");
@@ -2833,7 +2862,7 @@ fn an_agent_in_a_subdirectory_belongs_to_the_worktree() {
         "a subdirectory resolves to the same top level"
     );
     observe_agents(&mut app, &mut host, Some(&[agent_in(&sub, Status::Working)]));
-    r.write("sub/a.rs", "one\ntwo\n");
+    write_in_turn(&mut app, &mut host, &r, "sub/a.rs", "one\ntwo\n");
     observe_agents(&mut app, &mut host, Some(&[agent_in(&sub, Status::Working)]));
 
     app.reload().unwrap();
@@ -2863,8 +2892,8 @@ fn a_failed_enumeration_keeps_the_previous_membership() {
 
     // A mid-turn hiccup neither ends nor re-baselines the turn.
     observe_agents(&mut app, &mut host, Some(&[agent_in(r.path(), Status::Working)]));
-    r.write("a.rs", "one\ntwo\n");
-    let hiccup = host.observe_agents(None);
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    let hiccup = observed(&mut host, None);
     assert!(!hiccup.ended, "a failed enumeration never ends the turn");
     assert_eq!(hiccup.agents_present, None, "a failed enumeration observes nothing");
     observe_agents(&mut app, &mut host, Some(&[agent_in(r.path(), Status::Working)]));
@@ -2872,8 +2901,140 @@ fn a_failed_enumeration_keeps_the_previous_membership() {
     let a = app.entries.iter().find(|f| f.path == "a.rs").expect("a.rs changed");
     assert_eq!(a.annotation.as_ref().unwrap().additions, 1, "the mid-hiccup edit is in the turn");
 
-    let emptied = host.observe_agents(Some(&[]));
+    let emptied = observed(&mut host, Some(&[]));
     assert_eq!(emptied.agents_present, Some(false), "a successful empty enumeration observes it");
+}
+
+/// A turn host past one turn start on `r`, with its app; the start snapshot holds `a.rs` as is.
+fn started_turn(r: &Repo) -> (App, herdr_reviewr::turn::TurnHost) {
+    let (mut app, mut host) = turn_setup(r);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    (app, host)
+}
+
+/// A batch of `paths` the watcher reports at `at`.
+fn fed(host: &mut herdr_reviewr::turn::TurnHost, at: std::time::Instant, paths: &[&str]) -> bool {
+    let paths = Some(paths.iter().map(|p| (*p).to_string()).collect());
+    host.on_worktree_change(&herdr_reviewr::turn::Wrote { first: at, last: at, paths })
+}
+
+fn later() -> std::time::Instant {
+    std::time::Instant::now() + std::time::Duration::from_secs(1)
+}
+
+#[test]
+fn only_a_net_change_promotes_a_turn() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let (_, mut host) = started_turn(&r);
+    // A temp file made and removed, a touch, an identical rewrite: nothing changed on net.
+    r.write("tmp.swp", "x\n");
+    r.remove("tmp.swp");
+    assert!(!fed(&mut host, later(), &["tmp.swp"]), "a temp file come and gone");
+    r.write("a.rs", "one\n");
+    assert!(!fed(&mut host, later(), &["a.rs"]), "an identical rewrite or a touch");
+    assert_eq!(host.baseline(), None, "the turn stays pending");
+    r.write("a.rs", "one\ntwo\n");
+    assert!(fed(&mut host, later(), &["a.rs"]), "a real change promotes");
+    assert!(host.baseline().is_some());
+    assert_eq!(herdr_reviewr::git::read_baseline_ref(r.path()).as_deref(), host.baseline());
+}
+
+#[test]
+fn a_write_racing_the_start_snapshot_empties_the_turn_and_says_why() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    // A previous turn left a diff to lose.
+    let (mut app, mut host) = started_turn(&r);
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    assert!(host.baseline().is_some(), "turn A promoted");
+    // Turn B's first write lands as herdr reports it working.
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    r.write("a.rs", "three\n");
+    assert!(fed(&mut host, std::time::Instant::now(), &["a.rs"]), "the race moves the baseline");
+    app.sync_turn(host.status());
+    assert_eq!(host.baseline(), None, "empty, never part of turn B, nor turn A's");
+    assert!(herdr_reviewr::git::read_baseline_ref(r.path()).is_none(), "the ref is gone too");
+    app.reload().unwrap();
+    assert!(app.awaiting_turn());
+    assert_eq!(app.turn_wait_message(), "the last turn started before reviewr could snapshot it");
+}
+
+#[test]
+fn a_write_just_before_the_status_edge_races_too() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let (mut app, mut host) = turn_setup(&r);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    r.write("a.rs", "two\n");
+    fed(&mut host, std::time::Instant::now(), &["a.rs"]);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    let raced = herdr_reviewr::turn::LastTurn::Raced;
+    assert_eq!(host.status().last, raced, "the write may already sit in the start snapshot");
+}
+
+#[test]
+fn a_question_only_turns_snapshot_expires_at_its_end() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let (mut app, mut host) = started_turn(&r);
+    write_in_turn(&mut app, &mut host, &r, "a.rs", "one\ntwo\n");
+    let turn_a = host.baseline().map(str::to_string);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    // Turn B asks a question and ends; the reviewer then edits.
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    r.write("a.rs", "reviewer\n");
+    assert!(!fed(&mut host, later(), &["a.rs"]), "the reviewer's edit is not turn B's");
+    assert_eq!(host.baseline().map(str::to_string), turn_a, "turn A's diff stays");
+}
+
+#[test]
+fn a_turn_the_watcher_missed_is_judged_at_its_end() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    let (mut app, mut host) = started_turn(&r);
+    host.watcher_down(true);
+    host.watcher_down(false);
+    r.write("a.rs", "one\ntwo\n");
+    // No write reached it, but the worktree moved since the snapshot.
+    let ended = observed(&mut host, Some(&[agent_in(r.path(), Status::Idle)]));
+    assert!(ended.ended);
+    assert!(host.baseline().is_some(), "promoted at its end");
+
+    // Another down turn that wrote nothing drops its snapshot.
+    let turn_a = host.baseline().map(str::to_string);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    host.watcher_down(true);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    assert_eq!(host.baseline().map(str::to_string), turn_a, "nothing changed, nothing moved");
+}
+
+#[test]
+fn a_turn_that_starts_in_a_gap_is_never_adopted() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    // Startup: the first status seen is already working.
+    let (mut app, mut host) = turn_setup(&r);
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    r.write("a.rs", "one\ntwo\n");
+    assert!(!fed(&mut host, later(), &["a.rs"]), "no snapshot, no turn");
+    assert_eq!(host.baseline(), None);
+    // An outage: the agent rested before it and works after it.
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Idle));
+    host.gap();
+    observe_turn(&mut app, &mut host, r.path(), Some(Status::Working));
+    r.write("a.rs", "one\ntwo\nthree\n");
+    assert!(!fed(&mut host, later(), &["a.rs"]), "the edge fell in the gap");
+    assert_eq!(host.baseline(), None);
 }
 
 /// The visible-row index of the file at `path`, or `None` when it is hidden/absent.
@@ -2935,7 +3096,7 @@ fn a_tab_switch_paints_the_stashed_frame_and_requests_its_refresh() {
     enter_tab(&mut app, Tab::Changes);
     r.write("b.rs", "fn b() {}\n");
     app.set_tab(Tab::AllFiles).unwrap();
-    let request = app.world_request.expect("a return visit requests its refresh");
+    let request = app.world_request.clone().expect("a return visit requests its refresh");
     assert!(request.reveal, "the landing will re-reveal the re-anchored cursor");
     assert!(
         !app.entries.iter().any(|e| e.path == "b.rs"),
@@ -3114,6 +3275,7 @@ fn all_files_lazily_loads_an_expanded_ignored_directory() {
         "subdir placeholder loads"
     );
     assert!(!app.entries.iter().any(|e| e.path == "target/sub/y.o"), "deeper level stays lazy");
+    assert_eq!(app.shown_ignored(), ["target".to_string()].into(), "the watcher follows it");
 
     // Collapse → children drop back out of the entry set.
     app.file_cursor = row(&app);
@@ -3122,6 +3284,7 @@ fn all_files_lazily_loads_an_expanded_ignored_directory() {
         !app.entries.iter().any(|e| e.path.starts_with("target/")),
         "collapsing unloads children"
     );
+    assert!(app.shown_ignored().is_empty(), "and the watcher lets it go");
 }
 
 #[test]
@@ -4469,6 +4632,11 @@ fn the_rendered_cursor_survives_polls_resizes_and_toggles() {
 
 // --- world completions ---------------------------------------------------------
 
+/// The last dispatched job: generation `generation`, a background path read.
+fn live(generation: u64) -> herdr_reviewr::LiveJob {
+    herdr_reviewr::LiveJob { generation, ..herdr_reviewr::LiveJob::default() }
+}
+
 /// A worker completion for the app's current input, tagged `generation`.
 fn completion_for(app: &App, generation: u64) -> herdr_reviewr::world::WorldCompletion {
     let input = app.world_input();
@@ -4477,8 +4645,9 @@ fn completion_for(app: &App, generation: u64) -> herdr_reviewr::world::WorldComp
         generation,
         input,
         reveal: false,
-        turn: None,
         snapshot: Some(Ok(snapshot)),
+        refresh: herdr_reviewr::world::Refresh::Full,
+        took: std::time::Duration::ZERO,
     }
 }
 
@@ -4490,43 +4659,115 @@ fn a_result_for_a_view_that_moved_on_is_discarded_whole() {
     let stale = completion_for(&app, 7);
     app.set_scope(Scope::Branch).unwrap();
     let before = app.entries.clone();
+    let landing = herdr_reviewr::land_world_completion(&mut app, stale, &live(7));
     assert!(
-        herdr_reviewr::land_world_completion(&mut app, stale, 7),
-        "the live generation clears the in-flight marker even when the view moved on"
+        landing.live(),
+        "the live generation clears the in-flight marker even when it moved on"
+    );
+    assert!(
+        matches!(landing, herdr_reviewr::Landing::Discarded(_)),
+        "its paths stay owed to the pacer: {landing:?}"
     );
     assert_eq!(app.entries, before, "the mismatched snapshot never paints");
-    assert!(app.world_request.is_some(), "a fresh refresh is queued for the current view");
 }
 
 #[test]
-fn a_superseded_completion_syncs_the_baseline_but_paints_nothing() {
+fn a_superseded_completion_paints_nothing() {
     let r = edited_repo();
     let mut app = app_on(&r);
     r.write("d.rs", "d\n");
-    let mut stale = completion_for(&app, 3);
-    stale.input.turn_baseline = Some("cafe".into());
-    stale.turn = Some(herdr_reviewr::world::TurnReport {
-        ended: true,
-        agents_present: Some(true),
-        written: None,
-    });
+    let stale = completion_for(&app, 3);
     let before = app.entries.clone();
     assert!(
-        !herdr_reviewr::land_world_completion(&mut app, stale, 4),
+        !herdr_reviewr::land_world_completion(&mut app, stale, &live(4)).live(),
         "a superseded tag never clears the live in-flight marker"
     );
     assert_eq!(app.entries, before, "a superseded snapshot never paints");
-    assert!(app.pr_pending.is_some(), "the turn end still schedules the PR refetch");
-    assert_eq!(
-        app.agents_present(),
-        Some(true),
-        "membership syncs from a superseded completion too"
-    );
-    assert_eq!(
-        app.world_input().turn_baseline.as_deref(),
-        Some("cafe"),
-        "the worker's baseline is authoritative even from a superseded completion"
-    );
+}
+
+// --- herdr connection -------------------------------------------------------
+
+#[test]
+fn a_turn_report_moves_the_baseline_and_rebuilds_last_turn() {
+    use herdr_reviewr::herdr_socket::HerdrEvent;
+    use herdr_reviewr::turn::TurnReport;
+    let r = edited_repo();
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    app.world_request = None;
+    let turn = |baseline: &str, agents_present| TurnReport {
+        ended: true,
+        agents_present,
+        last: herdr_reviewr::turn::LastTurn::At(baseline.into()),
+    };
+    let landed =
+        herdr_reviewr::land_herdr_event(&mut app, HerdrEvent::Turn(turn("cafe", Some(true))));
+    assert_eq!(app.world_input().turn_baseline.as_deref(), Some("cafe"));
+    assert_eq!(app.agents_present(), Some(true));
+    assert!(app.pr_pending.is_some(), "a turn's end schedules the PR refetch");
+    assert!(landed.rebuild, "a new baseline rebuilds last-turn, paced");
+    let landed = herdr_reviewr::land_herdr_event(&mut app, HerdrEvent::Turn(turn("cafe", None)));
+    assert_eq!(app.agents_present(), Some(true), "an undetermined member keeps the last answer");
+    assert!(!landed.rebuild, "the same baseline rebuilds nothing");
+    let raced = TurnReport { last: herdr_reviewr::turn::LastTurn::Raced, ..TurnReport::default() };
+    herdr_reviewr::land_herdr_event(&mut app, HerdrEvent::Turn(raced));
+    assert!(app.awaiting_turn(), "a raced turn leaves last-turn empty");
+    assert_eq!(app.turn_wait_message(), "the last turn started before reviewr could snapshot it");
+}
+
+#[test]
+fn herdrs_session_moves_the_pane_ids_and_input_proves_the_pane_on_screen() {
+    use herdr_reviewr::herdr::PaneIds;
+    use herdr_reviewr::herdr_socket::{HerdrEvent, Session};
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let moved = PaneIds { workspace: Some("w2".into()), pane: Some("w2:p9".into()) };
+    let session = |me, visible| HerdrEvent::Session(Session { me, visible });
+    herdr_reviewr::land_herdr_event(&mut app, session(Some(moved.clone()), false));
+    assert_eq!(app.herdr.ids, moved, "Send and the label follow the move");
+    assert!(!app.pane_visible());
+    app.note_input();
+    assert!(app.pane_visible(), "input reaching the pane proves it on screen");
+    herdr_reviewr::land_herdr_event(&mut app, session(None, false));
+    assert_eq!(app.herdr.ids, moved, "a session that lost the pane keeps its last ids");
+    assert!(!app.pane_visible(), "herdr's next focus report wins again");
+    herdr_reviewr::land_herdr_event(&mut app, HerdrEvent::Lost);
+    assert!(app.pane_visible(), "a lost connection assumes the pane is on screen");
+}
+
+#[test]
+fn coming_on_screen_refetches_the_pr_tab_and_reruns_an_open_search() {
+    use herdr_reviewr::app::Tab;
+    use herdr_reviewr::herdr_socket::{HerdrEvent, Session};
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    let session = |visible| HerdrEvent::Session(Session { me: None, visible });
+    app.set_tab(Tab::Pr).unwrap();
+    app.pr_pending = None;
+    let edge =
+        |app: &mut App, visible| herdr_reviewr::land_herdr_event(app, session(visible)).visible;
+    assert_eq!(edge(&mut app, false), Some(false), "the hide edge");
+    assert!(app.pr_pending.is_none(), "a hidden pane asks for nothing");
+    assert_eq!(edge(&mut app, true), Some(true), "the show edge");
+    assert!(app.pr_pending.is_some(), "the PR tab refetches once shown");
+    assert_eq!(edge(&mut app, true), None, "staying shown is no edge");
+
+    app.set_tab(Tab::Changes).unwrap();
+    app.open_search();
+    app.search_dirty = false;
+    herdr_reviewr::land_herdr_event(&mut app, session(false));
+    assert!(app.note_input(), "input reaching a hidden pane shows it");
+    assert!(app.search_dirty, "the open search runs again");
+}
+
+#[test]
+fn an_old_herdr_says_what_last_turn_needs() {
+    use herdr_reviewr::herdr_socket::HerdrEvent;
+    let r = edited_repo();
+    let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
+    herdr_reviewr::land_herdr_event(&mut app, HerdrEvent::TooOld("0.9.0".into()));
+    assert!(app.awaiting_turn());
+    assert_eq!(app.turn_wait_message(), "last-turn needs a newer herdr");
+    assert!(app.status.contains("needs 0.9.3"), "said once, with the version: {}", app.status);
 }
 
 #[test]
@@ -4545,12 +4786,38 @@ fn a_completion_landing_mid_composition_leaves_the_frozen_diff() {
     r.write("a.rs", "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\n");
     r.write("c.rs", "c\n");
     let early = completion_for(&app, 9);
-    assert!(herdr_reviewr::land_world_completion(&mut app, early, 9));
+    assert!(herdr_reviewr::land_world_completion(&mut app, early, &live(9)).live());
 
     assert!(app.composing(), "still composing");
     assert_eq!(app.input, "half-written", "the draft is untouched");
     assert_eq!(app.diff, frozen_diff, "the frozen diff holds, however early the refresh began");
     assert!(app.entries.iter().any(|f| f.path == "c.rs"), "the file list still lands");
+
+    // No watcher event follows: the next frame owes the open diff the reload the modal held.
+    app.cancel_comment();
+    app.catch_up_held_view();
+    let zeta = app.diff.rows.iter().any(|r| r.marker() == '+' && r.text().contains("zeta"));
+    assert!(zeta, "the held reload lands once the modal closes, with the edit made meanwhile");
+}
+
+#[test]
+fn a_reload_a_gutter_drag_held_survives_the_composer_it_opens() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    app.focus = Focus::Diff;
+    let row = row_with(&app, '+');
+    app.start_gutter_drag(row);
+    let before = app.diff.clone();
+    r.write("a.rs", "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\n");
+    let landing = completion_for(&app, 9);
+    assert!(herdr_reviewr::land_world_completion(&mut app, landing, &live(9)).live());
+    assert_eq!(app.diff, before, "the drag holds the open diff");
+    app.finish_gutter_drag();
+    assert!(app.composing(), "the drag opens the composer");
+    app.cancel_comment();
+    app.catch_up_held_view();
+    let zeta = app.diff.rows.iter().any(|r| r.marker() == '+' && r.text().contains("zeta"));
+    assert!(zeta, "the reload the drag held lands once the composer closes");
 }
 
 #[test]
@@ -4561,7 +4828,7 @@ fn a_reveal_completion_settles_the_tab_and_rearms_the_cursor_reveal() {
     let mut landing = completion_for(&app, 2);
     landing.reveal = true;
     app.reveal_files = false;
-    assert!(herdr_reviewr::land_world_completion(&mut app, landing, 2));
+    assert!(herdr_reviewr::land_world_completion(&mut app, landing, &live(2)).live());
     assert!(app.reveal_files, "a switch-originated landing re-reveals the re-anchored cursor");
     assert!(app.entries.iter().any(|f| f.path == "c.rs"), "the landing caught up");
 }
@@ -4574,7 +4841,7 @@ fn a_landing_world_result_never_flips_the_hidden_navigator() {
     r.write("c.rs", "c\n");
     let mut landing = completion_for(&app, 2);
     landing.reveal = true;
-    assert!(herdr_reviewr::land_world_completion(&mut app, landing, 2));
+    assert!(herdr_reviewr::land_world_completion(&mut app, landing, &live(2)).live());
     assert!(app.navigator_hidden, "the hidden state is place state; a landing reconciles only");
     assert_eq!(app.focus, Focus::Diff, "the settle keeps focus on the lone read pane");
 }
@@ -4596,7 +4863,7 @@ fn a_superseded_reveal_rearms_for_the_next_dispatch() {
     let mut superseded = completion_for(&app, 3);
     superseded.reveal = true;
     assert!(
-        !herdr_reviewr::land_world_completion(&mut app, superseded, 4),
+        !herdr_reviewr::land_world_completion(&mut app, superseded, &live(4)).live(),
         "the stale tag does not clear the live marker"
     );
     let request = app.world_request.expect("the undelivered reveal re-arms a refresh");
@@ -4604,25 +4871,49 @@ fn a_superseded_reveal_rearms_for_the_next_dispatch() {
 }
 
 #[test]
+fn a_superseded_job_owes_only_what_the_newer_one_does_not_read() {
+    let r = edited_repo();
+    let mut app = app_on(&r);
+    // `r` twice: the newer full read covers the older one, and its reveal carries the switch.
+    let mut superseded = completion_for(&app, 3);
+    superseded.reveal = true;
+    let newer =
+        herdr_reviewr::LiveJob { generation: 4, full: true, reveal: true, ..Default::default() };
+    let landing = herdr_reviewr::land_world_completion(&mut app, superseded, &newer);
+    assert!(
+        matches!(&landing, herdr_reviewr::Landing::Superseded(owed) if owed.is_empty()),
+        "nothing is owed: {landing:?}"
+    );
+    assert!(app.world_request.is_none(), "no second refresh is queued");
+    // A newer path read leaves the older full read owed.
+    let older = completion_for(&app, 5);
+    let landing = herdr_reviewr::land_world_completion(&mut app, older, &live(6));
+    assert!(
+        matches!(&landing, herdr_reviewr::Landing::Superseded(owed) if owed.is_full()),
+        "{landing:?}"
+    );
+}
+
+#[test]
 fn the_worker_coalesces_queued_jobs_keeping_their_flags() {
-    use herdr_reviewr::world::{self, TurnHost, WorldJob};
+    use herdr_reviewr::world::{self, WorldJob};
     use std::sync::mpsc;
     let dir = tempfile::tempdir().unwrap();
     let (job_tx, job_rx) = mpsc::channel();
-    let (res_tx, res_rx) = mpsc::channel();
+    let (res_tx, res_rx) = herdr_reviewr::wake::channel(&herdr_reviewr::wake::Waker::detached());
     let input = App::new(dir.path().to_path_buf(), Scope::Uncommitted, None).world_input();
     let mut newer = input.clone();
     newer.scope = Scope::Branch;
     // Both jobs queue before the worker starts, so the coalescing path is deterministic.
-    job_tx.send(WorldJob { generation: 1, input, sample_turn: true, reveal: false }).unwrap();
-    job_tx
-        .send(WorldJob { generation: 2, input: newer, sample_turn: false, reveal: true })
-        .unwrap();
-    let worker = world::spawn(TurnHost::open(dir.path().to_path_buf()), job_rx, res_tx);
+    let full = herdr_reviewr::world::Refresh::Full;
+    let job =
+        |generation, input, reveal| WorldJob { generation, input, reveal, refresh: full.clone() };
+    job_tx.send(job(1, input, true)).unwrap();
+    job_tx.send(job(2, newer, false)).unwrap();
+    let worker = world::spawn(dir.path().to_path_buf(), job_rx, res_tx);
     let completion = res_rx.recv().expect("one coalesced completion");
     assert_eq!(completion.generation, 2, "the latest request wins");
     assert_eq!(completion.input.scope, Scope::Branch, "the newest input is the one built");
-    assert!(completion.turn.is_some(), "the superseded job's sample still runs");
     assert!(completion.reveal, "the superseded job's reveal is kept by OR");
     drop(job_tx);
     assert!(res_rx.recv().is_err(), "exactly one completion lands for the coalesced pair");
@@ -5307,10 +5598,10 @@ mod search_overlay {
         repo.commit_all("c");
         repo.write("ignored.txt", "alpha_marker inside an ignored file\n");
         let cache = tempfile::TempDir::new().unwrap();
-        let before = all_paths(repo.path());
 
         let (job_tx, job_rx) = std::sync::mpsc::channel();
-        let (res_tx, res_rx) = std::sync::mpsc::channel();
+        let (res_tx, res_rx) =
+            herdr_reviewr::wake::channel(&herdr_reviewr::wake::Waker::detached());
         let worker =
             herdr_reviewr::search::spawn(repo.path_buf(), cache.path().into(), job_rx, res_tx);
         job_tx.send(SearchJob::Query { generation: 1, query: "alpha_marker".into() }).unwrap();
@@ -5349,6 +5640,63 @@ mod search_overlay {
                 hit.text
             );
         }
+
+        // The engine has no watcher of its own: the paths reviewr's watcher saw keep it current.
+        let query = |generation: u64, text: &str| -> Vec<String> {
+            job_tx.send(SearchJob::Query { generation, query: text.into() }).unwrap();
+            loop {
+                let completion = res_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
+                if let SearchOutcome::Ready(results) = completion.outcome {
+                    break results
+                        .files
+                        .iter()
+                        .map(|f| f.path.clone())
+                        .chain(results.code.iter().map(|c| c.path.clone()))
+                        .collect();
+                }
+            }
+        };
+        // Some changes land behind a rescan: ask until they show.
+        let eventually = |first: u64, text: &str, path: &str| {
+            (first..first + 200).any(|generation| {
+                let hit = query(generation, text).iter().any(|p| p == path);
+                if !hit {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                hit
+            })
+        };
+        let changed = |paths: &[&str]| {
+            let paths = paths.iter().map(|p| (*p).to_string()).collect();
+            job_tx.send(SearchJob::Changed { paths }).unwrap();
+        };
+        repo.write("src/beta.rs", "fn beta_marker() {}\n");
+        changed(&["src/beta.rs"]);
+        assert!(query(2, "beta_marker").contains(&"src/beta.rs".to_string()), "a new file");
+        repo.remove("src/beta.rs");
+        changed(&["src/beta.rs"]);
+        assert!(!query(3, "beta_marker").contains(&"src/beta.rs".to_string()), "a deleted file");
+        // A folder moved in whole reports as the folder alone: its files join at once, no rescan.
+        repo.write("lib/gamma.rs", "fn gamma_marker() {}\n");
+        repo.write("lib/ignored.txt", "gamma_marker in an ignored file\n");
+        changed(&["lib"]);
+        let found = query(4, "gamma_marker");
+        assert!(found.contains(&"lib/gamma.rs".to_string()), "a folder moved in is searched");
+        assert!(!found.contains(&"lib/ignored.txt".to_string()), "its ignored files stay out");
+        // A file inside a nested repository is the watcher's to report, and the engine's to find.
+        let nested = repo.path().join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        let init =
+            std::process::Command::new("git").arg("-C").arg(&nested).args(["init", "-q"]).output();
+        assert!(init.unwrap().status.success());
+        repo.write("vendor/lib/eps.rs", "fn eps_marker() {}\n");
+        changed(&["vendor/lib/eps.rs"]);
+        assert!(eventually(250, "eps_marker", "vendor/lib/eps.rs"), "a nested repo's file");
+        // Lost events rescan the worktree.
+        repo.write("src/delta.rs", "fn delta_marker() {}\n");
+        job_tx.send(SearchJob::Rescan).unwrap();
+        assert!(eventually(300, "delta_marker", "src/delta.rs"), "a rescan finds what was missed");
+        let before = all_paths(repo.path());
 
         job_tx.send(SearchJob::Track { path: "src/alpha.rs".into() }).unwrap();
         drop(job_tx);
@@ -5676,8 +6024,10 @@ fn the_base_picker_opens_on_every_scope_without_a_flag_and_a_pick_switches_to_br
         app.branch_base.winner.as_ref().map(herdr_reviewr::git::ResolvedBase::name),
         Some("dev")
     );
+    assert_eq!(app.watched_refs(), ["refs/heads/dev".to_string()].into(), "its moves report");
 
     app.set_scope(Scope::Uncommitted).unwrap();
+    assert!(app.watched_refs().is_empty(), "off the branch scope, no base to follow");
     assert!(
         app.footer_bands().iter().any(|&(a, b)| a == FooterAction::BasePick && b == Band::Go),
         "the go band carries the key on every scope"
@@ -7486,10 +7836,13 @@ fn a_stale_build_for_a_replaced_pick_is_discarded() {
     press(&mut app, &keymap, KeyCode::Char('j'));
     press(&mut app, &keymap, KeyCode::Enter);
     assert_eq!(app.commit_pick, Some(herdr_reviewr::model::CommitPick::single(&shas[2])));
-    assert!(herdr_reviewr::land_world_completion(&mut app, stale, 3));
+    let landing = herdr_reviewr::land_world_completion(&mut app, stale, &live(3));
+    assert!(
+        matches!(landing, herdr_reviewr::Landing::Discarded(_)),
+        "its paths go back to the pacer: {landing:?}"
+    );
     assert_eq!(changed_paths(&app), ["two.rs"], "the old pick's build never paints");
     assert_eq!(app.pick_status.as_ref().unwrap().subject, "two");
-    assert!(app.world_request.is_some(), "and a fresh build is requested");
 }
 
 #[test]
@@ -9537,7 +9890,10 @@ fn the_diff_agrees_with_git_diff_under_any_line_ending_rule() {
 
         // `last-turn` reads the baseline against its changeset's snapshot.
         enter_tab(&mut app, herdr_reviewr::app::Tab::Changes);
-        app.sync_turn_baseline(Some(baseline));
+        app.sync_turn(herdr_reviewr::turn::TurnReport {
+            last: herdr_reviewr::turn::LastTurn::At(baseline),
+            ..Default::default()
+        });
         app.set_scope(Scope::LastTurn).unwrap();
         if want.is_empty() {
             assert!(changed_paths(&app).is_empty(), "{case} under last-turn");
@@ -9585,7 +9941,10 @@ fn a_last_turn_diff_of_an_untracked_file_shows_the_turns_edit() {
     r.write("notes.txt", "one\r\nTWO\r\n");
 
     let mut app = app_on(&r);
-    app.sync_turn_baseline(Some(baseline));
+    app.sync_turn(herdr_reviewr::turn::TurnReport {
+        last: herdr_reviewr::turn::LastTurn::At(baseline),
+        ..Default::default()
+    });
     app.set_scope(Scope::LastTurn).unwrap();
     assert_eq!(changed_paths(&app), ["notes.txt"]);
     app.select_file(0).unwrap();
@@ -9603,13 +9962,19 @@ fn a_file_diff_reads_the_trees_its_counts_came_from() {
     r.write("a.txt", "two\n");
     r.write("b.txt", "two\n");
     let mut app = app_on(&r);
-    app.sync_turn_baseline(Some(first));
+    app.sync_turn(herdr_reviewr::turn::TurnReport {
+        last: herdr_reviewr::turn::LastTurn::At(first),
+        ..Default::default()
+    });
     app.set_scope(Scope::LastTurn).unwrap();
     assert_eq!(changed_paths(&app), ["a.txt", "b.txt"]);
 
     r.write("b.txt", "three\n");
     let second = herdr_reviewr::git::snapshot_worktree(r.path()).unwrap();
-    app.sync_turn_baseline(Some(second));
+    app.sync_turn(herdr_reviewr::turn::TurnReport {
+        last: herdr_reviewr::turn::LastTurn::At(second),
+        ..Default::default()
+    });
     app.select_file(1).unwrap();
     assert_eq!(app.diff_path.as_deref(), Some("b.txt"));
     assert_eq!(change_rows(&app), ["-one", "+two"]);

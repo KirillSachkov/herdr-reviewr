@@ -44,7 +44,7 @@ GitLab, or Azure DevOps and never posts.
 
 ## Requirements
 
-- **herdr ≥ 0.9.0** (the plugin system).
+- **herdr ≥ 0.9.3** (the plugin system and its event socket).
 - **git** on `PATH`.
 - A **truecolor** terminal with Unicode box-drawing.
 - **macOS, Linux, or Windows.**
@@ -211,7 +211,6 @@ CLI flags on the pane command:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--poll <ms>` | `2000` | worktree poll interval (min `200`) |
 | `--base <ref>` | auto | base for `branch` scope, any rev, overrides the pick |
 | `--theme <name>` | `catppuccin` | UI + syntax theme (see below) |
 | `--wrap <on\|off>` | `on` | soft-wrap long diff lines (`w` toggles at runtime) |
@@ -223,8 +222,7 @@ Everything else lives in reviewr's config file:
 ```
 
 Create it if missing. It is reviewr's file. Settings in herdr's `~/.config/herdr/config.toml`
-never reach it. reviewr re-reads it on every refresh and toggle, so edits apply without a
-relaunch.
+never reach it. reviewr re-reads it whenever you save it, so edits apply without a relaunch.
 
 The file accepts these keys:
 
@@ -245,7 +243,7 @@ select  = ["v", "ㅍ"]
 ```
 
 A missing file or omitted key uses its default. An invalid file is rejected whole — the pane
-shows the error and recovers on the next refresh after you fix it.
+shows the error and recovers as soon as you save the fix.
 
 ### Theme
 
@@ -315,7 +313,7 @@ the editor git uses (`core.editor`). It knows vim, neovim, helix, emacs, nano, V
 forks, Zed, Sublime Text, JetBrains, Notepad++, and the rest of the usual set.
 
 A terminal editor takes the pane, and reviewr refreshes when you quit it. A window editor opens
-its own window, so the diff stays up and your save turns up in it on the next poll.
+its own window, so the diff stays up and your save shows up in it as soon as you save.
 
 Write the command yourself when you need to. `{file}` and `{line}` are reviewr's, everything
 else is your editor's:
@@ -477,15 +475,18 @@ The known constraints:
   the one you `cd`'d to. Toggle can open reviewr on the launch folder.
 - **Windows: no stable launch path** — layouts reference the plugin's own `bin` folder, since
   the `~/.local` links need symlink rights Windows doesn't grant by default.
+- **Network filesystems send no file events** — on macOS and Linux reviewr checks them every
+  five seconds instead. On Windows a network drive or a `\\wsl$` path can miss edits, so press
+  `r` to refresh.
 
 **herdr coupling**
 - **Send needs an agent in the workspace** — one agent takes the comments straight away, and
   several open a picker so you choose. With no agent, Send says so and keeps your comments.
 - **Send refuses an agent at a permission prompt** — the prompt would drop the paste. Your
   comments stay, so answer it and send again. A working agent takes them as usual.
-- **last turn relies on polling** (2 s default) — a turn that starts and finishes inside one
-  poll is missed, and the scope shows everything since the last *observed* turn start, your
-  own edits included.
+- **last turn is complete or empty** — when the agent's first write lands just as its turn
+  starts, reviewr can't tell it apart from the snapshot. The scope then shows nothing for that
+  turn and says why, rather than part of it.
 
 **PR tab (GitHub, GitLab, and Azure DevOps)**
 - **Read-only** — needs the forge's authenticated CLI (`gh`, `glab`, or `az`) and a
@@ -497,6 +498,13 @@ The known constraints:
 - **Mirrors the branch's *open* PR or MR** — merged or closed shows as history. Each comment
   surface caps at its newest 100 rows, with a `+more` marker naming the forge when there is
   more.
+
+**Refreshes**
+- **A pane in a background tab waits** — it picks up changes 30 seconds after they happen,
+  and at once when you switch back to it.
+- **Renames can pair differently for a moment** — after an edit reviewr re-reads only the
+  files that changed, so a rename may match a different file than a full read would. Press
+  `r` to read everything again.
 
 **Review model**
 - **Comments are in-memory and single-session** — closing the pane loses any you haven't sent

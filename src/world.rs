@@ -1,17 +1,15 @@
 //! The world snapshot: what one refresh derives from git alone, built on the caller or the worker.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 
 use anyhow::Result;
 
 use crate::app::Tab;
 use crate::file_list::Entry;
 use crate::git;
-use crate::herdr::AgentSample;
-use crate::model::{ChangedFile, CommitPick, Scope};
-use crate::turn::{TurnTracker, WorktreeState};
+use crate::model::{ChangeKind, ChangedFile, CommitPick, Scope};
 
 /// Everything the build reads; a snapshot lands only while the view still matches it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -32,7 +30,7 @@ pub struct WorldInput {
 }
 
 /// One refresh's result; the base rides along so the header and its changeset land together.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WorldSnapshot {
     pub changeset: Changeset,
     pub entries: Vec<Entry>,
@@ -41,6 +39,8 @@ pub struct WorldSnapshot {
     pub pick_status: Option<PickStatus>,
     /// `HEAD` at build time, the commit picker's key; `None` when unborn.
     pub head: Option<String>,
+    /// The paths a path-limited build re-read; `None` for a full build, which re-read everything.
+    pub touched: Option<BTreeSet<String>>,
 }
 
 /// What one build found the commit pick to be.
@@ -71,7 +71,7 @@ pub struct DiffEnds {
 }
 
 /// A scope's changed files by path and the ends they were diffed between, landed together.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Changeset {
     pub files: BTreeMap<String, ChangedFile>,
     /// `None` when the scope has nothing to diff: no baseline, base, or live pick.
@@ -88,12 +88,7 @@ pub struct ScopeBuild {
 
 /// Build the snapshot for `input`; the changeset is built on every tab.
 pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
-    build_at(input, None)
-}
-
-/// [`build`], reusing `written`, a worktree tree written this instant, as `last-turn`'s new end.
-fn build_at(input: &WorldInput, written: Option<String>) -> Result<WorldSnapshot> {
-    // Outside a repo, paint the quiet empty state, not an error every poll.
+    // Outside a repo, paint the quiet empty state, not an error every refresh.
     if !git::is_repo(&input.repo) {
         return Ok(WorldSnapshot {
             changeset: Changeset::default(),
@@ -101,19 +96,19 @@ fn build_at(input: &WorldInput, written: Option<String>) -> Result<WorldSnapshot
             branch_base: git::BaseStatus::default(),
             pick_status: None,
             head: None,
+            touched: None,
         });
     }
     // One read of HEAD serves the snapshot and the uncommitted diff's old end.
     let head = git::head_oid(&input.repo);
-    let ScopeBuild { branch_base, pick_status, changeset } =
-        scope_build(input, head.clone(), written)?;
+    let ScopeBuild { branch_base, pick_status, changeset } = scope_build(input, head.clone())?;
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
         Tab::AllFiles => all_files_entries(input, &changeset.files)?,
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changeset.files.values().map(Entry::from_changed).collect(),
     };
-    Ok(WorldSnapshot { changeset, entries, branch_base, pick_status, head })
+    Ok(WorldSnapshot { changeset, entries, branch_base, pick_status, head, touched: None })
 }
 
 /// The active scope's changeset and, on `branch`, its base.
@@ -121,23 +116,15 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     if !git::is_repo(&input.repo) {
         return Ok(ScopeBuild::default());
     }
-    scope_build(input, git::head_oid(&input.repo), None)
+    scope_build(input, git::head_oid(&input.repo))
 }
 
-/// [`build_changed`] against `head`, as the caller read it, inside a repo; `written`, a tree of
-/// the worktree written this instant, spares `last-turn` a second snapshot.
-fn scope_build(
-    input: &WorldInput,
-    head: Option<String>,
-    written: Option<String>,
-) -> Result<ScopeBuild> {
+/// [`build_changed`] against `head`, as the caller read it, inside a repo.
+fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
             Some(t) => {
-                let now = match written {
-                    Some(tree) => tree,
-                    None => git::snapshot_worktree(&input.repo)?,
-                };
+                let now = git::snapshot_worktree(&input.repo)?;
                 at_ends(&input.repo, DiffEnds { old: t.to_string(), new: Some(now) })
             }
             None => Ok(ScopeBuild::default()),
@@ -209,21 +196,14 @@ fn build_pick(repo: &Path, pick: &CommitPick) -> Result<ScopeBuild> {
     Ok(ScopeBuild { pick_status: Some(PickStatus { verdict, subject, count }), ..at })
 }
 
-/// The persisted turn baseline for `repo`, if any.
-pub fn seed_baseline(repo: &std::path::Path) -> Option<String> {
-    git::read_baseline_ref(repo)
-}
-
 /// The `All files` entries; an ignored directory is walked only once expanded.
 pub(crate) fn all_files_entries(
     input: &WorldInput,
     changed: &BTreeMap<String, ChangedFile>,
 ) -> Result<Vec<Entry>> {
-    let to_entry = |w: git::WorktreeEntry| Entry {
-        annotation: changed.get(&w.path).cloned(),
-        path: w.path,
-        ignored: w.ignored,
-        is_dir: w.is_dir,
+    let to_entry = |w: git::WorktreeEntry| {
+        let annotation = changed.get(&w.path).cloned();
+        Entry::from_worktree(w, annotation)
     };
     let mut entries: Vec<Entry> = git::all_files(&input.repo)?.into_iter().map(&to_entry).collect();
     let mut i = 0;
@@ -235,157 +215,223 @@ pub(crate) fn all_files_entries(
         }
         i += 1;
     }
+    // Sorted by path, which a path-limited rebuild merges into in one pass.
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    entries.dedup_by(|a, b| a.path == b.path);
     Ok(entries)
 }
 
-/// Turn tracking on the worker, so a snapshot always rides the sample that saw its edge.
-#[derive(Debug)]
-pub struct TurnHost {
-    tracker: TurnTracker,
-    repo: PathBuf,
-    /// The reviewed worktree's [`canonical`] root, which a member's top level equals.
-    root: PathBuf,
-    /// Each agent `cwd` with a resolved top level, mapped to whether it is a member.
-    resolved: HashMap<String, bool>,
-}
-
-/// One sample's outcome: whether a turn ended, and whether agents are present.
-#[derive(Clone, Debug, Default)]
-pub struct TurnReport {
-    pub ended: bool,
-    /// `None` when the enumeration failed or a member didn't resolve, so the reader keeps what it knew.
-    pub agents_present: Option<bool>,
-    /// The worktree tree the sample wrote, which its job's `last-turn` build reuses.
-    pub written: Option<String>,
-}
-
-/// An agent's place in the worktree; `Unknown` holds the poll instead of counting it out.
-enum Membership {
-    Member,
-    NotMember,
-    Unknown,
-}
-
-/// The agent's cwd when absolute: `git -C` would resolve a relative one against reviewr's own.
-fn worktree_cwd(cwd: Option<&str>) -> Option<&str> {
-    cwd.filter(|c| Path::new(c).is_absolute())
-}
-
-/// `path` as the OS resolves it, so two spellings of one directory compare equal.
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Fold the members' statuses, or `None` when any membership is undetermined.
-fn classify(
-    samples: &[AgentSample],
-    mut member: impl FnMut(&AgentSample) -> Membership,
-) -> Option<(bool, WorktreeState)> {
-    let mut members = Vec::new();
-    for sample in samples {
-        match member(sample) {
-            Membership::Member => members.push(sample.status),
-            Membership::NotMember => {}
-            Membership::Unknown => return None,
+/// What a narrow re-read must also cover so git pairs renames as a full build would: both sides
+/// of every rename it touches, and the deletions and additions it could pair with. `None` past the cap.
+fn rename_partners(
+    last: &BTreeMap<String, ChangedFile>,
+    paths: &BTreeSet<String>,
+    fresh: &[ChangedFile],
+) -> Option<BTreeSet<String>> {
+    let found =
+        |kind| fresh.iter().any(|f: &ChangedFile| f.kind == kind || f.kind == ChangeKind::Renamed);
+    let (added, deleted) = (found(ChangeKind::Added), found(ChangeKind::Deleted));
+    let mut partners = BTreeSet::new();
+    for f in last.values() {
+        let touched = f.touched_by(paths);
+        let pairs = match f.kind {
+            ChangeKind::Deleted => added,
+            ChangeKind::Added => deleted,
+            ChangeKind::Renamed => added || deleted,
+            _ => false,
+        };
+        if (touched && f.previous_path.is_some()) || (pairs && !git::covered(paths, &f.path)) {
+            partners.insert(f.path.clone());
+            partners.extend(f.previous_path.clone());
         }
     }
-    Some((!members.is_empty(), WorktreeState::fold(members)))
+    partners.retain(|p| !paths.contains(p));
+    let all: Vec<String> = paths.iter().chain(&partners).cloned().collect();
+    git::fits_command_line(&all).then_some(partners)
 }
 
-impl TurnHost {
-    /// Resume the persisted baseline of `repo`, which must be the git top level.
-    pub fn open(repo: PathBuf) -> Self {
-        let tracker = TurnTracker::with_baseline(seed_baseline(&repo));
-        Self { tracker, root: canonical(&repo), repo, resolved: HashMap::new() }
+/// Re-read only `paths` against `last`, a build of the same input, widened to rename partners.
+/// `None` when that reaches past the cap: only a full build is right.
+fn rebuild_paths(
+    input: &WorldInput,
+    last: &WorldSnapshot,
+    paths: &BTreeSet<String>,
+) -> Option<Result<WorldSnapshot>> {
+    let (fresh, ends) = match read_paths(input, last, paths)? {
+        Ok(read) => read,
+        Err(e) => return Some(Err(e)),
+    };
+    let partners = rename_partners(&last.changeset.files, paths, &fresh)?;
+    if partners.is_empty() {
+        return Some(merge_paths(input, last, paths, fresh, ends));
     }
+    let wide: BTreeSet<String> = paths.union(&partners).cloned().collect();
+    let (fresh, ends) = match read_paths(input, last, &wide)? {
+        Ok(read) => read,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(merge_paths(input, last, &wide, fresh, ends))
+}
 
-    pub fn baseline(&self) -> Option<&str> {
-        self.tracker.baseline()
-    }
-
-    /// Sample the agents over the herdr CLI and advance the baseline.
-    pub fn sample(&mut self) -> TurnReport {
-        self.observe_agents(crate::herdr::agent_samples().ok().as_deref())
-    }
-
-    /// Advance the baseline from one enumeration; `None`, a failed one, holds the last state.
-    pub fn observe_agents(&mut self, samples: Option<&[AgentSample]>) -> TurnReport {
-        let Some(samples) = samples else {
-            return TurnReport::default();
-        };
-        // An unresolved member holds the sample, as a failed enumeration does.
-        let Some((present, state)) = classify(samples, |s| self.membership(s.cwd.as_deref()))
-        else {
-            return TurnReport::default();
-        };
-        let (ended, written) = self.observe(state);
-        TurnReport { ended, agents_present: Some(present), written }
-    }
-
-    /// An agent's place by git top level: a subdirectory is a member, a sibling worktree is not.
-    fn membership(&mut self, cwd: Option<&str>) -> Membership {
-        let Some(cwd) = worktree_cwd(cwd) else {
-            return Membership::NotMember;
-        };
-        if let Some(&member) = self.resolved.get(cwd) {
-            return if member { Membership::Member } else { Membership::NotMember };
+/// The changed files under `paths` as `last`'s scope reads them, and the ends they diff between.
+/// `None` when last-turn's re-read files pass the cap.
+fn read_paths(
+    input: &WorldInput,
+    last: &WorldSnapshot,
+    paths: &BTreeSet<String>,
+) -> Option<Result<(Vec<ChangedFile>, Option<DiffEnds>)>> {
+    let ends = last.changeset.ends.clone();
+    let batch: Vec<String> = paths.iter().cloned().collect();
+    let read = match (&ends, input.scope) {
+        // The pick reads committed trees: a worktree batch changes nothing in it.
+        (None, _) | (_, Scope::Commits) => Ok((Vec::new(), ends)),
+        (Some(DiffEnds { old, new: None }), _) => {
+            git::changed_from_in(&input.repo, old, &batch).map(|files| (files, ends.clone()))
         }
-        match git::worktree_of(Path::new(cwd)) {
-            // A resolved root never moves, so it is cached.
-            git::Worktree::Root(top) => {
-                let member = canonical(&top) == self.root;
-                self.resolved.insert(cwd.to_string(), member);
-                if member { Membership::Member } else { Membership::NotMember }
+        // The new end is last's tree with `paths` re-read, which a full snapshot would equal.
+        (Some(DiffEnds { old, new: Some(new) }), _) => {
+            match git::snapshot_worktree_in(&input.repo, new, &batch) {
+                Ok(None) => return None,
+                Ok(Some(tree)) => git::changed_between_in(&input.repo, old, &tree, &batch)
+                    .map(|files| (files, Some(DiffEnds { old: old.clone(), new: Some(tree) }))),
+                Err(e) => Err(e),
             }
-            // Not cached: a directory can become a worktree later.
-            git::Worktree::Outside => Membership::NotMember,
-            // git could not run: hold, as a failed enumeration does.
-            git::Worktree::Unknown => Membership::Unknown,
         }
-    }
+    };
+    Some(read)
+}
 
-    /// Advance the baseline from one worktree state: whether a turn ended, and the tree written.
-    fn observe(&mut self, state: WorktreeState) -> (bool, Option<String>) {
-        let transition = self.tracker.observe(state);
-        if transition.started {
-            match git::snapshot_worktree(&self.repo) {
-                // A fresh candidate cannot have diverged yet; the next poll checks.
-                Ok(sha) => {
-                    self.tracker.set_candidate(sha.clone());
-                    return (transition.ended, Some(sha));
+/// Merge a path-limited re-read into `last`: what `paths` covers comes from `fresh`.
+fn merge_paths(
+    input: &WorldInput,
+    last: &WorldSnapshot,
+    paths: &BTreeSet<String>,
+    fresh: Vec<ChangedFile>,
+    ends: Option<DiffEnds>,
+) -> Result<WorldSnapshot> {
+    let files: BTreeMap<String, ChangedFile> = if input.scope == Scope::Commits {
+        last.changeset.files.clone()
+    } else {
+        let kept = last.changeset.files.values().filter(|f| !f.touched_by(paths));
+        kept.cloned().chain(fresh).map(|f| (f.path.clone(), f)).collect()
+    };
+    let entries = match input.tab {
+        Tab::AllFiles => {
+            let batch: Vec<String> = paths.iter().cloned().collect();
+            let annotate = |path: &str| files.get(path).cloned();
+            let mut fresh: Vec<Entry> = git::all_files_in(&input.repo, &batch)?
+                .into_iter()
+                .map(|w| {
+                    let annotation = annotate(&w.path);
+                    Entry::from_worktree(w, annotation)
+                })
+                .collect();
+            fresh.sort_by(|a, b| a.path.cmp(&b.path));
+            // Both sides are sorted: one pass keeps the order, the fresh entry winning a tie.
+            let kept = last.entries.iter().filter(|e| !git::covered(paths, &e.path));
+            let mut entries = Vec::with_capacity(last.entries.len() + fresh.len());
+            let mut fresh = fresh.into_iter().peekable();
+            for e in kept {
+                while fresh.peek().is_some_and(|f| f.path <= e.path) {
+                    entries.extend(fresh.next());
                 }
-                Err(e) => logln!("turn snapshot failed: {e}"),
-            }
-        }
-        // Full snapshots compare, so a new untracked file counts as a change.
-        let Some(candidate) = self.tracker.candidate().map(str::to_string) else {
-            return (transition.ended, None);
-        };
-        match git::snapshot_worktree(&self.repo) {
-            Ok(now) => {
-                if now != candidate {
-                    self.tracker.promote();
-                    if let Err(e) = git::write_baseline_ref(&self.repo, &candidate) {
-                        logln!("turn baseline ref write failed: {e}");
-                    }
+                if entries.last().is_none_or(|l: &Entry| l.path != e.path) {
+                    entries.push(Entry { annotation: annotate(&e.path), ..e.clone() });
                 }
-                (transition.ended, Some(now))
             }
-            Err(e) => {
-                logln!("turn divergence check failed: {e}");
-                (transition.ended, None)
+            entries.extend(fresh);
+            entries
+        }
+        _ => files.values().map(Entry::from_changed).collect(),
+    };
+    Ok(WorldSnapshot {
+        changeset: Changeset { files, ends },
+        entries,
+        branch_base: last.branch_base.clone(),
+        pick_status: last.pick_status.clone(),
+        head: last.head.clone(),
+        touched: Some(paths.clone()),
+    })
+}
+
+/// What a refresh re-reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refresh {
+    /// Everything.
+    Full,
+    /// Some worktree paths; with `index`, a full build too if what the index stages changed.
+    Paths { paths: BTreeSet<String>, index: bool },
+}
+
+impl Default for Refresh {
+    fn default() -> Self {
+        Self::Paths { paths: BTreeSet::new(), index: false }
+    }
+}
+
+impl Refresh {
+    /// Some worktree paths, past the command-line cap a full build.
+    pub fn paths(paths: impl IntoIterator<Item = String>) -> Self {
+        Self::Paths { paths: paths.into_iter().collect(), index: false }.settled()
+    }
+
+    /// Whether it re-reads nothing.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Paths { paths, index: false } if paths.is_empty())
+    }
+
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// The paths it re-reads; `None` for a full build.
+    pub fn named_paths(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            Self::Paths { paths, .. } => Some(paths),
+            Self::Full => None,
+        }
+    }
+
+    /// What one watcher batch asks for: a rescan, or any git change but an index rewrite, moves
+    /// what every path diffs against, so only a full build is right.
+    pub fn from_batch(batch: &crate::watch::Batch) -> Self {
+        use crate::watch::GitChange;
+        if batch.rescan || batch.git.iter().any(|g| *g != GitChange::Index) {
+            return Self::Full;
+        }
+        let index = batch.git.contains(&GitChange::Index);
+        Self::Paths { paths: batch.worktree.clone(), index }.settled()
+    }
+
+    /// Fold a later request in: anything full stays full.
+    pub fn absorb(&mut self, other: Refresh) {
+        let merged = match (std::mem::take(self), other) {
+            (Self::Paths { mut paths, index }, Self::Paths { paths: more, index: also }) => {
+                paths.extend(more);
+                Self::Paths { paths, index: index || also }
             }
+            _ => Self::Full,
+        };
+        *self = merged.settled();
+    }
+
+    /// Paths past the command-line cap make it full.
+    fn settled(self) -> Self {
+        match self {
+            Self::Paths { paths, .. } if !git::fits_command_line(&paths) => Self::Full,
+            other => other,
         }
     }
 }
 
 /// One queued refresh's attributes, accumulated on `App` until the loop dispatches it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldRequest {
-    /// Sample the agents in the worktree — set by the poll alone.
-    pub sample_turn: bool,
     /// Re-reveal the cursor when the result lands — user-initiated switches only.
     pub reveal: bool,
+    pub refresh: Refresh,
+    /// Only the pacer asked for it: it spends the budget. The reviewer's work never does.
+    pub background: bool,
 }
 
 /// One refresh request; the completion echoes its tag.
@@ -393,42 +439,56 @@ pub struct WorldRequest {
 pub struct WorldJob {
     pub generation: u64,
     pub input: WorldInput,
-    /// Only polls sample the agents, so herdr calls track the poll alone.
-    pub sample_turn: bool,
-    /// Whether the result re-reveals the cursor: a user's switch does, a poll never.
+    /// Whether the result re-reveals the cursor: a user's switch does, a background one never.
     pub reveal: bool,
+    pub refresh: Refresh,
 }
 
-/// A finished job; no turn without a sample, no snapshot on the `PR` tab.
+/// A finished job; no snapshot on the `PR` tab.
 #[derive(Debug)]
 pub struct WorldCompletion {
     pub generation: u64,
     pub input: WorldInput,
     pub reveal: bool,
-    pub turn: Option<TurnReport>,
     pub snapshot: Option<Result<WorldSnapshot>>,
+    /// What the job re-read, so a failure can retry exactly that.
+    pub refresh: Refresh,
+    /// How long the build took: the pacing budget's measure, which bounds its git's CPU.
+    pub took: std::time::Duration,
 }
 
-/// Run the world worker; queued requests coalesce into the newest, keeping their flags.
+/// Run the world worker for `repo`; queued requests coalesce into the newest, keeping a reveal.
 pub fn spawn(
-    mut host: TurnHost,
+    repo: PathBuf,
     rx: Receiver<WorldJob>,
-    tx: Sender<WorldCompletion>,
+    tx: crate::wake::Sender<WorldCompletion>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("world".into())
         .spawn(move || {
-            git::sweep_dead_copies(&host.repo);
+            git::sweep_dead_copies(&repo);
+            let mut worker = Worker::default();
             while let Ok(mut job) = rx.recv() {
                 while let Ok(next) = rx.try_recv() {
-                    job = WorldJob {
-                        sample_turn: job.sample_turn || next.sample_turn,
-                        reveal: job.reveal || next.reveal,
-                        ..next
-                    };
+                    let mut refresh = job.refresh;
+                    refresh.absorb(next.refresh);
+                    job = WorldJob { reveal: job.reveal || next.reveal, refresh, ..next };
                 }
-                let turn = job.sample_turn.then(|| host.sample());
-                if tx.send(complete(&host, job, turn)).is_err() {
+                let started = std::time::Instant::now();
+                let snapshot = if job.input.tab.is_file_tab() {
+                    worker.refresh(&job.input, job.refresh.clone())
+                } else {
+                    None
+                };
+                let done = WorldCompletion {
+                    generation: job.generation,
+                    input: job.input,
+                    reveal: job.reveal,
+                    snapshot,
+                    refresh: job.refresh,
+                    took: started.elapsed(),
+                };
+                if tx.send(done).is_err() {
                     break;
                 }
             }
@@ -436,131 +496,110 @@ pub fn spawn(
         .expect("spawn world worker")
 }
 
-/// Finish `job` after its sample, `turn`: the build reuses the worktree tree that sample wrote.
-fn complete(host: &TurnHost, mut job: WorldJob, turn: Option<TurnReport>) -> WorldCompletion {
-    job.input.turn_baseline = host.baseline().map(str::to_string);
-    let written = turn.as_ref().and_then(|t| t.written.clone());
-    let snapshot = job.input.tab.is_file_tab().then(|| build_at(&job.input, written));
-    WorldCompletion {
-        generation: job.generation,
-        input: job.input,
-        reveal: job.reveal,
-        turn,
-        snapshot,
+/// What the worker keeps between jobs: its last build, and what the index staged when it ran.
+#[derive(Default)]
+struct Worker {
+    last: Option<(WorldInput, WorldSnapshot)>,
+    staged: Option<u64>,
+}
+
+impl Worker {
+    /// Run one refresh: only its paths when the last build is of the same input, else in full.
+    /// `None` when nothing needs re-reading.
+    fn refresh(
+        &mut self,
+        input: &WorldInput,
+        mut refresh: Refresh,
+    ) -> Option<Result<WorldSnapshot>> {
+        // A pick reads committed trees: on `Changes`, a worktree or index change moves nothing in it.
+        let pick_only = input.scope == Scope::Commits && input.tab == Tab::Changes;
+        if refresh.is_empty() || (pick_only && !refresh.is_full()) {
+            return None;
+        }
+        // Read before any build, so a stage landing during it reads as new next time.
+        let mut fingerprint = None;
+        if let Refresh::Paths { index: true, .. } = refresh {
+            let now = git::staged_fingerprint(&input.repo).ok();
+            if now.is_none() || now != self.staged {
+                refresh = Refresh::Full;
+                fingerprint = Some(now);
+            }
+        }
+        // An expanded ignored directory lists from disk, so a batch inside one rebuilds it whole.
+        let in_expanded = |p: &String| {
+            input.toggled_dirs.iter().any(|d| git::under_or_eq(p, d) || git::under_or_eq(d, p))
+        };
+        let last = self.last.as_ref().filter(|(of, _)| of == input).map(|(_, built)| built);
+        if let Some(last) = last
+            && let Refresh::Paths { paths, .. } = &refresh
+            && !paths.iter().any(in_expanded)
+        {
+            if paths.is_empty() {
+                return None;
+            }
+            match rebuild_paths(input, last, paths) {
+                Some(Ok(built)) => {
+                    self.last = Some((input.clone(), built.clone()));
+                    return Some(Ok(built));
+                }
+                // A failed narrow read is retried at once as a full build.
+                Some(Err(e)) => logln!("path-limited refresh failed, rebuilding in full: {e:#}"),
+                None => {}
+            }
+        }
+        let fingerprint = fingerprint.unwrap_or_else(|| git::staged_fingerprint(&input.repo).ok());
+        let built = build(input);
+        match &built {
+            Ok(built) => {
+                self.staged = fingerprint;
+                self.last = Some((input.clone(), built.clone()));
+            }
+            // A failed build saw nothing: the next one reads everything again.
+            Err(_) => self.last = None,
+        }
+        Some(built)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Membership, classify, worktree_cwd};
-    use crate::herdr::AgentSample;
-    use crate::turn::{Status, WorktreeState};
+    use super::Refresh;
+    use crate::watch::{Batch, GitChange};
 
-    #[test]
-    fn a_last_turn_build_reuses_the_tree_its_sample_wrote() {
-        let (dir, git) = crate::test_support::test_repo();
-        let crate::git::Worktree::Root(root) = crate::git::worktree_of(dir.path()) else {
-            panic!("a fresh repository resolves to a worktree root");
-        };
-        std::fs::write(root.join("a.txt"), "one\n").unwrap();
-        git(&["add", "-A"]);
-        git(&["commit", "-q", "-m", "init"]);
-        let baseline = crate::git::snapshot_worktree(&root).unwrap();
-        crate::git::write_baseline_ref(&root, &baseline).unwrap();
-        std::fs::write(root.join("a.txt"), "two\n").unwrap();
-        let mut host = super::TurnHost::open(root.clone());
-        // A resting sample, then a working one: the turn's start snapshots the worktree.
-        host.observe_agents(Some(&[]));
-        let turn = host.observe_agents(Some(&[working_at(&root.to_string_lossy())]));
-        std::fs::write(root.join("b.txt"), "later\n").unwrap();
-        let job = |generation| super::WorldJob {
-            generation,
-            input: super::WorldInput {
-                repo: root.clone(),
-                tab: crate::app::Tab::Changes,
-                scope: crate::model::Scope::LastTurn,
-                base: None,
-                base_epoch: 0,
-                turn_baseline: None,
-                commit_pick: None,
-                toggled_dirs: std::collections::HashSet::new(),
-            },
-            sample_turn: true,
-            reveal: false,
-        };
-        let paths = |done: super::WorldCompletion| -> Vec<String> {
-            done.snapshot.unwrap().unwrap().changeset.files.into_keys().collect()
-        };
-        assert_eq!(paths(super::complete(&host, job(1), Some(turn))), ["a.txt"]);
-        // A job without a sample has no tree to reuse, so it snapshots the worktree now.
-        assert_eq!(paths(super::complete(&host, job(2), None)), ["a.txt", "b.txt"]);
-    }
-
-    fn working_at(cwd: &str) -> AgentSample {
-        AgentSample { cwd: Some(cwd.into()), status: Status::Working }
+    fn batch(git: &[GitChange], worktree: &[&str], rescan: bool) -> Batch {
+        Batch {
+            worktree: worktree.iter().map(|p| (*p).to_string()).collect(),
+            git: git.iter().copied().collect(),
+            rescan,
+            ..Batch::default()
+        }
     }
 
     #[test]
-    fn only_an_absolute_cwd_can_name_a_worktree() {
-        // A blank or relative cwd is rejected before any git call.
-        let abs = if cfg!(windows) { r"C:\abs\path" } else { "/abs/path" };
-        assert_eq!(worktree_cwd(Some(abs)), Some(abs));
-        assert_eq!(worktree_cwd(Some("relative/path")), None);
-        assert_eq!(worktree_cwd(Some("")), None);
-        assert_eq!(worktree_cwd(None), None);
-    }
-
-    /// An agent whose cwd spells the root in another case is a member.
-    #[cfg(windows)]
-    #[test]
-    fn an_agent_at_the_root_in_another_case_is_a_member() {
-        let (dir, _) = crate::test_support::test_repo();
-        let crate::git::Worktree::Root(root) = crate::git::worktree_of(dir.path()) else {
-            panic!("a fresh repository resolves to a worktree root");
-        };
-        let mut host = super::TurnHost::open(root.clone());
-        let recased = root.to_string_lossy().to_ascii_uppercase();
-        assert_ne!(recased, root.to_string_lossy(), "the spelling really differs");
-        assert!(matches!(host.membership(Some(&recased)), Membership::Member));
-    }
-
-    #[test]
-    fn membership_decides_the_fold_and_undetermined_holds() {
-        // One working agent, resolved three ways.
-        let samples = [working_at("/w")];
-        assert_eq!(classify(&samples, |_| Membership::Unknown), None);
-        assert_eq!(
-            classify(&samples, |_| Membership::Member),
-            Some((true, WorktreeState::Working))
-        );
-        assert_eq!(
-            classify(&samples, |_| Membership::NotMember),
-            Some((false, WorktreeState::Resting))
-        );
-    }
-
-    #[test]
-    fn one_undetermined_member_holds_even_beside_a_resolved_one() {
-        // An unknown member holds the whole sample.
-        let samples = [working_at("/a"), working_at("/b")];
-        let held = classify(&samples, |s| match s.cwd.as_deref() {
-            Some("/b") => Membership::Unknown,
-            _ => Membership::Member,
-        });
-        assert_eq!(held, None);
-    }
-
-    #[test]
-    fn a_non_members_status_never_reaches_the_fold() {
-        // A resting member and a working sibling: only the member's status folds.
-        let samples = [
-            AgentSample { cwd: Some("/mine".into()), status: Status::Idle },
-            AgentSample { cwd: Some("/sibling".into()), status: Status::Working },
+    fn a_batch_asks_for_exactly_what_it_moved() {
+        let paths = |list: &[&str]| list.iter().map(|p| (*p).to_string()).collect();
+        let rows = [
+            ("a rescan", batch(&[], &["a"], true), Refresh::Full),
+            ("HEAD", batch(&[GitChange::Head], &["a"], false), Refresh::Full),
+            ("a ref", batch(&[GitChange::Refs], &[], false), Refresh::Full),
+            ("git config", batch(&[GitChange::Config], &[], false), Refresh::Full),
+            ("an ignore rule", batch(&[GitChange::IgnoreRules], &[], false), Refresh::Full),
+            ("an attribute rule", batch(&[GitChange::Attributes], &[], false), Refresh::Full),
+            ("another pane's pick", batch(&[GitChange::ReviewrRefs], &[], false), Refresh::Full),
+            (
+                "an index rewrite with paths",
+                batch(&[GitChange::Index], &["a"], false),
+                Refresh::Paths { paths: paths(&["a"]), index: true },
+            ),
+            (
+                "worktree paths alone",
+                batch(&[], &["a", "b/c"], false),
+                Refresh::Paths { paths: paths(&["a", "b/c"]), index: false },
+            ),
+            ("the config alone", Batch { config: true, ..Batch::default() }, Refresh::default()),
         ];
-        let folded = classify(&samples, |s| match s.cwd.as_deref() {
-            Some("/sibling") => Membership::NotMember,
-            _ => Membership::Member,
-        });
-        assert_eq!(folded, Some((true, WorktreeState::Resting)));
+        for (name, batch, expected) in rows {
+            assert_eq!(Refresh::from_batch(&batch), expected, "{name}");
+        }
     }
 }

@@ -397,8 +397,8 @@ fn manifest_runs_the_binary_directly_for_every_pane_action_and_event() {
             .unwrap()
             .parse()
             .unwrap();
-    // 0.9.0 first resolves a relative pane `command[0]` against the plugin root.
-    assert_eq!(manifest["min_herdr_version"].as_str(), Some("0.9.0"));
+    // 0.9.3 adds the event socket; 0.9.0 already resolves a relative pane `command[0]` against the plugin root.
+    assert_eq!(manifest["min_herdr_version"].as_str(), Some("0.9.3"));
     let commands = |section: &str| -> Vec<(toml::Table, Vec<String>)> {
         manifest[section]
             .as_array()

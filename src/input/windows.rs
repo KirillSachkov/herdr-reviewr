@@ -13,6 +13,7 @@ use ratatui::crossterm::event::{
 use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_INPUT;
 
 use super::vt::{Console as VtConsole, Record, VtInput};
+use crate::wake::{Wake, Woke};
 
 /// The console and parser state; `None` while released, so an editor's leftovers never parse.
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
@@ -26,6 +27,12 @@ struct Reader {
 struct WinConsole {
     handle: Handle,
     console: Console,
+}
+
+/// The console for one wait that a [`Wake`] can end too.
+struct Waking<'a> {
+    console: &'a mut WinConsole,
+    wake: &'a Wake,
 }
 
 /// VT input, plus SGR mouse reports and disambiguated keys, after crossterm's own claims.
@@ -50,7 +57,17 @@ pub(crate) fn release() {
 
 /// Whether an event is ready within `timeout`, as `crossterm::event::poll` answers it.
 pub(crate) fn poll(timeout: Duration) -> io::Result<bool> {
-    with_reader(|reader| reader.vt.poll(&mut reader.console, Some(Instant::now() + timeout)))
+    let deadline = Some(Instant::now() + timeout);
+    with_reader(|reader| Ok(reader.vt.poll(&mut reader.console, deadline)? == Woke::Input))
+}
+
+/// Sleep until an event is ready, `wake` is woken, or `timeout` (`None` waits for ever).
+pub(crate) fn wait(wake: &Wake, timeout: Option<Duration>) -> io::Result<Woke> {
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
+    with_reader(|reader| {
+        let mut waking = Waking { console: &mut reader.console, wake };
+        reader.vt.poll(&mut waking, deadline)
+    })
 }
 
 /// The next event, blocking until there is one, as `crossterm::event::read` answers it.
@@ -70,7 +87,8 @@ fn with_reader<T>(f: impl FnOnce(&mut Reader) -> io::Result<T>) -> io::Result<T>
     if guard.is_none() {
         let handle = Handle::current_in_handle()?;
         let console = Console::from(handle.clone());
-        *guard = Some(Reader { console: WinConsole { handle, console }, vt: VtInput::default() });
+        let console = WinConsole { handle, console };
+        *guard = Some(Reader { console, vt: VtInput::default() });
     }
     f(guard.as_mut().expect("opened above"))
 }
@@ -80,8 +98,11 @@ impl VtConsole for WinConsole {
         Instant::now()
     }
 
-    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
-        wait_for_input(&self.handle, timeout)
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Woke> {
+        Ok(match crate::wake::sys::wait_any(&[self.raw()], timeout)? {
+            Some(_) => Woke::Input,
+            None => Woke::Deadline,
+        })
     }
 
     fn read(&mut self) -> io::Result<Vec<Record>> {
@@ -97,6 +118,32 @@ impl VtConsole for WinConsole {
     }
 }
 
+impl WinConsole {
+    fn raw(&self) -> std::os::windows::io::RawHandle {
+        (*self.handle).cast()
+    }
+}
+
+impl VtConsole for Waking<'_> {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Woke> {
+        let handles = [self.console.raw(), self.wake.sys().handle()];
+        // The console comes first: the lowest signaled handle wins, so input reads before a wake.
+        Ok(match crate::wake::sys::wait_any(&handles, timeout)? {
+            Some(0) => Woke::Input,
+            Some(_) => Woke::Woken,
+            None => Woke::Deadline,
+        })
+    }
+
+    fn read(&mut self) -> io::Result<Vec<Record>> {
+        self.console.read()
+    }
+}
+
 /// A key record's byte: only a press carries one, and a zero unit is a key sent as no byte.
 fn key_unit(key_down: bool, u_char: u16) -> Option<Record> {
     (key_down && u_char != 0).then_some(Record::Unit(u_char))
@@ -105,24 +152,6 @@ fn key_unit(key_down: bool, u_char: u16) -> Option<Record> {
 /// The buffer size counts from zero, and crossterm adds one to match unix.
 fn resized(x: i16, y: i16) -> Record {
     Record::Resize((i32::from(x) + 1) as u16, (i32::from(y) + 1) as u16)
-}
-
-/// Wait until the console has input or `timeout` passes; crossterm keeps its own wait private.
-#[allow(unsafe_code)]
-fn wait_for_input(handle: &Handle, timeout: Option<Duration>) -> io::Result<bool> {
-    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-    use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
-
-    // Rounded up, so a wait just short of its deadline sleeps instead of spinning.
-    let millis = timeout.map_or(INFINITE, |timeout| {
-        u32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(INFINITE - 1)
-    });
-    // SAFETY: `Handle` owns the open console handle for this call, which takes no pointers.
-    match unsafe { WaitForSingleObject((**handle).cast(), millis) } {
-        WAIT_OBJECT_0 => Ok(true),
-        WAIT_TIMEOUT => Ok(false),
-        _ => Err(io::Error::last_os_error()),
-    }
 }
 
 fn set_vt_input(on: bool) {

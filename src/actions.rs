@@ -237,7 +237,7 @@ impl Target {
         let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        let (ws, pane) = herdr::agent_env();
+        let herdr::PaneIds { workspace: ws, pane } = herdr::PaneIds::from_env();
         Ok(Self {
             ws: ws.ok_or_else(no_workspace)?,
             pane,

@@ -107,6 +107,14 @@ pub struct ChangedFile {
     pub new_size: Option<u64>,
 }
 
+impl ChangedFile {
+    /// Whether `paths` cover this file or the source it was renamed from.
+    pub fn touched_by<'a>(&self, paths: impl IntoIterator<Item = &'a String> + Clone) -> bool {
+        crate::git::covered(paths.clone(), &self.path)
+            || self.previous_path.as_deref().is_some_and(|p| crate::git::covered(paths, p))
+    }
+}
+
 /// Which side of the diff a comment's lines live on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {

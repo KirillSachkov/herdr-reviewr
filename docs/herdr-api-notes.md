@@ -38,7 +38,7 @@ command = ["bin/herdr-reviewr", "--action", "auto-open"]
 
 **Command resolution** (read from herdr source, `program_for_cwd` in `src/plugin_command.rs`).
 A relative `command[0]` holding a path separator joins the plugin root. Actions and events
-resolve this way from 0.8.0, and panes from 0.9.0, which is why the manifest asks for 0.9.0.
+resolve this way from 0.8.0, and panes from 0.9.0. The manifest asks for 0.9.3, which adds the event socket.
 Before that, a pane command resolved against the pane's cwd (the repo under review). On
 Windows the extension-less `bin/herdr-reviewr` still finds `bin\herdr-reviewr.exe`: Rust's
 `Command` appends `.exe` for actions and events, and herdr's pty launcher tries `PATHEXT` for

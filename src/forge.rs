@@ -98,7 +98,7 @@ fn extension_hint(forge: crate::git::Forge) -> Option<&'static str> {
     }
 }
 
-/// One pull request's state, read fresh from the forge each poll.
+/// One pull request's state, read fresh from the forge each fetch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct PrSnapshot {

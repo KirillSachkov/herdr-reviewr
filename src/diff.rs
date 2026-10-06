@@ -580,7 +580,7 @@ pub(crate) fn language_of(path: &str) -> Option<String> {
     Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_string)
 }
 
-/// Built `FileDiff`s by content, so an unchanged poll rebuilds nothing.
+/// Built `FileDiff`s by content, so an unchanged refresh rebuilds nothing.
 #[derive(Default, Debug)]
 pub struct DiffCache {
     entries: HashMap<String, (u64, FileDiff)>,

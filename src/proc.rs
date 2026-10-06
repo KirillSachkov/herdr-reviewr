@@ -54,9 +54,13 @@ fn resolve_on(path: &OsStr, name: &OsStr) -> Option<PathBuf> {
 /// Resolve one of reviewr's own tools: the common host bins first, then the inherited PATH.
 pub(crate) fn command(program: impl AsRef<OsStr>) -> Command {
     let program = program.as_ref();
+    // The idle check counts these: an idle pane starts no process.
+    logln!("spawn {}", program.to_string_lossy());
     let mut cmd =
         resolve_on(host_path(), program).map_or_else(|| Command::new(program), Command::new);
     cmd.env("PATH", host_path());
+    // No optional locks for any git the forge CLIs run either: a read never rewrites the index.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
     cmd
 }
 
@@ -185,6 +189,17 @@ mod tests {
 
     fn common() -> Vec<PathBuf> {
         COMMON_BINS.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn every_tool_runs_without_gits_optional_locks() {
+        let cmd = super::command("gh");
+        let locks = cmd.get_envs().find(|(k, _)| *k == "GIT_OPTIONAL_LOCKS").and_then(|(_, v)| v);
+        assert_eq!(
+            locks,
+            Some(std::ffi::OsStr::new("0")),
+            "a forge CLI's git never refreshes the index"
+        );
     }
 
     #[test]

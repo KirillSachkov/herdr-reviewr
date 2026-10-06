@@ -1410,7 +1410,10 @@ fn last_turn_without_an_agent_says_the_worktree_is_empty() {
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
     app.reload().unwrap();
-    app.sync_agents_present(Some(false));
+    app.sync_turn(herdr_reviewr::turn::TurnReport {
+        agents_present: Some(false),
+        ..Default::default()
+    });
     let out = render(&app);
     assert!(out.contains("[last turn]"), "the scope chip reads last turn");
     assert!(out.contains("no agent works here"), "the empty-worktree state shows");
@@ -1423,7 +1426,10 @@ fn last_turn_with_an_agent_and_no_turn_yet_waits_for_the_first() {
     r.commit_all("init");
     let mut app = App::new(r.path_buf(), Scope::LastTurn, None);
     app.reload().unwrap();
-    app.sync_agents_present(Some(true));
+    app.sync_turn(herdr_reviewr::turn::TurnReport {
+        agents_present: Some(true),
+        ..Default::default()
+    });
     let out = render(&app);
     assert!(out.contains("waiting for the first turn"), "the pre-turn state shows");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "herdr-reviewr"
-version = "0.45.0"
+version = "0.46.0"
 edition = "2024"
 rust-version = "1.97"
 description = "A terminal review pane for herdr: browse an agent's changes and send comments back to chat."
@@ -20,6 +20,13 @@ hex = "0.4"
 # The matcher fff-search scores with: the base picker ranks branch names by the same rule
 # as the search screen, over a plain string list.
 neo_frizbee = "0.13.3"
+# Already in the tree through fff-search. The watcher reads raw events: a debouncer crate ticks forever.
+notify = "=9.0.0-rc.5"
+# Already in the tree. Reads herdr's version against the minimum it needs.
+semver = "1.0.28"
+# Already in the tree through fff-search, which walks with it. Walks a folder that appears into the
+# search index, and on Linux the directories the watcher places a watch on.
+ignore = "0.4.33"
 # Pinned in the lockfile through ratatui's optional `palette` feature. WCAG contrast and OKLab
 # for the color roles, instead of hand-rolled matrices.
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
@@ -45,6 +52,13 @@ unicode-width = "0.2"
 # (so `az` finds `az.cmd`), and never the current directory for a bare name.
 which = "8.0.6"
 
+[target.'cfg(unix)'.dependencies]
+# Already in the tree through crossterm. The frame loop's wait on the terminal and the wake pipe,
+# and the watcher's check for a network filesystem.
+rustix = { version = "1.1.5", features = ["event", "fs", "termios"] }
+# Already in the tree through crossterm. Writes a window resize into the wake pipe.
+signal-hook = "0.3.18"
+
 [target.'cfg(windows)'.dependencies]
 # The Win32 clipboard, written as UTF-16 so non-ASCII survives (`clip.exe` mangles it). Text
 # only: no image support, so no image codecs enter the tree.
@@ -62,9 +76,9 @@ opener = "0.9.0"
 # the Windows reader parses the console's VT input with them (`src/input/vt.rs`).
 terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
-# `WaitForSingleObject` on the console input handle, the one call no safe wrapper offers. The
-# features are already on in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
+# The waits, events and pipe cancel no safe wrapper offers: the frame loop's wait on console input
+# and its wake event, and cancelling a herdr subscription's read. The features are already on in the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_IO", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # The Windows input parser's tests run on every OS (`src/input/vt.rs`).
@@ -72,8 +86,8 @@ terminput = "0.5.15"
 terminput-crossterm = "0.4.11"
 
 [lints.rust]
-# Deny, not forbid: the Windows input reader allows it for one console wait
-# (`src/input/windows.rs`).
+# Deny, not forbid: on Windows the frame loop's wait (`src/wake.rs`) and the herdr
+# subscription's cancel (`src/herdr.rs`) allow it.
 unsafe_code = "deny"
 unreachable_pub = "warn"
 missing_debug_implementations = "warn"

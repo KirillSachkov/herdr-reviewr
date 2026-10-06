@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.46.0] — 2026-10-06
+
+### Changed
+- **Quiet when nothing changes**: reviewr refreshes when the worktree, git or herdr changes, never on a timer. An idle pane starts no process (v0.45.0 started about 150 to 320 a minute).
+  Thanks [@mikebronner](https://github.com/mikebronner) ([#125](https://github.com/persiyanov/herdr-reviewr/issues/125), [#126](https://github.com/persiyanov/herdr-reviewr/pull/126)) and [@markusthoemmes](https://github.com/markusthoemmes) ([#63](https://github.com/persiyanov/herdr-reviewr/issues/63)).
+- **Hidden panes wait**: a pane on another tab refreshes 30s after a change, and at once when you look at it.
+- **Edits re-read only what changed**: a write refreshes its own paths, so a large repo stays cheap while an agent works.
+- **last turn follows herdr's events**: a turn starts when an agent starts working and counts once a file really changes. A turn whose first write races its snapshot shows empty and says why.
+- **Requires herdr 0.9.3.**
+
+### Fixed
+- **Short turns**: a turn that started and ended between two polls is no longer missed.
+- **A resized window repaints whole**: a monitor that drops and comes back no longer leaves the pane garbled until the next change.
+- **Opening settles at once**: a pane started without herdr's config folder in its environment no longer repaints with your scope and layout a moment after opening.
+
+### Removed
+- **`--poll`**: passing it says it was removed instead of reading its value as the repo path.
+
 ## [0.45.0] — 2026-10-05
 
 ### Added

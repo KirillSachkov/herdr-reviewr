@@ -46,6 +46,31 @@ jobs:
         if: runner.os != 'Windows'
         run: cargo build --release
 
+      # An idle pane wakes for nothing and starts nothing; an edit still reaches it.
+      - name: Idle check
+        if: runner.os != 'Windows'
+        run: python3 scripts/idle_check.py --binary target/release/herdr-reviewr
+
+  macos:
+    name: macos · watcher · idle check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install toolchain (pinned via rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@1.97.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      # FSEvents is the one backend the Linux and Windows jobs never exercise.
+      - name: Watcher tests
+        run: cargo test --test watch --test world_paths
+
+      - name: Idle check
+        run: |
+          cargo build --release
+          python3 scripts/idle_check.py --binary target/release/herdr-reviewr
+
   windows-plugin:
     name: windows · install · herdr smoke
     runs-on: windows-latest

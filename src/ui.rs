@@ -27,6 +27,23 @@ use crate::roles::{Fill, Ink};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
 use std::fmt::Write as _;
 
+/// Paint one frame, and say when an age it painted next reads differently, at most a minute out:
+/// the loop repaints then, so "5m" never stays up for an hour.
+pub fn render_frame(frame: &mut Frame, app: &App) -> Option<std::time::Duration> {
+    NEXT_AGE_CHANGE.with(std::cell::Cell::take);
+    render(frame, app);
+    age_repaint(NEXT_AGE_CHANGE.with(std::cell::Cell::take))
+}
+
+/// The wait before repainting ages that next change in `next` seconds.
+fn age_repaint(next: Option<u64>) -> Option<std::time::Duration> {
+    next.map(|next| std::time::Duration::from_secs(next.min(AGE_REPAINT_MAX)))
+}
+
+/// The longest an on-screen age waits for a repaint, whatever its unit: a slept laptop's clock
+/// jump, or a label read late, never stays wrong past it.
+const AGE_REPAINT_MAX: u64 = 60;
+
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
     // Link hit-testing resolves against the painted frame; each frame repaints its own.
@@ -2458,11 +2475,28 @@ pub fn relative_age(created_at: &str, now: SystemTime) -> String {
         return String::new();
     };
     let now = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
-    age_label((now - then).max(0) as u64)
+    // A stamp ahead of this clock reads "0s" until a second after the clock reaches it.
+    if now < then {
+        note_age_change((then - now) as u64 + 1);
+        return "0s".to_string();
+    }
+    age_label((now - then) as u64)
 }
 
-/// A compact age: `30s`, `5m`, `2h`, `3d`, `6w`, `2y`.
+thread_local! {
+    /// The soonest an age label painted this frame changes, in seconds ([`render_frame`]).
+    static NEXT_AGE_CHANGE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Keep the soonest a painted age changes, `next` seconds from now.
+fn note_age_change(next: u64) {
+    NEXT_AGE_CHANGE.with(|c| c.set(Some(c.get().map_or(next, |n| n.min(next)))));
+}
+
+/// A compact age: `30s`, `5m`, `2h`, `3d`, `6w`, `2y`. Seconds change each second, every larger
+/// unit on a minute boundary, so it notes the next one.
 pub fn age_label(secs: u64) -> String {
+    note_age_change(if secs < 60 { 1 } else { 60 - secs % 60 });
     match secs {
         s if s < 60 => format!("{s}s"),
         s if s < 3600 => format!("{}m", s / 60),
@@ -2476,6 +2510,50 @@ pub fn age_label(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stamp_ahead_of_this_clock_reads_now_until_a_second_past_it() {
+        let then = crate::forge::parse_iso("2026-06-27T12:00:00Z").unwrap() as u64;
+        let now = UNIX_EPOCH + std::time::Duration::from_secs(then - 30);
+        NEXT_AGE_CHANGE.with(std::cell::Cell::take);
+        assert_eq!(relative_age("2026-06-27T12:00:00Z", now), "0s");
+        let next = NEXT_AGE_CHANGE.with(std::cell::Cell::take);
+        assert_eq!(next, Some(31), "one repaint, when the label first reads 1s");
+    }
+
+    #[test]
+    fn an_age_label_knows_when_it_next_changes() {
+        // "30s" changes in a second, "5m" at the next minute; larger units are checked each minute.
+        let next = |secs| {
+            NEXT_AGE_CHANGE.with(std::cell::Cell::take);
+            let _ = age_label(secs);
+            NEXT_AGE_CHANGE.with(std::cell::Cell::take)
+        };
+        assert_eq!(next(30), Some(1));
+        assert_eq!(next(5 * 60 + 20), Some(40));
+        assert_eq!(next(3 * 86_400 + 10), Some(50));
+        NEXT_AGE_CHANGE.with(std::cell::Cell::take);
+        let _ = age_label(5 * 60 + 20);
+        let _ = age_label(30);
+        assert_eq!(NEXT_AGE_CHANGE.with(std::cell::Cell::take), Some(1), "the soonest one");
+    }
+
+    #[test]
+    fn a_frame_with_an_age_repaints_within_a_minute_and_one_without_never() {
+        let app = crate::app::App::new(
+            std::path::PathBuf::from("."),
+            crate::model::Scope::Uncommitted,
+            None,
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 5)).unwrap();
+        let mut due = Some(std::time::Duration::ZERO);
+        terminal.draw(|f| due = render_frame(f, &app)).unwrap();
+        assert_eq!(due, None, "no age on screen arms nothing");
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(age_repaint(Some(40)), Some(secs(40)), "a minute's label at its rollover");
+        assert_eq!(age_repaint(Some(86_390)), Some(secs(60)), "a days-old age within a minute");
+    }
 
     #[test]
     fn a_cr_marker_points_at_its_lines_last_char() {

@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::Event;
 
+use crate::wake::Woke;
+
 /// One console record the reader takes: a key's UTF-16 unit, or a resize.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Record {
@@ -13,10 +15,10 @@ pub(super) enum Record {
     Resize(u16, u16),
 }
 
-/// The console the reader polls: its clock, a wait for input, and a read of what is queued.
+/// The console the reader polls: its clock, a wait for input or a wake, and a read of what is queued.
 pub(super) trait Console {
     fn now(&self) -> Instant;
-    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool>;
+    fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Woke>;
     fn read(&mut self) -> io::Result<Vec<Record>>;
 }
 
@@ -60,27 +62,37 @@ impl VtInput {
         self.parse(false);
     }
 
-    /// Read `console` until an event parses or `deadline` passes; an open paste waits for its end.
+    /// Read `console` until an event parses (`Input`), a wake comes, or `deadline` passes; an open
+    /// paste waits for its end, its bytes kept here across a wake.
     pub(super) fn poll(
         &mut self,
         console: &mut impl Console,
         deadline: Option<Instant>,
-    ) -> io::Result<bool> {
+    ) -> io::Result<Woke> {
         loop {
             // Everything queued is read, then settled once, so a split sequence stays whole.
             let mut fed = false;
-            while console.wait(Some(Duration::ZERO))? {
-                fed |= self.take(console.read()?);
+            let mut woken = false;
+            loop {
+                match console.wait(Some(Duration::ZERO))? {
+                    Woke::Input => fed |= self.take(console.read()?),
+                    Woke::Woken => woken = true,
+                    Woke::Deadline => break,
+                }
             }
             if fed {
                 self.settle();
             }
             if !self.events.is_empty() {
-                return Ok(true);
+                return Ok(Woke::Input);
+            }
+            if woken {
+                return Ok(Woke::Woken);
             }
             let left = deadline.map(|deadline| deadline.saturating_duration_since(console.now()));
-            if !console.wait(left)? {
-                return Ok(false);
+            match console.wait(left)? {
+                Woke::Input => {}
+                other => return Ok(other),
             }
         }
     }
@@ -237,15 +249,17 @@ mod tests {
         );
     }
 
-    /// A console on a test-driven clock; each batch becomes readable at its own time.
+    /// A console on a test-driven clock; each batch becomes readable at its own time, and a wake
+    /// fires at its own.
     struct FakeConsole {
         now: Instant,
         batches: VecDeque<(Instant, Vec<Record>)>,
+        wakes: VecDeque<Instant>,
     }
 
     impl FakeConsole {
         fn new() -> Self {
-            Self { now: Instant::now(), batches: VecDeque::new() }
+            Self { now: Instant::now(), batches: VecDeque::new(), wakes: VecDeque::new() }
         }
 
         /// Queue `text` to arrive `after` from now, as one read.
@@ -260,16 +274,25 @@ mod tests {
             self.now
         }
 
-        fn wait(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
+        fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Woke> {
             let limit = timeout.map(|t| self.now + t);
-            match self.batches.front() {
-                Some((at, _)) if limit.is_none_or(|limit| *at <= limit) => {
-                    self.now = self.now.max(*at);
-                    Ok(true)
+            let due = |at: &Instant| limit.is_none_or(|limit| *at <= limit);
+            let input = self.batches.front().map(|(at, _)| *at).filter(due);
+            let wake = self.wakes.front().copied().filter(due);
+            match (input, wake) {
+                // Input first, as `WaitForMultipleObjects` reports the lowest signaled handle.
+                (Some(at), w) if w.is_none_or(|w| at <= w) => {
+                    self.now = self.now.max(at);
+                    Ok(Woke::Input)
+                }
+                (_, Some(at)) => {
+                    self.wakes.pop_front();
+                    self.now = self.now.max(at);
+                    Ok(Woke::Woken)
                 }
                 _ => {
                     self.now = limit.expect("an endless wait with nothing queued");
-                    Ok(false)
+                    Ok(Woke::Deadline)
                 }
             }
         }
@@ -289,8 +312,12 @@ mod tests {
         console.queue(Duration::ZERO, "\x1b[200~abc\r");
         console.queue(Duration::from_secs(5), "\nx\x1b[201~");
         let tick = Some(console.now + Duration::from_secs(1));
-        assert!(!vt.poll(&mut console, tick).unwrap(), "an open paste waits for its end");
-        assert!(vt.poll(&mut console, None).unwrap());
+        assert_eq!(
+            vt.poll(&mut console, tick).unwrap(),
+            Woke::Deadline,
+            "an open paste waits for its end"
+        );
+        assert_eq!(vt.poll(&mut console, None).unwrap(), Woke::Input);
         assert_eq!(drain(&mut vt), [Event::Paste("abc\r\nx".into())]);
     }
 
@@ -299,12 +326,12 @@ mod tests {
         let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
         console.queue(Duration::ZERO, "\x1b[200~ab");
         let at = Some(console.now);
-        assert!(!vt.poll(&mut console, at).unwrap());
+        assert_eq!(vt.poll(&mut console, at).unwrap(), Woke::Deadline);
         // A second's draw between polls, the rest of the paste queued meanwhile.
         console.now += Duration::from_secs(1);
         console.queue(Duration::ZERO, "cd\x1b[201~");
         let at = Some(console.now);
-        assert!(vt.poll(&mut console, at).unwrap());
+        assert_eq!(vt.poll(&mut console, at).unwrap(), Woke::Input);
         assert_eq!(drain(&mut vt), [Event::Paste("abcd".into())]);
     }
 
@@ -314,7 +341,28 @@ mod tests {
         console.queue(Duration::ZERO, "\x1b");
         console.queue(Duration::ZERO, "[A");
         let at = Some(console.now);
-        assert!(vt.poll(&mut console, at).unwrap());
+        assert_eq!(vt.poll(&mut console, at).unwrap(), Woke::Input);
         assert_eq!(drain(&mut vt), [key(KeyCode::Up, NONE)]);
+    }
+
+    #[test]
+    fn a_wake_ends_the_wait_and_an_open_paste_survives_it() {
+        let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
+        console.queue(Duration::ZERO, "\x1b[200~ab");
+        console.wakes.push_back(console.now + Duration::from_millis(10));
+        console.queue(Duration::from_millis(20), "cd\x1b[201~");
+        assert_eq!(vt.poll(&mut console, None).unwrap(), Woke::Woken, "a worker's wake ends it");
+        assert_eq!(vt.poll(&mut console, None).unwrap(), Woke::Input);
+        assert_eq!(drain(&mut vt), [Event::Paste("abcd".into())], "the paste stays whole");
+    }
+
+    #[test]
+    fn input_and_a_wake_together_read_the_input_first() {
+        let (mut vt, mut console) = (VtInput::default(), FakeConsole::new());
+        console.queue(Duration::ZERO, "j");
+        console.wakes.push_back(console.now);
+        // Input answers for both: after any return the loop drains every worker's channel.
+        assert_eq!(vt.poll(&mut console, None).unwrap(), Woke::Input);
+        assert_eq!(drain(&mut vt), [key(KeyCode::Char('j'), NONE)]);
     }
 }

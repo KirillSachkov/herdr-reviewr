@@ -3,38 +3,46 @@
 use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+
+/// What `--poll` says now, instead of reading its value as the repo path.
+const POLL_REMOVED: &str =
+    "--poll was removed: reviewr refreshes when something changes, not on a timer";
 
 /// Resolved runtime configuration.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub repo: PathBuf,
-    pub poll: Duration,
     pub base: Option<String>,
     pub theme: Option<String>,
     /// `Some(false)` when `--wrap off` is passed; `None` keeps the default (wrap on).
     pub wrap: Option<bool>,
     /// The plugin config directory, resolved once at startup.
     pub plugin_config_dir: Option<PathBuf>,
+    /// A flag reviewr no longer takes, said on the first frame so an old command line never
+    /// quietly does something else.
+    pub removed_flag: Option<String>,
 }
 
 impl Config {
     /// Parse the flags after argv\[0\]; the first non-flag argument is the repo path.
     pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Self {
         let mut repo: Option<PathBuf> = None;
-        let mut poll_ms: u64 = 2000;
         let mut base: Option<String> = None;
         let mut theme: Option<String> = None;
         let mut wrap: Option<bool> = None;
+        let mut removed_flag = None;
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             match arg.as_str() {
-                "--poll" => {
-                    if let Some(v) = it.next() {
-                        poll_ms = v.parse().unwrap_or(poll_ms);
-                    }
-                }
                 "--base" => base = it.next(),
+                // Removed, but its value is still no repo path.
+                "--poll" => {
+                    drop(it.next());
+                    removed_flag = Some(POLL_REMOVED.to_string());
+                }
+                other if other.starts_with("--poll=") => {
+                    removed_flag = Some(POLL_REMOVED.to_string());
+                }
                 "--theme" => theme = it.next(),
                 "--wrap" => wrap = it.next().map(|v| v != "off"),
                 other if !other.starts_with('-') => repo = Some(PathBuf::from(other)),
@@ -43,14 +51,7 @@ impl Config {
         }
         let repo =
             repo.or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."));
-        Self {
-            repo,
-            poll: Duration::from_millis(poll_ms.max(200)),
-            base,
-            theme,
-            wrap,
-            plugin_config_dir: None,
-        }
+        Self { repo, base, theme, wrap, plugin_config_dir: None, removed_flag }
     }
 
     /// Parse from the real process arguments.
@@ -671,7 +672,6 @@ mod tests {
     };
     use crate::keymap::KeyCode;
     use crate::model::Scope;
-    use std::time::Duration;
 
     fn parse(args: &[&str]) -> Config {
         Config::parse(args.iter().map(|s| (*s).to_string()))
@@ -680,22 +680,25 @@ mod tests {
     #[test]
     fn defaults_when_no_args() {
         let c = parse(&[]);
-        assert_eq!(c.poll, Duration::from_secs(2));
         assert_eq!(c.base, None);
     }
 
     #[test]
     fn flags_and_positional_repo() {
-        let c = parse(&["--poll", "500", "--base", "origin/dev", "/tmp/work"]);
-        assert_eq!(c.poll, Duration::from_millis(500));
+        let c = parse(&["--base", "origin/dev", "/tmp/work"]);
         assert_eq!(c.base.as_deref(), Some("origin/dev"));
         assert_eq!(c.repo.to_str(), Some("/tmp/work"));
     }
 
     #[test]
-    fn poll_has_a_floor() {
-        assert_eq!(parse(&["--poll", "10"]).poll, Duration::from_millis(200));
-        assert_eq!(parse(&["--poll", "garbage"]).poll, Duration::from_secs(2));
+    fn the_removed_poll_flag_is_named_and_its_value_is_no_repo() {
+        let note = parse(&["/tmp/work", "--poll", "500"]).removed_flag.expect("named");
+        assert!(note.contains("--poll was removed"), "{note}");
+        assert_eq!(parse(&["--base", "main"]).removed_flag, None);
+        assert!(parse(&["--poll=500"]).removed_flag.is_some(), "the `=` spelling too");
+        assert_eq!(parse(&["/tmp/work", "--poll", "500"]).repo.to_str(), Some("/tmp/work"));
+        assert_eq!(parse(&["--poll", "500", "/tmp/work"]).repo.to_str(), Some("/tmp/work"));
+        assert_eq!(parse(&["--poll=500", "/tmp/work"]).repo.to_str(), Some("/tmp/work"));
     }
 
     #[test]

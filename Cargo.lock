@@ -955,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "herdr-reviewr"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -963,15 +963,20 @@ dependencies = [
  "dirs 7.0.0",
  "fff-search",
  "hex",
+ "ignore",
  "interprocess",
  "neo_frizbee",
+ "notify",
  "opener",
  "palette",
  "process-wrap",
  "pulldown-cmark",
  "ratatui",
+ "rustix",
+ "semver",
  "serde",
  "serde_json",
+ "signal-hook",
  "similar",
  "syntect",
  "tempfile",

@@ -3,8 +3,8 @@
 
 Drives the real binary through a PTY and measures keypress -> first response
 byte (the UI-thread stall the user feels) and keypress -> output quiescence
-(frame fully painted). Polling is set far out so every frame is a response to
-an injected key, never a poll tick.
+(frame fully painted). An idle pane paints nothing on its own, so every frame
+is a response to an injected key.
 
 Usage:
   scripts/bench_tui.py --binary target/release/herdr-reviewr --fixture
@@ -97,7 +97,7 @@ class Session:
         env = {**os.environ, "TERM": "xterm-256color"}
         env.pop("HERDR_PLUGIN_CONFIG_DIR", None)  # standalone mode: no plugin config reads
         self.proc = subprocess.Popen(
-            [binary, repo, "--poll", "600000"],
+            [binary, repo],
             stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True,
         )
         os.close(slave)

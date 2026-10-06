@@ -42,6 +42,11 @@ impl Entry {
     pub fn from_changed(f: &ChangedFile) -> Self {
         Self { path: f.path.clone(), annotation: Some(f.clone()), ignored: false, is_dir: false }
     }
+
+    /// An `All files` entry from a worktree listing, annotated with its change if it has one.
+    pub fn from_worktree(w: crate::git::WorktreeEntry, annotation: Option<ChangedFile>) -> Self {
+        Self { path: w.path, annotation, ignored: w.ignored, is_dir: w.is_dir }
+    }
 }
 
 impl Row {

@@ -215,7 +215,7 @@ impl BasePicker {
     }
 }
 
-/// The open commit picker; a poll refreshes its rows, reconciled by sha.
+/// The open commit picker; a refresh re-lists its rows, reconciled by sha.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommitPicker {
     /// The universe, newest first.
@@ -230,7 +230,7 @@ pub struct CommitPicker {
     pub title: String,
     /// The empty-universe message.
     pub empty: String,
-    /// The `HEAD` the rows were listed under: a poll re-lists only once it moves.
+    /// The `HEAD` the rows were listed under: a refresh re-lists only once it moves.
     pub head: Option<String>,
 }
 
@@ -639,7 +639,7 @@ pub struct App {
     pub diff: FileDiff,
     /// `diff.rows` with folds applied: what the cursor and hit tests index.
     pub visible: Vec<Row>,
-    /// Fold anchors (first-hidden-line numbers) currently expanded; survives a poll.
+    /// Fold anchors (first-hidden-line numbers) currently expanded; survives a refresh.
     expanded_folds: HashSet<u32>,
     /// The open diff's file, frozen with it while composing.
     pub diff_path: Option<String>,
@@ -764,10 +764,30 @@ pub struct App {
     /// The markdown render memo, filled by the renderer from `&App`.
     markdown_cache: std::cell::RefCell<crate::markdown::RenderCache>,
     snippet_cache: std::cell::RefCell<crate::snippet::SnippetRowCache>,
-    /// The worker's turn baseline, mirrored for the next build and the empty state.
-    turn_baseline: Option<String>,
-    /// Whether any agent is in this worktree; `None` until a sample has looked.
+    /// What herdr said about this pane and its worktree's turns.
+    pub herdr: HerdrView,
+}
+
+/// What herdr's connection said about this pane, carried whole across a config recovery.
+#[derive(Debug)]
+pub struct HerdrView {
+    /// This pane's ids, which a move to another tab or workspace changes.
+    pub ids: crate::herdr::PaneIds,
+    /// Whether this pane is on screen: herdr's focus says, and input reaching it proves it.
+    on_screen: bool,
+    /// herdr is older than turn tracking needs, so `last-turn` never fills.
+    too_old: bool,
+    /// What `last-turn` diffs against, mirrored for the next build and the empty state.
+    last_turn: crate::turn::LastTurn,
+    /// Whether any agent is in this worktree; `None` until the connection has looked.
     agents_present: Option<bool>,
+}
+
+impl HerdrView {
+    fn new(last_turn: crate::turn::LastTurn) -> Self {
+        let ids = crate::herdr::PaneIds::from_env();
+        Self { ids, on_screen: true, too_old: false, last_turn, agents_present: None }
+    }
 }
 
 /// One painted link region: `x_start..x_end` on screen row `y`, in absolute cells.
@@ -805,8 +825,9 @@ impl App {
     }
 
     fn build(repo: PathBuf, scope: Scope, base: Option<String>, load_turn: bool) -> Self {
-        // Mirror the persisted baseline; the worker owns the tracker.
-        let turn_baseline = if load_turn { crate::world::seed_baseline(&repo) } else { None };
+        // Mirror the persisted baseline; the herdr connection owns the tracker.
+        let baseline = load_turn.then(|| crate::git::read_baseline_ref(&repo)).flatten();
+        let last_turn = baseline.map_or(crate::turn::LastTurn::Waiting, crate::turn::LastTurn::At);
         let theme = theme::resolve(None);
         Self {
             repo,
@@ -904,8 +925,7 @@ impl App {
             cache: DiffCache::new(),
             markdown_cache: std::cell::RefCell::new(crate::markdown::RenderCache::default()),
             snippet_cache: std::cell::RefCell::new(crate::snippet::SnippetRowCache::default()),
-            turn_baseline,
-            agents_present: None,
+            herdr: HerdrView::new(last_turn),
         }
     }
 
@@ -1001,7 +1021,10 @@ impl App {
             self.focus = Focus::Diff;
         }
         self.search_pct = old.search_pct;
-        // A pending refresh survives, or a carried stale frame waits for the next poll.
+        // What herdr reported is reported once; a recovered app keeps it.
+        self.herdr =
+            std::mem::replace(&mut old.herdr, HerdrView::new(crate::turn::LastTurn::default()));
+        // A pending refresh survives, or a carried stale frame waits for the next refresh.
         self.world_request = old.world_request.take();
         let old_mode = old.mode.clone();
         match old_mode {
@@ -1101,7 +1124,7 @@ impl App {
         self.file_rows.get(self.file_cursor).and_then(file_list::Row::file_index)
     }
 
-    /// The visible-row index of the file at `path`, for restoring selection across a poll.
+    /// The visible-row index of the file at `path`, for restoring selection across a refresh.
     fn file_row_of_path(&self, path: &str) -> Option<usize> {
         self.file_rows
             .iter()
@@ -1177,7 +1200,7 @@ impl App {
             scope: self.scope,
             base: self.base.clone(),
             base_epoch: self.base_epoch,
-            turn_baseline: self.turn_baseline.clone(),
+            turn_baseline: self.herdr.last_turn.tree().map(str::to_string),
             commit_pick: self.commit_pick.clone(),
             // `Changes` never reads the toggled set, so a toggle there invalidates nothing.
             toggled_dirs: if self.tab == Tab::AllFiles {
@@ -1207,6 +1230,13 @@ impl App {
         // The cursor keeps its target, else the open file, else the first file.
         let anchor = self.cursor_anchor();
         let open = self.diff_path.clone();
+        // A path-limited build that missed the open file and its rename source leaves it as read.
+        let open_untouched = snapshot.touched.as_ref().is_some_and(|touched| {
+            open.as_ref().is_none_or(|p| match self.changeset.files.get(p) {
+                Some(file) => !file.touched_by(touched),
+                None => !crate::git::covered(touched, p),
+            })
+        });
         self.changeset = snapshot.changeset;
         self.entries = snapshot.entries;
         self.adopt_branch_base(snapshot.branch_base);
@@ -1218,11 +1248,14 @@ impl App {
             .or_else(|| self.first_file_row())
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
-        // A modal or a view-anchored drag freezes the diff; the file list still updates.
-        if self.view_anchored_gesture() {
+        // A modal or a view-anchored drag freezes the diff, owing it a reload; the list still updates.
+        if self.view_frozen() {
             self.view_reload_held = true;
-        } else if !self.view_frozen() {
-            self.reload_open_view();
+        } else {
+            let unchanged = open_untouched && self.shown_entry().map(|e| e.path) == open;
+            if !unchanged {
+                self.reload_open_view();
+            }
         }
         // The preview refreshes; the results stay as their query found them.
         self.refresh_search_preview();
@@ -1748,12 +1781,18 @@ impl App {
 
     /// `last-turn` with no baseline captured yet.
     pub fn awaiting_turn(&self) -> bool {
-        self.scope == Scope::LastTurn && self.turn_baseline.is_none()
+        self.scope == Scope::LastTurn && self.herdr.last_turn.tree().is_none()
     }
 
     /// The message for an [`Self::awaiting_turn`] frame; "no agent" only once a sample looked.
     pub fn turn_wait_message(&self) -> &'static str {
-        match self.agents_present {
+        if self.herdr.too_old {
+            return "last-turn needs a newer herdr";
+        }
+        if self.herdr.last_turn == crate::turn::LastTurn::Raced {
+            return "the last turn started before reviewr could snapshot it";
+        }
+        match self.herdr.agents_present {
             Some(false) => "no agent works here",
             _ => "waiting for the first turn",
         }
@@ -1761,24 +1800,109 @@ impl App {
 
     /// The membership mirror, `None` until a sample observes it.
     pub fn agents_present(&self) -> Option<bool> {
-        self.agents_present
+        self.herdr.agents_present
     }
 
-    /// Follow the worker's baseline, even from a discarded completion.
-    pub fn sync_turn_baseline(&mut self, baseline: Option<String>) {
-        self.turn_baseline = baseline;
+    /// Follow turn tracking: `last-turn` is authoritative, membership `None` (an undetermined
+    /// member) holds the last answer. Whether `last-turn` on screen needs rebuilding.
+    pub fn sync_turn(&mut self, report: crate::turn::TurnReport) -> bool {
+        let moved = self.herdr.last_turn != report.last && self.scope == Scope::LastTurn;
+        self.herdr.last_turn = report.last;
+        self.herdr.agents_present = report.agents_present.or(self.herdr.agents_present);
+        moved
     }
 
-    /// Follow what a sample saw; `None` (a failed or partial sample) holds the last answer.
-    pub fn sync_agents_present(&mut self, present: Option<bool>) {
-        self.agents_present = present.or(self.agents_present);
+    /// Follow herdr's word on this pane: its ids, when the session still lists it, and its focus.
+    /// The visibility it moved to, if it moved.
+    pub fn sync_herdr_session(
+        &mut self,
+        ids: Option<crate::herdr::PaneIds>,
+        visible: bool,
+    ) -> Option<bool> {
+        if let Some(ids) = ids {
+            self.herdr.ids = ids;
+        }
+        self.set_pane_visible(visible)
+    }
+
+    /// The visibility it moved to, if it moved. Coming on screen refetches the PR tab and re-runs
+    /// an open search, both held while hidden.
+    fn set_pane_visible(&mut self, on: bool) -> Option<bool> {
+        if on == self.herdr.on_screen {
+            return None;
+        }
+        self.herdr.on_screen = on;
+        if on {
+            if self.tab == Tab::Pr {
+                self.request_pr_refresh(RefreshKind::Ambient);
+            }
+            self.search_dirty |= self.mode == Mode::Search;
+        }
+        Some(on)
+    }
+
+    /// Queue a refresh the pacer let through: paths or a full rebuild, no reveal.
+    pub fn request_paced_refresh(&mut self, refresh: crate::world::Refresh) {
+        let paced = || crate::world::WorldRequest { background: true, ..Default::default() };
+        self.world_request.get_or_insert_with(paced).refresh.absorb(refresh);
+    }
+
+    /// herdr answered with a version too old to track turns: said once, and on last-turn for good.
+    pub fn herdr_too_old(&mut self) {
+        self.herdr.too_old = true;
+        let (major, minor, patch) = crate::herdr_socket::MIN_VERSION;
+        self.status =
+            format!("herdr is too old for turns and focus: reviewr needs {major}.{minor}.{patch}");
+    }
+
+    /// Run the reload a closed modal or an ended gesture owes the open view.
+    pub fn catch_up_held_view(&mut self) {
+        if self.view_reload_held && !self.view_frozen() {
+            self.view_reload_held = false;
+            // The held reload's rebuild revalidates a just-settled span against its text.
+            self.reload_open_view();
+        }
+    }
+
+    /// The ignored entries on screen, whose changes the watcher reports: expanded ignored folders
+    /// in All files, and an open ignored file.
+    pub fn shown_ignored(&self) -> std::collections::BTreeSet<String> {
+        let ignored = |path: &str| self.entries.iter().any(|e| e.ignored && e.path == path);
+        let mut shown: std::collections::BTreeSet<String> = if self.tab == Tab::AllFiles {
+            self.toggled_dirs.iter().filter(|d| ignored(d)).cloned().collect()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if let Some(open) = self.diff_path.as_deref().filter(|p| ignored(p)) {
+            shown.insert(open.to_string());
+        }
+        shown
+    }
+
+    /// The branch scope's local base as a full ref, whose moves the watcher reports too.
+    pub fn watched_refs(&self) -> std::collections::BTreeSet<String> {
+        let base = self.branch_base.winner.as_ref().filter(|_| self.scope == Scope::Branch);
+        let local = base.filter(|b| matches!(b, git::ResolvedBase::Branch { .. }));
+        local.map(|b| format!("refs/heads/{}", b.name())).into_iter().collect()
+    }
+
+    /// Input reached the pane, so it is on screen until herdr next reports focus. Whether it just
+    /// came on screen.
+    pub fn note_input(&mut self) -> bool {
+        self.set_pane_visible(true).is_some()
+    }
+
+    /// Whether this pane is on screen, as far as reviewr knows.
+    pub fn pane_visible(&self) -> bool {
+        self.herdr.on_screen
     }
 
     /// Queue a world refresh; `reveal` is for user-initiated switches only.
-    pub fn request_world_refresh(&mut self, sample_turn: bool, reveal: bool) {
+    pub fn request_world_refresh(&mut self, reveal: bool) {
         let request = self.world_request.get_or_insert(crate::world::WorldRequest::default());
-        request.sample_turn |= sample_turn;
         request.reveal |= reveal;
+        request.background = false;
+        request.refresh.absorb(crate::world::Refresh::Full);
     }
 
     /// Snap the diff view back to the top, clearing any pending selection.
@@ -2364,7 +2488,7 @@ impl App {
         if self.scope != scope && !self.composing() {
             self.scope = scope;
             self.rebase_changes()?;
-            // An explicit switch reveals the cursor (a poll does not).
+            // An explicit switch reveals the cursor (a refresh does not).
             self.reveal_files = true;
         }
         Ok(())
@@ -2396,7 +2520,7 @@ impl App {
                 entry.annotation = self.changeset.files.get(&entry.path).cloned();
             }
             self.rebuild_file_rows();
-            self.request_world_refresh(false, false);
+            self.request_world_refresh(false);
         }
         Ok(())
     }
@@ -2436,7 +2560,7 @@ impl App {
         }
         // A return paints its stash and refreshes behind; a first visit loads before the frame.
         if self.tab_visited {
-            self.request_world_refresh(false, true);
+            self.request_world_refresh(true);
         } else {
             self.reload()?;
         }
@@ -2768,7 +2892,7 @@ impl App {
             }
             return;
         };
-        // Re-resolve if a poll dropped the armed file.
+        // Re-resolve if a refresh dropped the armed file.
         let Some(row) = self.file_row_of_path(&armed.path).or_else(|| self.cross_target(forward))
         else {
             return;
@@ -3091,16 +3215,7 @@ impl App {
         }
         self.gesture = crate::selection::Gesture::None;
         self.last_click = None;
-        self.lift_gesture_freeze();
-    }
-
-    /// Run the reload an ended gesture held.
-    pub(crate) fn lift_gesture_freeze(&mut self) {
-        // Into the composer, its own freeze takes over the owed reload.
-        if std::mem::take(&mut self.view_reload_held) && !self.mode.is_modal() {
-            // The held reload's rebuild revalidates a just-settled span against its text.
-            self.reload_open_view();
-        }
+        self.catch_up_held_view();
     }
 
     /// Count a mouse-down into the click chain, capped at 3; a new `target` row breaks it.
@@ -3148,7 +3263,6 @@ impl App {
         // The composer replaces the find band.
         self.close_find();
         self.start_comment();
-        self.lift_gesture_freeze();
     }
 
     /// Copy `text` to `target`, reporting the outcome.
@@ -3568,7 +3682,7 @@ impl App {
         self.refresh_rendered();
     }
 
-    /// Re-derive the rendered rows now after a comment change, not on a later poll.
+    /// Re-derive the rendered rows now after a comment change, not on a later refresh.
     fn refresh_rendered(&mut self) {
         if self.rendered.on_screen() {
             self.rebuild_visible();
@@ -3798,7 +3912,7 @@ impl App {
         covers.then_some(index)
     }
 
-    /// Clear a pick no longer live, after each input; polls never call it.
+    /// Clear a pick no longer live, after each input; refreshes never call it.
     pub fn settle_pick(&mut self) {
         if self.comment_target.is_some() && self.live_target(&self.comment_rows()).is_none() {
             self.comment_target = None;
@@ -4204,7 +4318,7 @@ impl App {
         }
     }
 
-    /// Rebuild the previewed file after a poll, keeping the scroll (Continuity).
+    /// Rebuild the previewed file after a refresh, keeping the scroll (Continuity).
     pub fn refresh_search_preview(&mut self) {
         let Some(path) =
             self.search.as_ref().and_then(|s| s.preview.as_ref()).map(|p| p.path.clone())
@@ -4538,7 +4652,7 @@ impl App {
             self.status = "no comments yet".to_string();
             return;
         }
-        match herdr::send_target() {
+        match herdr::send_target(&self.herdr.ids) {
             Ok(SendTarget::One(agent)) => self.export_to_agent(&agent),
             Ok(SendTarget::Many(rows)) => self.open_picker(rows),
             Err(e) => self.status = crate::export::send_failure(&e, None, &self.copy_key()),
@@ -5528,11 +5642,10 @@ mod tests {
     fn config_recovery_carries_a_pending_world_request() {
         // A pending refresh survives recovery.
         let mut old = App::blocked(PathBuf::from("."), Scope::Uncommitted, None);
-        old.request_world_refresh(true, true);
+        old.request_world_refresh(true);
         let mut recovered = App::new(PathBuf::from("."), Scope::Uncommitted, None);
         recovered.carry_authored_state_from(&mut old);
         let request = recovered.world_request.expect("the pending refresh survives the swap");
-        assert!(request.sample_turn, "the poll's sample flag survives the recovery swap");
         assert!(request.reveal, "the switch's reveal flag survives the recovery swap");
     }
 
@@ -5935,7 +6048,10 @@ mod tests {
         // `last-turn`, whose new side is the snapshot the build took.
         let baseline = git(&["rev-parse", "HEAD^{tree}"]);
         std::fs::write(repo.join("big.txt"), &big).unwrap();
-        app.sync_turn_baseline(Some(baseline));
+        app.sync_turn(crate::turn::TurnReport {
+            last: crate::turn::LastTurn::At(baseline),
+            ..Default::default()
+        });
         app.set_scope(Scope::LastTurn).unwrap();
         open(&mut app);
         // A stale row's path has no diff at the landed ends.
@@ -6058,7 +6174,10 @@ mod tests {
             (cost(&mut app, "a.txt"), cost(&mut app, "new.txt"), cost(&mut app, "moved.txt"));
         app.set_scope(Scope::Branch).unwrap();
         let branch = cost(&mut app, "a.txt");
-        app.sync_turn_baseline(Some(baseline));
+        app.sync_turn(crate::turn::TurnReport {
+            last: crate::turn::LastTurn::At(baseline),
+            ..Default::default()
+        });
         app.set_scope(Scope::LastTurn).unwrap();
         let last_turn = cost(&mut app, "a.txt");
         app.commit_pick = Some(CommitPick::single(&base));

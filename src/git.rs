@@ -16,7 +16,9 @@ fn git_command(repo: &Path) -> std::process::Command {
     let mut cmd = crate::proc::command("git");
     cmd.arg("-C")
         .arg(repo)
-        .args(["-c", "diff.autoRefreshIndex=false"])
+        // Single-threaded, so a refresh's wall time bounds its CPU (the pacing budget's measure).
+        .args(["-c", "diff.autoRefreshIndex=false", "-c", "core.preloadIndex=false"])
+        .args(["-c", "index.threads=1"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env_remove("GIT_DIFF_OPTS");
     cmd
@@ -118,6 +120,35 @@ pub fn worktree_of(path: &Path) -> Worktree {
             root => Worktree::Root(PathBuf::from(root)),
         },
     }
+}
+
+/// The worktree's own git dir and the common dir, canonical; the same in a main checkout.
+pub fn git_dirs(repo: &Path) -> Option<(PathBuf, PathBuf)> {
+    let out = git(repo, &["rev-parse", "--absolute-git-dir", "--git-common-dir"]).ok()?;
+    let mut lines = out.lines();
+    let dir = PathBuf::from(lines.next()?);
+    let common = repo.join(lines.next()?);
+    Some((dir.canonicalize().ok()?, common.canonicalize().ok()?))
+}
+
+/// The global ignore file git reads: `core.excludesFile`, else git's default under the XDG dir.
+pub fn global_excludes(repo: &Path) -> Option<PathBuf> {
+    if let Some(path) = git_line(repo, &["config", "--path", "core.excludesFile"]) {
+        return Some(PathBuf::from(path));
+    }
+    // Git for Windows reads its home from `USERPROFILE` when `HOME` is unset.
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config.join("git").join("ignore"))
+}
+
+/// Tracked files git's ignore rules would ignore: force-added under an ignored directory.
+pub fn tracked_ignored(repo: &Path) -> Vec<String> {
+    git(repo, &["ls-files", "-z", "--cached", "--ignored", "--exclude-standard"])
+        .map(|out| nul_list(&out))
+        .unwrap_or_default()
 }
 
 /// The forge a repository target belongs to, part of its identity.
@@ -1463,6 +1494,25 @@ fn parse_sides(out: &str) -> Option<DiffSides> {
 const BASE_PICK_REF: &str = "refs/worktree/reviewr/base-pick";
 const TURN_BASE_REF: &str = "refs/worktree/reviewr/turn-base";
 
+/// What this process last wrote to each private ref (`None`: deleted), so the watcher drops its own writes.
+static OWN_REF_WRITES: Mutex<Vec<(PathBuf, &str, Option<String>)>> = Mutex::new(Vec::new());
+
+/// Note this process's write to the private ref `name` of `repo`, keyed by its canonical git dir.
+fn record_own_ref(repo: &Path, name: &'static str, value: Option<&str>) {
+    let Ok(dir) = git_dir(repo) else { return };
+    let dir = dir.canonicalize().unwrap_or(dir);
+    let mut writes = OWN_REF_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+    writes.retain(|(d, written, _)| !(*d == dir && *written == name));
+    writes.push((dir, name, value.map(str::to_string)));
+}
+
+/// Whether `value` (`None`: the ref is gone) is what this process last wrote to the private ref
+/// `name` in the canonical git dir `dir`.
+pub(crate) fn is_own_ref_write(dir: &Path, name: &str, value: Option<&str>) -> bool {
+    let writes = OWN_REF_WRITES.lock().unwrap_or_else(PoisonError::into_inner);
+    writes.iter().any(|(d, written, last)| d == dir && *written == name && last.as_deref() == value)
+}
+
 /// The recorded pick's spelling in one git call, `None` when none is recorded or readable.
 pub fn read_base_pick(repo: &Path) -> Result<Option<String>, GitFail> {
     let out = run_git(repo, &["cat-file", "blob", BASE_PICK_REF])?;
@@ -1498,18 +1548,60 @@ pub fn write_base_pick(repo: &Path, name: &str) -> Result<(), GitFail> {
         return delete_base_pick(repo);
     }
     let blob = git_stdin(repo, &["hash-object", "-w", "--stdin"], name)?;
+    record_own_ref(repo, BASE_PICK_REF, Some(blob.trim()));
     git_strict(repo, &["update-ref", BASE_PICK_REF, blob.trim()])?;
     Ok(())
 }
 
 /// Forget this worktree's pick; idempotent.
 pub fn delete_base_pick(repo: &Path) -> Result<(), GitFail> {
+    record_own_ref(repo, BASE_PICK_REF, None);
     git_strict(repo, &["update-ref", "-d", BASE_PICK_REF])?;
     Ok(())
 }
 
-/// Run git with `input` on stdin, written from its own thread so a full pipe can't deadlock.
+/// Run git with `input` on stdin; any non-zero exit is a failure.
 fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail> {
+    let out = git_stdin_output(repo, args, input)?;
+    if !out.status.success() {
+        return Err(GitFail(git_error(
+            args,
+            "failed",
+            String::from_utf8_lossy(&out.stderr).trim(),
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Which of `paths` (relative to `repo`) git ignores, in one `check-ignore`; `None` when it failed.
+pub(crate) fn check_ignore<'a>(
+    repo: &Path,
+    paths: impl Iterator<Item = &'a str>,
+) -> Option<HashSet<String>> {
+    // Each line is a pathspec, and `check-ignore` takes no `literal` magic: `./` keeps `:!x` itself.
+    let input = paths.fold(String::new(), |mut input, p| {
+        input.push_str("./");
+        input.push_str(p);
+        input.push('\0');
+        input
+    });
+    let args = ["check-ignore", "--stdin", "-z"];
+    let out = git_stdin_output(repo, &args, &input).ok()?;
+    // 0: some are ignored; 1: none are.
+    if out.status.code().is_none_or(|c| c > 1) {
+        git_error(&args, "failed", String::from_utf8_lossy(&out.stderr).trim());
+        return None;
+    }
+    let ignored = String::from_utf8_lossy(&out.stdout);
+    Some(ignored.split('\0').filter_map(|p| p.strip_prefix("./")).map(str::to_string).collect())
+}
+
+/// Run git with `input` on stdin, written from its own thread so a full pipe can't deadlock.
+fn git_stdin_output(
+    repo: &Path,
+    args: &[&str],
+    input: &str,
+) -> Result<std::process::Output, GitFail> {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = git_command(repo)
@@ -1526,14 +1618,7 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
     let writer = std::thread::spawn(move || drop(stdin.write_all(owned.as_bytes())));
     let out = child.wait_with_output().map_err(|e| GitFail(git_error(args, "could not run", e)))?;
     let _ = writer.join();
-    if !out.status.success() {
-        return Err(GitFail(git_error(
-            args,
-            "failed",
-            String::from_utf8_lossy(&out.stderr).trim(),
-        )));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(out)
 }
 
 // --- turn baseline (last-turn scope) -------------------------------------------
@@ -1542,14 +1627,79 @@ fn git_stdin(repo: &Path, args: &[&str], input: &str) -> Result<String, GitFail>
 pub fn snapshot_worktree(repo: &Path) -> Result<String> {
     // A fresh copy each time: `add -A` stages into it, and a killed git leaves its lock behind.
     let mut index = IndexCopy::new(repo)?;
-    // Seeded from the session copy, refreshed, so `add -A` hashes only what really changed. The
-    // refresh only saves time, so a conflict or a stale lock that fails it is ignored.
-    IndexCopy::with(repo, |session| {
-        let _ = session.git(repo, &["update-index", "-q", "--unmerged", "--refresh"]);
-        index.seed(&session.path())
-    })?;
+    // Seeded from the session copy's file, never its lock, so `add -A` hashes only what changed.
+    let session = session(repo)?;
+    let copied = session.copy_file.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let seed = copied.filter(|copy| copy.exists()).unwrap_or_else(|| session.git_dir.join("index"));
+    index.seed(&seed)?;
     index.git(repo, &["add", "-A"])?;
     Ok(index.git(repo, &["write-tree"])?.trim().to_string())
+}
+
+/// The tree `seed` with `paths` re-read from the worktree: a full snapshot's tree when nothing
+/// outside `paths` changed since `seed`. `None` when the files under `paths` pass the byte cap.
+pub fn snapshot_worktree_in(repo: &Path, seed: &str, paths: &[String]) -> Result<Option<String>> {
+    let index = IndexCopy::new(repo)?;
+    index.git(repo, &["read-tree", seed])?;
+    // `add` refuses a pathspec that matches nothing, so each names a file the index or the
+    // worktree holds; an ignored file has nothing to stage.
+    let specs = literal_pathspecs(paths);
+    let args = vec!["ls-files", "-z", "--cached", "--others", "--exclude-standard"];
+    let files = nul_list(&index.git(repo, &with_pathspecs(args, &specs))?);
+    if !fits_command_line(&files) {
+        return Ok(None);
+    }
+    if !files.is_empty() {
+        index.git(repo, &with_pathspecs(vec!["add", "-A"], &literal_pathspecs(&files)))?;
+    }
+    Ok(Some(index.git(repo, &["write-tree"])?.trim().to_string()))
+}
+
+/// A cheap fingerprint of what the index stages, read from the index alone.
+pub fn staged_fingerprint(repo: &Path) -> Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let staged = git(repo, &["ls-files", "--stage", "-z"])?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    staged.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+/// The most pathspec bytes one git call takes: Windows caps a command line at 32,767 characters.
+const PATHSPEC_BYTES: usize = 16 * 1024;
+
+/// Whether `paths`, as literal pathspecs, fit [`PATHSPEC_BYTES`].
+pub fn fits_command_line<'a>(paths: impl IntoIterator<Item = &'a String>) -> bool {
+    paths.into_iter().map(|p| p.len() + LITERAL.len() + 1).sum::<usize>() <= PATHSPEC_BYTES
+}
+
+/// A `-z` listing's entries.
+fn nul_list(out: &str) -> Vec<String> {
+    out.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+/// The magic that makes a pathspec match only its own name: no globs, no leading `:` magic.
+const LITERAL: &str = ":(literal)";
+
+/// Each path as a literal pathspec; a directory still matches everything under it.
+fn literal_pathspecs(paths: &[String]) -> Vec<String> {
+    paths.iter().map(|p| format!("{LITERAL}{p}")).collect()
+}
+
+/// `args`, then `--` and `specs`.
+fn with_pathspecs<'a>(mut args: Vec<&'a str>, specs: &'a [String]) -> Vec<&'a str> {
+    args.push("--");
+    args.extend(specs.iter().map(String::as_str));
+    args
+}
+
+/// Whether `path` is one of `paths` or lies under one of them, by whole components.
+pub fn covered<'a>(paths: impl IntoIterator<Item = &'a String>, path: &str) -> bool {
+    paths.into_iter().any(|p| under_or_eq(path, p))
+}
+
+/// Whether `path` is `dir` or lies under it, by whole components.
+pub fn under_or_eq(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 /// The prefix of every index copy's directory under [`copies_dir`].
@@ -1583,7 +1733,9 @@ impl IndexCopy {
         });
         // A worktree removed and re-added, or a re-clone, took the copy's dir with its git dir.
         if kept.as_ref().is_none_or(|copy| !copy.dir.path().exists()) {
-            *kept = Some(Self::new(repo)?);
+            let copy = Self::new(repo)?;
+            *session.copy_file.lock().unwrap_or_else(PoisonError::into_inner) = Some(copy.path());
+            *kept = Some(copy);
         }
         let copy = kept.as_mut().expect("filled above");
         copy.seed(&real)?;
@@ -1636,10 +1788,14 @@ impl IndexCopy {
             return Ok(());
         }
         from.rewind().context("reading the index")?;
-        let mut to = std::fs::File::create(self.path()).context("creating the index copy")?;
+        // Written beside and renamed over, so a snapshot copying it unlocked never reads half a file.
+        let pending = self.dir.path().join("index.new");
+        let mut to = std::fs::File::create(&pending).context("creating the index copy")?;
         std::io::copy(&mut from, &mut to).context("copying the index")?;
         // The copy keeps the index's mtime, which git's racy-clean check reads.
         let _ = to.set_modified(stamp.modified);
+        drop(to);
+        std::fs::rename(&pending, self.path()).context("placing the index copy")?;
         self.seeded = Some(stamp);
         Ok(())
     }
@@ -1701,6 +1857,8 @@ struct RepoSession {
     pointer: Option<String>,
     git_dir: PathBuf,
     copy: Mutex<Option<IndexCopy>>,
+    /// Where the session copy's index file lives, so a snapshot seeds from it without its lock.
+    copy_file: Mutex<Option<PathBuf>>,
     counts: Mutex<Arc<Counts>>,
     sizes: Mutex<HashMap<String, u64>>,
 }
@@ -1741,8 +1899,16 @@ pub fn read_baseline_ref(repo: &Path) -> Option<String> {
     git_line(repo, &["rev-parse", "--verify", "--quiet", TURN_BASE_REF])
 }
 
+/// Forget the turn baseline: a turn whose start raced its first write leaves `last-turn` empty.
+pub fn delete_baseline_ref(repo: &Path) -> Result<()> {
+    record_own_ref(repo, TURN_BASE_REF, None);
+    git(repo, &["update-ref", "-d", TURN_BASE_REF])?;
+    Ok(())
+}
+
 /// Persist the turn baseline atomically under this worktree's private ref.
 pub fn write_baseline_ref(repo: &Path, sha: &str) -> Result<()> {
+    record_own_ref(repo, TURN_BASE_REF, Some(sha));
     git(repo, &["update-ref", TURN_BASE_REF, sha])?;
     Ok(())
 }
@@ -1759,12 +1925,32 @@ pub fn diff_base(head: Option<String>) -> String {
 /// The changeset from `base` to the worktree, untracked files included.
 pub fn changed_from(repo: &Path, base: &str) -> Result<Vec<ChangedFile>> {
     let out = IndexCopy::with(repo, |index| index.git(repo, &diff_args(&[base])))?;
-    assemble(repo, &out, true)
+    assemble(repo, &out, true, None)
+}
+
+/// [`changed_from`] limited to `paths`, each a file or a directory.
+pub fn changed_from_in(repo: &Path, base: &str, paths: &[String]) -> Result<Vec<ChangedFile>> {
+    let specs = literal_pathspecs(paths);
+    let args = with_pathspecs(diff_args(&[base]), &specs);
+    let out = IndexCopy::with(repo, |index| index.git(repo, &args))?;
+    assemble(repo, &out, true, Some(paths))
 }
 
 /// The changeset between two trees: `commits`, and `last-turn` against its snapshot.
 pub fn changed_between(repo: &Path, old: &str, new: &str) -> Result<Vec<ChangedFile>> {
-    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false)
+    assemble(repo, &git(repo, &diff_args(&[old, new]))?, false, None)
+}
+
+/// [`changed_between`] limited to `paths`.
+pub fn changed_between_in(
+    repo: &Path,
+    old: &str,
+    new: &str,
+    paths: &[String],
+) -> Result<Vec<ChangedFile>> {
+    let specs = literal_pathspecs(paths);
+    let out = git(repo, &with_pathspecs(diff_args(&[old, new]), &specs))?;
+    assemble(repo, &out, false, Some(paths))
 }
 
 /// One `git diff` per changeset: raw records, then line counts.
@@ -1926,16 +2112,39 @@ pub struct WorktreeEntry {
 
 /// Every worktree entry, sorted; an ignored directory collapses to one placeholder.
 pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
+    all_files_listed(repo, &[])
+}
+
+/// [`all_files`] limited to `paths`.
+pub fn all_files_in(repo: &Path, paths: &[String]) -> Result<Vec<WorktreeEntry>> {
+    all_files_listed(repo, &literal_pathspecs(paths))
+}
+
+/// The worktree's entries under `specs`, or all of them when there are none.
+fn all_files_listed(repo: &Path, specs: &[String]) -> Result<Vec<WorktreeEntry>> {
+    let limit = |args: Vec<&'static str>| -> Vec<&str> {
+        if specs.is_empty() { args } else { with_pathspecs(args, specs) }
+    };
     // Tracked and untracked in one spawn, with the same excludes `changed_from` uses.
-    let listed = git(repo, &["ls-files", "--cached", "--others", "--exclude-standard", "-z"])?;
+    let listed =
+        git(repo, &limit(vec!["ls-files", "--cached", "--others", "--exclude-standard", "-z"]))?;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for path in listed.split('\0').filter(|s| !s.is_empty()) {
-        if seen.insert(path.to_string()) {
-            out.push(WorktreeEntry { path: path.to_string(), ignored: false, is_dir: false });
+    for path in nul_list(&listed) {
+        if seen.insert(path.clone()) {
+            out.push(WorktreeEntry { path, ignored: false, is_dir: false });
         }
     }
-    for (path, is_dir) in ignored_entries(repo)? {
+    let ignored = limit(vec![
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "--no-empty-directory",
+        "-z",
+    ]);
+    for (path, is_dir) in ignored_entries(repo, &ignored)? {
         if seen.insert(path.clone()) {
             out.push(WorktreeEntry { path, ignored: true, is_dir });
         }
@@ -1945,19 +2154,8 @@ pub fn all_files(repo: &Path) -> Result<Vec<WorktreeEntry>> {
 }
 
 /// The ignored entries, pruned at each ignored directory instead of walking inside it.
-fn ignored_entries(repo: &Path) -> Result<Vec<(String, bool)>> {
-    let out = git(
-        repo,
-        &[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--directory",
-            "--no-empty-directory",
-            "-z",
-        ],
-    )?;
+fn ignored_entries(repo: &Path, args: &[&str]) -> Result<Vec<(String, bool)>> {
+    let out = git(repo, args)?;
     Ok(out
         .split('\0')
         .filter(|s| !s.is_empty())
@@ -1982,7 +2180,13 @@ pub fn list_ignored_dir(repo: &Path, dir: &str) -> Vec<WorktreeEntry> {
 }
 
 /// The sorted changeset from one [`diff_args`] run, untracked files appended for a worktree diff.
-fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> {
+/// With `paths`, untracked files are listed under them only, and their counts merge into the cache.
+fn assemble(
+    repo: &Path,
+    out: &str,
+    worktree: bool,
+    paths: Option<&[String]>,
+) -> Result<Vec<ChangedFile>> {
     let (rows, numstat) = parse_raw(out);
     let counts = parse_numstat(numstat);
     let blobs: Vec<&str> = rows
@@ -2014,7 +2218,12 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
 
     if worktree {
         // Untracked files are additions, by the same listing `all_files` uses.
-        let others = git(repo, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        let specs = literal_pathspecs(paths.unwrap_or_default());
+        let mut args = vec!["ls-files", "--others", "--exclude-standard", "-z"];
+        if paths.is_some() {
+            args = with_pathspecs(args, &specs);
+        }
+        let others = git(repo, &args)?;
         let new_paths: Vec<&str> =
             others.split('\0').filter(|p| !p.is_empty() && !seen.contains(*p)).collect();
         // A failed attribute read costs the verdict, never the whole changeset.
@@ -2024,7 +2233,15 @@ fn assemble(repo: &Path, out: &str, worktree: bool) -> Result<Vec<ChangedFile>> 
         // running beside this one.
         let session = session(repo)?;
         let known = Arc::clone(&session.counts.lock().unwrap_or_else(PoisonError::into_inner));
-        let mut fresh = Counts::new();
+        // A path-limited build keeps every count outside its paths.
+        let mut fresh: Counts = match paths {
+            Some(paths) => known
+                .iter()
+                .filter(|((p, _), _)| !covered(paths, p))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            None => Counts::new(),
+        };
         for path in new_paths {
             let path = path.to_string();
             if !seen.insert(path.clone()) {
@@ -2129,7 +2346,7 @@ fn untracked_additions(
     let key = (path.to_string(), stat);
     let count = match known.get(&key) {
         Some(&count) => count,
-        // A failed read counts zero for now and is read again next poll, never remembered.
+        // A failed read counts zero for now and is read again next refresh, never remembered.
         None => match count_lines(&at, buf) {
             Ok(count) => count,
             Err(_) => return Some(0),
@@ -2286,7 +2503,7 @@ fn blob_sizes(repo: &Path, oids: &[&str]) -> Result<HashMap<String, u64>> {
             }
         }
         let mut known = known.lock().unwrap_or_else(PoisonError::into_inner);
-        // A turn's snapshots mint new blobs every poll, so the cache stays bounded.
+        // A turn's snapshots mint new blobs every write, so the cache stays bounded.
         if known.len() >= 100_000 {
             known.clear();
         }
@@ -2303,6 +2520,128 @@ mod tests {
     };
 
     const NONE: ForgeHosts<'_> = ForgeHosts { github: None, gitlab: None, azure_devops: None };
+
+    #[test]
+    fn a_path_limited_build_merges_untracked_counts_and_never_shrinks_them() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("t.txt"), "t\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        // Written long enough ago that their counts settle.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_mins(1);
+        for (name, body) in [("a.txt", "1\n2\n"), ("b.txt", "1\n2\n3\n")] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::File::options().write(true).open(&path).unwrap().set_modified(past).unwrap();
+        }
+        let counted = |repo: &std::path::Path| -> Vec<String> {
+            let session = super::session(repo).unwrap();
+            let counts = session.counts.lock().unwrap();
+            let mut paths: Vec<String> = counts.keys().map(|(p, _)| p.clone()).collect();
+            paths.sort();
+            paths
+        };
+        let head = git(&["rev-parse", "HEAD"]);
+        super::changed_from(dir.path(), &head).unwrap();
+        assert_eq!(counted(dir.path()), ["a.txt", "b.txt"]);
+        let only_a = super::changed_from_in(dir.path(), &head, &["a.txt".to_string()]).unwrap();
+        assert_eq!(only_a.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["a.txt"]);
+        assert_eq!(
+            counted(dir.path()),
+            ["a.txt", "b.txt"],
+            "b.txt's count outlives a batch on a.txt"
+        );
+    }
+
+    #[test]
+    fn a_path_limited_read_reads_only_the_named_paths() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(name), "one\n").unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let old = git(&["rev-parse", "HEAD"]);
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.path().join(name), "two\n").unwrap();
+        }
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("target/debug/app"), "x\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "two"]);
+        let new = git(&["rev-parse", "HEAD"]);
+        let named = |list: &[&str]| list.iter().map(|p| (*p).to_string()).collect::<Vec<_>>();
+        let paths_of = |files: Vec<crate::model::ChangedFile>| {
+            files.into_iter().map(|f| f.path).collect::<Vec<_>>()
+        };
+
+        let between = super::changed_between_in(dir.path(), &old, &new, &named(&["a.txt"]));
+        assert_eq!(paths_of(between.unwrap()), ["a.txt"], "one commit range, one path");
+        let gone = super::changed_between_in(dir.path(), &old, &new, &named(&["zzz.txt"]));
+        assert!(gone.unwrap().is_empty(), "a path the range never touched reads as unchanged");
+
+        let entries = super::all_files_in(dir.path(), &named(&["b.txt", "target"])).unwrap();
+        let listed: Vec<(&str, bool)> =
+            entries.iter().map(|e| (e.path.as_str(), e.ignored)).collect();
+        assert_eq!(listed, [("b.txt", false), ("target", true)], "only the named entries");
+    }
+
+    #[test]
+    fn a_path_limited_snapshot_reads_only_the_named_paths() {
+        let (dir, git) = crate::test_support::test_repo();
+        for name in ["a.txt", "b.txt"] {
+            std::fs::write(dir.path().join(name), "one\n").unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let seed = super::snapshot_worktree(dir.path()).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+        let only_a = super::snapshot_worktree_in(dir.path(), &seed, &["a.txt".to_string()]);
+        let only_a = only_a.unwrap().expect("under the cap");
+        assert_ne!(only_a, seed, "the named change is read");
+        assert_ne!(only_a, super::snapshot_worktree(dir.path()).unwrap(), "b.txt is not");
+        std::fs::write(dir.path().join("b.txt"), "one\n").unwrap();
+        assert_eq!(only_a, super::snapshot_worktree(dir.path()).unwrap(), "a.txt alone moved");
+    }
+
+    #[test]
+    fn a_turn_snapshot_never_waits_on_the_session_copy() {
+        let (dir, git) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        super::changed_from(dir.path(), &head).unwrap();
+        let session = super::session(dir.path()).unwrap();
+        // A diff on the session copy holds its lock for the whole read.
+        let busy = session.copy.lock().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(super::snapshot_worktree(&repo).is_ok()));
+        let done = rx.recv_timeout(std::time::Duration::from_secs(10));
+        drop(busy);
+        assert_eq!(done, Ok(true), "the snapshot finished while the copy was held");
+        assert_eq!(
+            super::snapshot_worktree(dir.path()).unwrap(),
+            git(&["rev-parse", "HEAD^{tree}"])
+        );
+    }
+
+    #[test]
+    fn check_ignore_reads_every_name_as_itself_and_a_failed_run_answers_nothing() {
+        let (dir, _) = crate::test_support::test_repo();
+        std::fs::write(dir.path().join(".gitignore"), "node_modules/\n:!x\n").unwrap();
+        std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+        let names = ["node_modules", ":!x", "a*b", "ok.txt"];
+        let ignored = super::check_ignore(dir.path(), names.into_iter()).expect("git answered");
+        let expected: std::collections::HashSet<String> =
+            ["node_modules", ":!x"].map(str::to_string).into();
+        assert_eq!(ignored, expected, "a name with pathspec magic is only a name");
+        let outside = tempfile::tempdir().unwrap();
+        assert_eq!(super::check_ignore(outside.path(), names.into_iter()), None);
+    }
 
     #[test]
     fn a_git_error_names_the_subcommand_not_the_argv() {

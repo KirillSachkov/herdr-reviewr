@@ -344,9 +344,6 @@ pub(crate) fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
 /// How long a startup or exit path waits for herdr; the call itself runs on.
 const ANSWER_BOUND: Duration = Duration::from_secs(2);
 
-/// How long a herdr answer may take before the caller says what it waits on.
-const SIGNAL_DELAY: Duration = Duration::from_millis(150);
-
 /// Run a herdr subcommand on its own thread; drop the receiver to fire and forget.
 fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String, HerdrError>> {
     let (tx, rx) = mpsc::channel();
@@ -357,9 +354,29 @@ fn herdr_on_thread(args: Vec<String>) -> mpsc::Receiver<Result<String, HerdrErro
     rx
 }
 
+/// The socket and pane id the herdr connection needs; `None` outside herdr.
+pub fn connection_target() -> Option<(OsString, String)> {
+    Some((var_os("HERDR_SOCKET_PATH")?, var("HERDR_PANE_ID")?))
+}
+
+/// This pane's (workspace, pane) ids: the environment's at launch, then what the herdr
+/// connection sees, since a move to another tab or workspace changes them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneIds {
+    pub workspace: Option<String>,
+    pub pane: Option<String>,
+}
+
+impl PaneIds {
+    /// The ids herdr launched this pane with; none outside herdr.
+    pub fn from_env() -> Self {
+        Self { workspace: var("HERDR_WORKSPACE_ID"), pane: var("HERDR_PANE_ID") }
+    }
+}
+
 /// Stamp our pane's `reviewr` label unless the user named it; best effort, never waited on.
-pub fn label_pane() {
-    let (Some(ws), Some(pane)) = agent_env() else { return };
+pub fn label_pane(ids: &PaneIds) {
+    let (Some(ws), Some(pane)) = (ids.workspace.clone(), ids.pane.clone()) else { return };
     thread::spawn(move || {
         // An unreadable listing stamps anyway: the rename fails too, and both log.
         if current_label(&ws, &pane).is_none() {
@@ -369,8 +386,8 @@ pub fn label_pane() {
 }
 
 /// Clear our `reviewr` label on exit, waiting at most a bound.
-pub fn clear_pane_label() {
-    let (Some(ws), Some(pane)) = agent_env() else { return };
+pub fn clear_pane_label(ids: &PaneIds) {
+    let (Some(ws), Some(pane)) = (ids.workspace.clone(), ids.pane.clone()) else { return };
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         if current_label(&ws, &pane).as_deref() == Some(LABEL) {
@@ -390,30 +407,14 @@ fn current_label(ws: &str, pane: &str) -> Option<String> {
 
 /// This plugin's config directory from herdr, `None` when herdr cannot say.
 pub fn plugin_config_dir() -> Option<String> {
-    plugin_config_dir_with(|| ())
-}
-
-/// [`plugin_config_dir`], calling `on_slow` once past [`SIGNAL_DELAY`].
-pub fn plugin_config_dir_with(on_slow: impl FnOnce()) -> Option<String> {
     let rx = herdr_on_thread(vec!["plugin".into(), "config-dir".into(), plugin_id()]);
-    let answer = if let Ok(answer) = rx.recv_timeout(SIGNAL_DELAY) {
-        answer
-    } else {
-        on_slow();
-        let Ok(answer) = rx.recv_timeout(ANSWER_BOUND.saturating_sub(SIGNAL_DELAY)) else {
-            logln!("plugin config-dir unanswered after {ANSWER_BOUND:?}; no config directory");
-            return None;
-        };
-        answer
+    let Ok(answer) = rx.recv_timeout(ANSWER_BOUND) else {
+        logln!("plugin config-dir unanswered after {ANSWER_BOUND:?}; no config directory");
+        return None;
     };
     let out = answer.ok()?;
     let dir = out.trim();
     (!dir.is_empty()).then(|| dir.to_owned())
-}
-
-/// This pane's (workspace, pane) ids; no tab, since neither the send nor turn tracking scopes to one.
-pub(crate) fn agent_env() -> (Option<String>, Option<String>) {
-    (var("HERDR_WORKSPACE_ID"), var("HERDR_PANE_ID"))
 }
 
 /// The agents herdr lists: the one `agent list` call.
@@ -422,8 +423,8 @@ fn agent_list() -> Result<Vec<AgentPane>, HerdrError> {
 }
 
 /// What `Send` does: one agent sends, several open the picker, none refuses.
-pub fn send_target() -> Result<SendTarget, SendError> {
-    let (ws, me) = agent_env();
+pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
+    let (ws, me) = (ids.workspace.clone(), ids.pane.clone());
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
@@ -522,18 +523,41 @@ pub struct AgentSample {
     pub status: Status,
 }
 
-/// Every agent but our pane, any workspace; `Err` is a failed enumeration, never "no agents".
-pub fn agent_samples() -> Result<Vec<AgentSample>, HerdrError> {
-    let (_, me) = agent_env();
-    Ok(samples_of(agent_list()?, me.as_deref()))
+/// A session snapshot's agents, read entry by entry; `None` when there is no list at all.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Sampled {
+    /// The real agents other than our own pane, each by its pane.
+    pub agents: Vec<(String, AgentSample)>,
+    /// The cwd of each entry herdr shaped unexpectedly, which may be an agent.
+    pub odd: Vec<Option<String>>,
+}
+
+/// Read a session snapshot's agent list; our own pane `me` is left out.
+pub(crate) fn samples_of(agents: &serde_json::Value, me: Option<&str>) -> Option<Sampled> {
+    let mut readable = Vec::new();
+    let mut odd = Vec::new();
+    for entry in agents.as_array()? {
+        match AgentPane::deserialize(entry) {
+            Ok(agent) => readable.push(agent),
+            // Our own pane, or a pane with no agent named: no agent, as for a readable entry.
+            Err(_) if me.is_some() && entry["pane_id"].as_str() == me => {}
+            Err(_)
+                if matches!(&entry["agent"], serde_json::Value::Null)
+                    || entry["agent"].as_str() == Some("") => {}
+            Err(_) => odd.push(entry["cwd"].as_str().filter(|c| !c.is_empty()).map(str::to_string)),
+        }
+    }
+    Some(Sampled { agents: samples_among(readable, me), odd })
 }
 
 /// The sampling rule: real agents other than our own pane.
-fn samples_of(agents: Vec<AgentPane>, me: Option<&str>) -> Vec<AgentSample> {
+fn samples_among(agents: Vec<AgentPane>, me: Option<&str>) -> Vec<(String, AgentSample)> {
     agents
         .into_iter()
         .filter(|agent| agent.is_agent_other_than(me))
-        .map(|agent| AgentSample { status: agent.status(), cwd: agent.cwd })
+        .map(|agent| {
+            (agent.pane_id.clone(), AgentSample { status: agent.status(), cwd: agent.cwd })
+        })
         .collect()
 }
 
@@ -597,23 +621,46 @@ pub fn send_text(pane: &str, text: &str) -> Result<(), SendError> {
 
 /// One request line answered by one reply line, on its own thread, bounded by [`SEND_BOUND`].
 fn socket_call(socket: OsString, request: String) -> Result<(), HerdrError> {
+    reply_outcome(&socket_exchange(socket, request, SEND_BOUND)?)
+}
+
+/// One request answered by one reply, read as `T`; herdr's error code becomes `Refused`.
+pub(crate) fn socket_request<T: serde::de::DeserializeOwned>(
+    socket: OsString,
+    method: &str,
+    bound: Duration,
+) -> Result<T, HerdrError> {
+    let request = serde_json::json!({ "id": method, "method": method, "params": {} });
+    let reply = socket_exchange(socket, request.to_string(), bound)?;
+    if let Some(code) = error_code(&reply) {
+        return Err(HerdrError::refused(Some(code)));
+    }
+    answer(&reply)
+}
+
+/// Write `request` and read herdr's one reply line, on its own thread, within `bound`: a pipe's
+/// read timeout may be unsupported, so the thread is what bounds it.
+pub(crate) fn socket_exchange(
+    socket: OsString,
+    request: String,
+    bound: Duration,
+) -> Result<String, HerdrError> {
     let (tx, rx) = mpsc::channel();
-    let deadline = Instant::now() + SEND_BOUND;
+    let deadline = Instant::now() + bound;
     thread::spawn(move || {
         let _ = tx.send(socket::exchange(&socket, &request, deadline));
     });
-    let reply = match rx.recv_timeout(SEND_BOUND) {
-        Ok(Ok(reply)) => reply,
+    match rx.recv_timeout(bound) {
+        Ok(Ok(reply)) => Ok(reply),
         Ok(Err(error)) => {
             logln!("herdr socket call failed: {error}");
-            return Err(HerdrError::Unanswered);
+            Err(HerdrError::Unanswered)
         }
         Err(_) => {
-            logln!("herdr socket call unanswered after {SEND_BOUND:?}");
-            return Err(HerdrError::Unanswered);
+            logln!("herdr socket call unanswered after {bound:?}");
+            Err(HerdrError::Unanswered)
         }
-    };
-    reply_outcome(&reply)
+    }
 }
 
 /// A `result` reply is success; an error envelope is a refusal carrying its code.
@@ -626,9 +673,11 @@ fn reply_outcome(reply: &str) -> Result<(), HerdrError> {
 }
 
 /// The socket transport: a Unix socket, or a named pipe on Windows; one request per connection.
-mod socket {
+pub(crate) mod socket {
     use std::ffi::OsStr;
     use std::io::{self, BufRead, BufReader, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     /// Write `request` as one line and read the one line herdr answers.
@@ -652,6 +701,117 @@ mod socket {
         Some(deadline.saturating_duration_since(Instant::now()))
             .filter(|left| !left.is_zero())
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "herdr did not answer in time"))
+    }
+
+    /// One `events.subscribe` connection: a reader thread forwards its lines, the acknowledgment
+    /// first; dropping it unblocks that reader and closes the connection.
+    pub(crate) struct Subscription {
+        stream: Arc<Stream>,
+        /// Set before unblocking, so a reader between reads stops instead of reading again.
+        closed: Arc<AtomicBool>,
+        reader: std::thread::JoinHandle<()>,
+    }
+
+    /// What a subscription's reader forwards.
+    #[derive(Debug)]
+    pub(crate) enum Line {
+        /// One line, without its newline.
+        Text(Vec<u8>),
+        /// The connection closed or failed; nothing follows.
+        Closed(String),
+    }
+
+    #[cfg(unix)]
+    type Stream = std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    type Stream = interprocess::local_socket::Stream;
+
+    impl Subscription {
+        /// Connect, write `request`, and hand every line read to `sink`, which says whether anyone
+        /// still listens.
+        pub(crate) fn open(
+            socket: &OsStr,
+            request: &str,
+            deadline: Instant,
+            sink: impl Fn(Line) -> bool + Send + 'static,
+        ) -> io::Result<Self> {
+            let mut stream = connect(socket, deadline)?;
+            stream.write_all(request.as_bytes())?;
+            stream.write_all(b"\n")?;
+            #[cfg(unix)]
+            stream.set_read_timeout(None)?;
+            let stream = Arc::new(stream);
+            let closed = Arc::new(AtomicBool::new(false));
+            let (theirs, their_closed) = (Arc::clone(&stream), Arc::clone(&closed));
+            let reader = std::thread::Builder::new()
+                .name("herdr-subscription".into())
+                .spawn(move || forward(&theirs, &their_closed, &sink))?;
+            Ok(Self { stream, closed, reader })
+        }
+    }
+
+    impl Drop for Subscription {
+        /// Unblock the reader until it returns: a cancel lands only on a read already pending,
+        /// so it repeats, bounded, for a reader that was between reads.
+        fn drop(&mut self) {
+            self.closed.store(true, Ordering::SeqCst);
+            for _ in 0..1000 {
+                #[cfg(unix)]
+                let _ = self.stream.shutdown(std::net::Shutdown::Both);
+                #[cfg(windows)]
+                cancel(&self.stream);
+                if self.reader.is_finished() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            crate::logln!("herdr subscription reader did not stop");
+        }
+    }
+
+    /// Read `stream` until it closes or `closed` is set, forwarding each complete line.
+    fn forward(stream: &Stream, closed: &AtomicBool, sink: &impl Fn(Line) -> bool) {
+        use std::io::Read;
+        let mut pending = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let ended = loop {
+            if closed.load(Ordering::SeqCst) {
+                return;
+            }
+            match (&*stream).read(&mut chunk) {
+                Ok(0) => break "herdr closed the subscription".to_owned(),
+                Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => break e.to_string(),
+            }
+            while let Some(end) = pending.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = pending.drain(..=end).collect();
+                line.pop();
+                if !sink(Line::Text(line)) {
+                    return;
+                }
+            }
+        };
+        if !closed.load(Ordering::SeqCst) {
+            sink(Line::Closed(ended));
+        }
+    }
+
+    /// The handle the stream's reads go through: a duplicate would not cancel them.
+    #[cfg(windows)]
+    fn raw_handle(stream: &Stream) -> std::os::windows::io::RawHandle {
+        use std::os::windows::io::{AsHandle, AsRawHandle};
+        let Stream::NamedPipe(pipe) = stream;
+        pipe.as_handle().as_raw_handle()
+    }
+
+    /// Cancel the reads pending on `stream`'s own handle, so the reader thread returns.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    fn cancel(stream: &Stream) {
+        use windows_sys::Win32::System::IO::CancelIoEx;
+        // SAFETY: the handle stays open while the subscription holds its stream.
+        unsafe { CancelIoEx(raw_handle(stream).cast(), std::ptr::null()) };
     }
 
     /// Timeouts set once at connect: macOS fails `setsockopt` once herdr has closed.
@@ -766,6 +926,27 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_entry_herdr_shaped_unexpectedly_is_set_aside_by_its_cwd() {
+        let list = serde_json::json!([
+            {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1",
+             "agent_status": "working", "agent": "claude", "cwd": "/w"},
+            {"pane_id": "w2:p1", "agent": "codex", "tab_id": null, "cwd": "/elsewhere"},
+            {"pane_id": "w2:p2", "agent": "codex"},
+            {"pane_id": "w2:p3", "tab_id": null, "cwd": "/w"},
+            {"pane_id": "w2:p4", "agent": {"name": "codex"}, "cwd": "/reshaped"},
+            {"pane_id": "w1:p9", "agent": "claude", "tab_id": null},
+        ]);
+        let sampled = super::samples_of(&list, Some("w1:p9")).expect("a list");
+        assert_eq!(sampled.agents.len(), 1, "the readable agent still counts");
+        let odd = [Some("/elsewhere".to_string()), None, Some("/reshaped".to_string())];
+        assert_eq!(
+            sampled.odd, odd,
+            "a shell pane and our own pane are no agents, a reshaped one is"
+        );
+        assert_eq!(super::samples_of(&serde_json::Value::Null, None), None, "no list is no answer");
+    }
+
+    #[test]
     fn sampling_keeps_every_tab_and_workspace() {
         // Membership rides the agent's cwd, never its pane's tab or workspace.
         let agents = vec![
@@ -774,7 +955,7 @@ mod tests {
             AgentPane { cwd: Some("/w/three".into()), ..agent("w9:p1", "w9:t1", "w9") },
         ];
         let cwds: Vec<_> =
-            super::samples_of(agents, None).into_iter().filter_map(|s| s.cwd).collect();
+            super::samples_among(agents, None).into_iter().filter_map(|(_, s)| s.cwd).collect();
         assert_eq!(cwds, ["/w/one", "/w/two", "/w/three"]);
     }
 
@@ -785,9 +966,10 @@ mod tests {
             AgentPane { cwd: Some("/w/shell".into()), ..non_agent_pane("w3:p4", "w3:t1", "w3") },
             AgentPane { cwd: Some("/w/self".into()), ..agent("w3:p5", "w3:t1", "w3") },
         ];
-        let cwds: Vec<_> =
-            super::samples_of(agents, Some("w3:p5")).into_iter().filter_map(|s| s.cwd).collect();
-        assert_eq!(cwds, ["/w/real"]);
+        let samples = super::samples_among(agents, Some("w3:p5"));
+        let panes: Vec<_> =
+            samples.iter().map(|(pane, s)| (pane.as_str(), s.cwd.as_deref())).collect();
+        assert_eq!(panes, [("w3:p1", Some("/w/real"))]);
     }
 
     #[test]
@@ -797,7 +979,8 @@ mod tests {
             cwd: Some("/w/one".into()),
             ..agent("w8:p1", "w8:t1", "w8")
         }];
-        assert_eq!(super::samples_of(agents, None)[0].status, Status::Blocked);
+        let samples = super::samples_among(agents, None);
+        assert_eq!(samples[0].1.status, Status::Blocked);
     }
 
     /// One agent carrying the picker-facing fields herdr omits until something sets them.
