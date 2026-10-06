@@ -53,3 +53,7 @@ smoke-edit:
 ci: fmt-check lint test
     cargo build --release
     python3 scripts/idle_check.py --binary target/release/herdr-reviewr
+
+# own fork: build and put it into the linked kirill.reviewr plugin
+own-install:
+    ./scripts/own-install.sh

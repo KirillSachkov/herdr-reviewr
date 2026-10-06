@@ -1,0 +1,32 @@
+# Own fork's plugin, linked beside the released persiyanov.reviewr (docs/own/decisions.md, decision 2).
+# `just own-install` builds and places bin/herdr-reviewr here.
+id = "kirill.reviewr"
+name = "reviewr-own"
+version = "0.46.0"
+min_herdr_version = "0.9.3"
+platforms = ["macos"]
+description = "Own herdr-reviewr: session review, artifacts, reports and summary."
+
+[[panes]]
+id = "pane"
+title = "reviewr"
+placement = "split"
+command = ["bin/herdr-reviewr"]
+
+[[actions]]
+id = "toggle"
+title = "reviewr-own: toggle pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewr", "--action", "toggle"]
+
+[[actions]]
+id = "open"
+title = "reviewr-own: open pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewr", "--action", "open"]
+
+[[actions]]
+id = "close"
+title = "reviewr-own: close pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewr", "--action", "close"]
