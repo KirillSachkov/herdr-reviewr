@@ -22,8 +22,8 @@ just own-install
 
 Скрипт собирает release, кладёт бинарь в `own/herdr-plugin/bin/` через новый inode с подписью и при
 первом запуске выполняет `herdr plugin link`. Открытые панели держат старый бинарь: закрой и открой их.
-Открыть панель: `herdr plugin action invoke toggle --plugin kirill.reviewr` (клавишу назначает сессия
-`workspace` или владелец). Обе версии ищут панели по имени бинаря, поэтому toggle одной версии видит и
+Открыть панель: `Ctrl+B D` (решение 14; `persiyanov.reviewr` выключен). Вручную:
+`herdr plugin action invoke toggle --plugin kirill.reviewr`. Обе версии ищут панели по имени бинаря, поэтому toggle одной версии видит и
 закрывает панель другой.
 
 ## Вкладка «Сессия»

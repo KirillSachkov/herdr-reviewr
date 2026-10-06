@@ -1,7 +1,5 @@
-//! Own fork: the `Session` tab — this Herdr tab's agent session, its artifacts by tier, and summary.
-//!
-//! Decisions live in `docs/own/decisions.md` (3, 6, 7, 11). The data comes from agent-desk:
-//! the transcript, the session's reports, and Git only in the session's own worktree.
+//! Own fork: the `Session` tab — this Herdr tab's agent session, its artifacts, and summary.
+//! Decisions 3, 6, 7, 11 in `docs/own/decisions.md`; the data comes from agent-desk.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
@@ -95,6 +93,8 @@ pub struct SessionView {
     pub first_prompt: String,
     pub last_answer: String,
     pub prs: Vec<String>,
+    /// The agent's unanswered `AskUserQuestion`.
+    pub question: Option<String>,
     pub artifacts: Vec<Artifact>,
     pub summary: Option<desk::Summary>,
     /// Why there is nothing to show, when the load found no session.
@@ -130,14 +130,19 @@ impl SessionView {
         if let Some(problem) = &self.problem {
             return problem.clone();
         }
-        let from_summary = self.summary.as_ref().map(|s| s.need.trim()).filter(|n| !n.is_empty());
-        if let Some(need) = self.header.need.as_deref().or(from_summary) {
+        if let Some(question) = &self.question {
+            return format!("Нужно от вас: ответить агенту — {question}");
+        }
+        if let Some(need) = self.header.need.as_deref() {
             return format!("Нужно от вас: {need}");
         }
-        match self.agent.as_ref().map(|a| a.status.as_str()) {
-            None if self.loading => "Ищу сессию…".into(),
-            Some("working") => "Агент работает".into(),
-            Some("blocked") => "Агент ждёт ответа в своей панели".into(),
+        // The summary may be older than the last answer, so its `need` stays in the summary.
+        let first = self.last_answer.lines().map(str::trim).find(|l| !l.is_empty());
+        match (self.agent.as_ref().map(|a| a.status.as_str()), first) {
+            (None, _) if self.loading => "Ищу сессию…".into(),
+            (Some("working"), _) => "Агент работает".into(),
+            (Some("blocked"), _) => "Агент ждёт ответа в своей панели".into(),
+            (Some(_), Some(first)) => format!("Агент ответил: {first}"),
             _ => "Нужно от вас: —".into(),
         }
     }
@@ -308,6 +313,7 @@ pub fn load(repo: &Path) -> SessionView {
     view.first_prompt.clone_from(&trace.first_prompt);
     view.last_answer.clone_from(&trace.last_answer);
     view.prs.clone_from(&trace.prs);
+    view.question.clone_from(&trace.question);
     view.summary = desk::cached_summary(&agent.session);
     view.artifacts = artifacts(repo, &agent, &trace);
     view.agent = Some(agent);
@@ -343,11 +349,20 @@ fn artifacts(repo: &Path, agent: &Agent, trace: &desk::Trace) -> Vec<Artifact> {
         .filter_map(|m| Some((m.path.canonicalize().ok()?, m.note.clone())))
         .collect();
     let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let since = trace.started.as_deref().and_then(parse_time);
     let mut out: Vec<Artifact> = candidates
         .iter()
         .filter_map(|c| {
-            let note = marks.get(&c.path).cloned();
-            let tier = tier_of(c, note.is_some())?;
+            let mut note = marks.get(&c.path).cloned();
+            let tier = match tier_of(c, note.is_some()) {
+                Some(tier) => tier,
+                // Named and changed during the session: likely written by a shell command.
+                None if c.origins.contains(&Origin::Named) && changed_since(&c.path, since) => {
+                    note = Some("изменён командой, по времени".into());
+                    Tier::Named
+                }
+                None => return None,
+            };
             Some(Artifact {
                 key: key_of(&root, &c.path),
                 abs: c.path.clone(),
@@ -403,6 +418,18 @@ fn tier_of(c: &Candidate, marked: bool) -> Option<Tier> {
         return Some(Tier::Named);
     }
     Some(Tier::EditedDoc)
+}
+
+fn parse_time(text: &str) -> Option<std::time::SystemTime> {
+    let at =
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
+    Some(at.into())
+}
+
+/// Whether `path` changed on disk after the session started.
+fn changed_since(path: &Path, since: Option<std::time::SystemTime>) -> bool {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    since.zip(modified).is_some_and(|(since, modified)| modified >= since)
 }
 
 /// Well-known places of plans and specs (research/artifacts.md, tier 2).
