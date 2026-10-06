@@ -26,6 +26,9 @@ pub enum Action {
     TabChanges,
     TabAllFiles,
     TabPr,
+    /// Own fork: the `Session` tab and its AI summary.
+    TabSession,
+    Summarize,
     Wrap,
     Rendered,
     NavigatorPosition,
@@ -151,7 +154,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 44] = [
+const ACTIONS: [(Action, &str, &[Key]); 46] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -173,6 +176,8 @@ const ACTIONS: [(Action, &str, &[Key]); 44] = [
     (Action::TabChanges, "tab-changes", &[Key::plain('1')]),
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
+    (Action::TabSession, "tab-session", &[Key::plain('4')]),
+    (Action::Summarize, "summarize", &[Key::plain('A')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),

@@ -28,6 +28,7 @@ pub mod roles;
 pub mod schedule;
 pub mod search;
 pub mod selection;
+pub mod session;
 pub mod snippet;
 #[cfg(test)]
 mod test_support;
@@ -816,6 +817,48 @@ fn glyph_clears(lit_for: Duration) -> bool {
 }
 
 /// Draw, then sleep until input, a worker's result, or the nearest armed deadline.
+/// Own fork: what a session thread sends back.
+enum SessionLanding {
+    View(Box<crate::session::SessionView>),
+    Summary(Result<agent_desk::desk::Summary, String>),
+}
+
+/// Own fork: start the session load or summary the app asked for, off the frame loop.
+fn spawn_session_work(app: &mut App, tx: &crate::wake::Sender<SessionLanding>) {
+    if std::mem::take(&mut app.session_request) && !app.session.loading {
+        app.session_loading(true);
+        let (repo, tx) = (app.repo.clone(), tx.clone());
+        std::thread::spawn(move || {
+            drop(tx.send(SessionLanding::View(Box::new(crate::session::load(&repo)))));
+        });
+    }
+    if std::mem::take(&mut app.summary_request) {
+        if app.session.agent.is_none() {
+            app.status = "no session to summarize".into();
+            return;
+        }
+        app.status = "building the summary, 10–30 s…".into();
+        let (view, tx) = ((*app.session).clone(), tx.clone());
+        std::thread::spawn(move || {
+            drop(tx.send(SessionLanding::Summary(crate::session::summarize(&view))));
+        });
+    }
+}
+
+/// Own fork: land a session thread's result.
+fn land_session(app: &mut App, landing: SessionLanding) {
+    match landing {
+        SessionLanding::View(view) => app.land_session(*view),
+        SessionLanding::Summary(Ok(summary)) => {
+            let mut view = (*app.session).clone();
+            view.summary = Some(summary);
+            app.land_session(view);
+            app.status = "summary ready".into();
+        }
+        SessionLanding::Summary(Err(e)) => app.status = format!("summary failed: {e}"),
+    }
+}
+
 fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Result<()> {
     // The config is read at the first frame and again only when the watcher says it changed.
     let mut config_dirty = true;
@@ -851,6 +894,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
     });
     // What changed in the worktree, its git files and the config.
     let (watch_tx, watch_rx) = crate::wake::channel::<crate::watch::WatchEvent>(&waker);
+    // Own fork: session loads and summaries, one thread per request.
+    let (session_tx, session_rx) = crate::wake::channel::<SessionLanding>(&waker);
     // Its writes reach turn tracking directly, so a terminal editor holding the loop delays nothing.
     let feed = herdr.as_ref().map(crate::herdr_socket::Connection::feed);
     let mut watch =
@@ -1053,6 +1098,12 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             if heard {
                 continue;
             }
+
+            if let Ok(landing) = session_rx.try_recv() {
+                land_session(app, landing);
+                continue;
+            }
+            spawn_session_work(app, &session_tx);
 
             if let Some((_, rx)) = &search_worker
                 && let Ok(completion) = rx.try_recv()
@@ -1847,6 +1898,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             }
             (Some(K::TabChanges), _) => app.set_tab(crate::app::Tab::Changes)?,
             (Some(K::TabAllFiles), _) => app.set_tab(crate::app::Tab::AllFiles)?,
+            (Some(K::TabSession), _) => app.set_tab(crate::app::Tab::Session)?,
             (Some(K::OpenPr), _) => app.pr_open(),
             (Some(K::Search), _) => app.open_search(),
             (Some(K::NavigatorPosition), _) => app.cycle_navigator_position(),
@@ -1887,6 +1939,12 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
 
     if let Some(action) = action {
         match action {
+            K::Summarize if app.tab == crate::app::Tab::Session => app.summary_request = true,
+            K::OpenPr if app.tab == crate::app::Tab::Session => app.open_artifact(),
+            K::Refresh if app.tab == crate::app::Tab::Session => {
+                app.session_request = true;
+                app.refresh_commanded = true;
+            }
             K::Quit => app.request_quit(),
             K::Refresh => {
                 app.request_world_refresh(false);
@@ -1895,6 +1953,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::TabChanges => app.set_tab(crate::app::Tab::Changes)?,
             K::TabAllFiles => app.set_tab(crate::app::Tab::AllFiles)?,
             K::TabPr => app.set_tab(crate::app::Tab::Pr)?,
+            K::TabSession => app.set_tab(crate::app::Tab::Session)?,
             K::Down => app.move_cursor(1)?,
             K::Up => app.move_cursor(-1)?,
             // `expand`/`collapse` act on a directory or fold, else scroll sideways.
@@ -1943,7 +2002,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
             // Inert here; `quit-discard` only answers the quit question.
-            K::Delete | K::OpenPr | K::QuitDiscard => {}
+            K::Delete | K::OpenPr | K::QuitDiscard | K::Summarize => {}
         }
         return Ok(());
     }

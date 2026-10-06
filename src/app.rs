@@ -65,6 +65,8 @@ pub enum Tab {
     Changes,
     AllFiles,
     Pr,
+    /// Own fork: this Herdr tab's agent session — summary and artifacts (`src/session.rs`).
+    Session,
 }
 
 /// An ambient refresh rides a fetch in flight, a forced one supersedes it; `Ord` keeps the stronger.
@@ -77,7 +79,7 @@ pub enum RefreshKind {
 impl Tab {
     /// Whether this tab uses the file tree, diff, and per-tab stash.
     pub(crate) fn is_file_tab(self) -> bool {
-        matches!(self, Tab::Changes | Tab::AllFiles)
+        matches!(self, Tab::Changes | Tab::AllFiles | Tab::Session)
     }
 }
 
@@ -634,6 +636,14 @@ pub struct App {
     toggled_dirs: HashSet<String>,
     /// The inactive tab's saved state, swapped in on a tab switch.
     stash: TabStash,
+    /// Own fork: the file tab `stash` holds, and the third file tab's slot.
+    stash_tab: Tab,
+    third: TabStash,
+    /// Own fork: the `Session` tab's data, and the loads the frame loop owes it.
+    pub session: std::sync::Arc<crate::session::SessionView>,
+    pub session_request: bool,
+    pub summary_request: bool,
+    session_seeded: Option<String>,
     /// The active scope's changed files and the ends they were diffed between, on every tab.
     changeset: Changeset,
     pub diff: FileDiff,
@@ -852,6 +862,12 @@ impl App {
             resume_list: false,
             toggled_dirs: HashSet::new(),
             stash: TabStash::default(),
+            stash_tab: Tab::AllFiles,
+            third: TabStash::default(),
+            session: std::sync::Arc::default(),
+            session_request: false,
+            summary_request: false,
+            session_seeded: None,
             changeset: Changeset::default(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
@@ -1116,7 +1132,7 @@ impl App {
 
     /// Whether directories start expanded: in `Changes` only.
     fn default_expanded(&self) -> bool {
-        self.tab == Tab::Changes
+        matches!(self.tab, Tab::Changes | Tab::Session)
     }
 
     /// The `entries` index of the file row under the cursor, or `None` on a directory row.
@@ -1138,8 +1154,11 @@ impl App {
 
     /// Rebuild the flattened tree from `entries` and the toggled-directory set.
     fn rebuild_file_rows(&mut self) {
-        self.file_rows =
-            file_list::build(&self.entries, &self.toggled_dirs, self.default_expanded());
+        self.file_rows = if self.tab == Tab::Session {
+            crate::session::rows(&self.session, &self.entries, &self.toggled_dirs)
+        } else {
+            file_list::build(&self.entries, &self.toggled_dirs, self.default_expanded())
+        };
     }
 
     /// What the cursor points at, by path.
@@ -1202,6 +1221,7 @@ impl App {
             base_epoch: self.base_epoch,
             turn_baseline: self.herdr.last_turn.tree().map(str::to_string),
             commit_pick: self.commit_pick.clone(),
+            session: (self.tab == Tab::Session).then(|| self.session.clone()),
             // `Changes` never reads the toggled set, so a toggle there invalidates nothing.
             toggled_dirs: if self.tab == Tab::AllFiles {
                 self.toggled_dirs.clone()
@@ -1316,7 +1336,7 @@ impl App {
     /// Open `path`: its diff in `Changes`, its content in `All files`.
     fn open_path_in_tab(&mut self, path: String) {
         match self.tab {
-            Tab::AllFiles => self.set_file_view(&path),
+            Tab::AllFiles | Tab::Session => self.set_file_view(&path),
             // `Changes` (the `PR` tab never opens a file in the read pane).
             _ => self.set_diff(path),
         }
@@ -1372,7 +1392,8 @@ impl App {
 
     /// The File view for `path`: the too-large notice unread, else the highlighted worktree content.
     fn file_view(&mut self, path: &str) -> (FileDiff, String) {
-        match worktree_content(&self.repo, path) {
+        let pseudo = self.session.text(path).filter(|_| self.tab == Tab::Session);
+        match pseudo.map_or_else(|| worktree_content(&self.repo, path), Ok) {
             Ok(content) => {
                 let diff = self.cache.get_file(path.to_string(), &content, &self.highlighter);
                 (diff, content)
@@ -2504,6 +2525,7 @@ impl App {
             // Before the frame, so no list shows under another base's label.
             self.reload()?;
         } else {
+            self.park_changes_in_stash();
             self.stash.file_cursor = 0;
             self.stash.expanded_folds.clear();
             self.stash.diff_cursor = 0;
@@ -2516,7 +2538,7 @@ impl App {
             self.adopt_pick_status(build.pick_status);
             self.changeset = build.changeset;
             // Re-mark the badges in place, so none belongs to the old base.
-            for entry in &mut self.entries {
+            for entry in self.entries.iter_mut().filter(|_| self.tab != Tab::Session) {
                 entry.annotation = self.changeset.files.get(&entry.path).cloned();
             }
             self.rebuild_file_rows();
@@ -2548,7 +2570,7 @@ impl App {
         }
         // Bring the tab's state into the live fields if the stash holds it.
         if self.active_file_tab != tab {
-            self.swap_active_with_stash();
+            self.swap_in_file_tab(tab);
             self.active_file_tab = tab;
             // Follow a markdown choice flipped while away.
             if self.rendered.on_screen() != self.wants_rendered()
@@ -2557,6 +2579,9 @@ impl App {
                 self.rebuild_visible();
                 self.settle_read();
             }
+        }
+        if tab == Tab::Session {
+            self.session_request = true;
         }
         // A return paints its stash and refreshes behind; a first visit loads before the frame.
         if self.tab_visited {
@@ -2767,6 +2792,58 @@ impl App {
             Ok(()) => self.status = format!("opened {} in browser", self.pr_forge.abbr()),
             Err(e) => self.status = e.to_string(),
         }
+    }
+
+    /// Own fork: bring `tab` into the live fields from whichever slot holds it.
+    fn swap_in_file_tab(&mut self, tab: Tab) {
+        if self.stash_tab != tab {
+            std::mem::swap(&mut self.stash, &mut self.third);
+        }
+        self.swap_active_with_stash();
+        self.stash_tab = self.active_file_tab;
+    }
+
+    /// Own fork: `rebase_changes` re-marks `Changes` in the stash, so it must be there.
+    fn park_changes_in_stash(&mut self) {
+        if self.stash_tab != Tab::Changes && self.active_file_tab != Tab::Changes {
+            std::mem::swap(&mut self.stash, &mut self.third);
+            self.stash_tab = Tab::Changes;
+        }
+    }
+
+    /// Own fork: land a session load; the tab's list rebuilds behind it.
+    pub fn land_session(&mut self, mut view: crate::session::SessionView) {
+        view.epoch = self.session.epoch.wrapping_add(1);
+        let id = view.agent.as_ref().map(|a| a.session.clone());
+        self.session = std::sync::Arc::new(view);
+        if self.tab == Tab::Session {
+            // Code starts folded once per session; the reviewer's toggles then stay.
+            if id.is_some() && self.session_seeded != id {
+                self.toggled_dirs.insert(crate::session::Tier::Code.group_path());
+                self.session_seeded = id;
+            }
+            self.request_world_refresh(false);
+        }
+    }
+
+    /// Own fork: mark the session view as loading, keeping what it shows.
+    pub fn session_loading(&mut self, loading: bool) {
+        let mut view = (*self.session).clone();
+        view.loading = loading;
+        self.session = std::sync::Arc::new(view);
+    }
+
+    /// Own fork: open the shown artifact with the system (`o` on the `Session` tab).
+    pub fn open_artifact(&mut self) {
+        let Some(path) = self.diff_path.clone() else { return };
+        let full = self.repo.join(&path);
+        self.status = match self.session.text(&path) {
+            Some(_) => "the summary has no file".to_string(),
+            None => match crate::session::open_external(&full) {
+                Ok(()) => format!("opened {}", crate::session::short_path(&full)),
+                Err(e) => e,
+            },
+        };
     }
 
     /// Swap the live per-tab fields with the stash; a field left out bleeds between tabs.

@@ -1227,7 +1227,7 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     if row != area.y {
         return None;
     }
-    let spans = tab_spans(keymap, app.pr_forge);
+    let spans = tab_spans(keymap, app.pr_forge, app.tab);
     for &(tab, start, end) in &spans {
         if (start as u16..end as u16).contains(&col) {
             return Some(HeaderHit::Tab(tab));
@@ -1253,14 +1253,19 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
     None
 }
 
-/// The three tab labels, each led by its hint key; the third is `PR` or `MR`.
-fn tab_labels(keymap: &Keymap, forge: crate::git::Forge) -> [(Tab, String); 3] {
+/// The tab labels, each led by its hint key; the third is `PR` or `MR`.
+/// Own fork: `Session` shows only while active, so the upstream bar keeps its width.
+fn tab_labels(keymap: &Keymap, forge: crate::git::Forge, active: Tab) -> Vec<(Tab, String)> {
     use crate::keymap::Action as K;
-    [
+    let mut labels = vec![
         (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
         (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
         (Tab::Pr, format!("{} {}", keymap.hint(K::TabPr).label(), forge.abbr())),
-    ]
+    ];
+    if active == Tab::Session {
+        labels.push((Tab::Session, format!("{} Сессия", keymap.hint(K::TabSession).label())));
+    }
+    labels
 }
 const HEADER_LEAD: &str = " ";
 const TAB_GAP: &str = "  ";
@@ -1276,10 +1281,10 @@ fn indicator_glyph(app: &App) -> &'static str {
 }
 
 /// Each tab's header columns, for paint and hit test alike.
-fn tab_spans(keymap: &Keymap, forge: crate::git::Forge) -> Vec<(Tab, usize, usize)> {
+fn tab_spans(keymap: &Keymap, forge: crate::git::Forge, active: Tab) -> Vec<(Tab, usize, usize)> {
     let mut col = HEADER_LEAD.len();
     let mut out = Vec::new();
-    for (i, (tab, label)) in tab_labels(keymap, forge).iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(keymap, forge, active).iter().enumerate() {
         if i > 0 {
             col += TAB_GAP.len();
         }
@@ -1352,7 +1357,7 @@ fn pick_label(app: &App) -> Option<(String, String, String, String)> {
 fn base_parts(app: &App, keymap: &Keymap, width: u16) -> Option<(String, String, String)> {
     let (lead, shown, marker, tail) = base_label(app)?;
     // Everything else on the line plus the base's own gap and the suffix's minimum gap.
-    let fixed = header_prefix_len(&tab_spans(keymap, app.pr_forge))
+    let fixed = header_prefix_len(&tab_spans(keymap, app.pr_forge, app.tab))
         + scope_chip(app).len()
         + BASE_GAP.len()
         + lead.width()
@@ -1395,7 +1400,8 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
     let p = app.palette();
     let bar = Style::default().bg(p.fill(Fill::Bar));
     let mut spans = vec![Span::styled(HEADER_LEAD, bar)];
-    for (i, (tab, label)) in tab_labels(app.keymap(), app.pr_forge).into_iter().enumerate() {
+    for (i, (tab, label)) in tab_labels(app.keymap(), app.pr_forge, app.tab).into_iter().enumerate()
+    {
         if i > 0 {
             spans.push(Span::styled(TAB_GAP, bar));
         }
@@ -1416,13 +1422,30 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
+    // Own fork: the `Session` tab shows what the agent needs in place of the scope.
+    if app.tab == Tab::Session {
+        let p = app.palette();
+        let bar = Style::default().bg(p.fill(Fill::Bar));
+        let mut spans = tab_bar_spans(app);
+        let used: usize = spans.iter().map(Span::width).sum();
+        let budget = (area.width as usize).saturating_sub(used + HEADER_LEAD.len()).max(1);
+        let need = truncate_width(&app.session.need(), budget);
+        let pad = budget.saturating_sub(need.width());
+        spans.push(Span::styled(
+            need,
+            bar.fg(p.ink(Ink::Warning, Fill::Bar)).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" ".repeat(pad + HEADER_LEAD.len()), bar));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
     let chip = scope_chip(app);
     let base = base_parts(app, app.keymap(), area.width);
     let base_width = base.as_ref().map_or(0, |(lead, name, tail)| {
         BASE_GAP.len() + lead.width() + name.width() + tail.width()
     });
     let suffix = header_suffix(app);
-    let prefix = header_prefix_len(&tab_spans(app.keymap(), app.pr_forge));
+    let prefix = header_prefix_len(&tab_spans(app.keymap(), app.pr_forge, app.tab));
     // The suffix keeps the same edge pad as the tab strip's lead.
     let used = prefix + chip.len() + base_width + suffix.width() + HEADER_LEAD.len();
     // Right-align the suffix; at least one gap column when the bar overflows.
@@ -1486,6 +1509,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         let gone = app.commits_gone_message();
         let msg = match app.tab {
             Tab::AllFiles => "no files",
+            Tab::Session => "no session",
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
             _ => "no changes",
@@ -1525,7 +1549,14 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                     let reserve = if app.tab == Tab::AllFiles { DIR_DOT_RESERVE } else { 0 };
                     let lead = format!("{nest}{arrow}");
                     let budget = width.saturating_sub(lead.width() + reserve + 1).max(1);
-                    let name = format!("{}/", elide_head(&row.name, budget));
+                    // Own fork: a `Session` group row is a label, not a folder.
+                    let slash =
+                        if row.dir_path().is_some_and(|d| d.starts_with(crate::session::GROUP)) {
+                            ""
+                        } else {
+                            "/"
+                        };
+                    let name = format!("{}{slash}", elide_head(&row.name, budget));
                     let mut spans = vec![
                         Span::styled(lead, Style::default().fg(p.ink(Ink::TextMuted, on))),
                         Span::styled(name, name_style),
@@ -1751,9 +1782,11 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
     let mut title = match (&app.diff_path, &app.diff.previous_path) {
         (Some(new), Some(old)) => format!("{old} → {new}"),
+        (Some(new), None) if new == crate::session::SUMMARY => "Сводка".to_string(),
+        (Some(new), None) if app.tab == Tab::Session => crate::session::short_path(new),
         (Some(new), None) => new.clone(),
         (None, _) => match app.tab {
-            Tab::AllFiles => "File",
+            Tab::AllFiles | Tab::Session => "File",
             _ => "Diff",
         }
         .to_string(),
@@ -1769,7 +1802,7 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         // `All files` is no diff, so its copy avoids diff words.
         let gone = app.commits_gone_message();
         let msg = match app.tab {
-            Tab::AllFiles => match app.diff.notice {
+            Tab::AllFiles | Tab::Session => match app.diff.notice {
                 Some(notice) => notice.message(),
                 None if app.diff_path.is_some() => "empty file",
                 None => "select a file to read",
@@ -2739,7 +2772,8 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         A::OpenPr => (hint(K::OpenPr), "open ↗"),
         A::Refresh => (hint(K::Refresh), "refresh"),
         A::Tabs => {
-            (format!("{}·{}·{}", hint(K::TabChanges), hint(K::TabAllFiles), hint(K::TabPr)), "tabs")
+            let keys = [K::TabChanges, K::TabAllFiles, K::TabPr, K::TabSession].map(hint);
+            (keys.join("·"), "tabs")
         }
         A::Quit => (hint(K::Quit), "quit"),
     };

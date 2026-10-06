@@ -27,6 +27,8 @@ pub struct WorldInput {
     pub commit_pick: Option<CommitPick>,
     /// Expanded ignored directories whose children the `All files` tree loads.
     pub toggled_dirs: HashSet<String>,
+    /// Own fork: the `Session` tab's view, compared by its landing epoch.
+    pub session: Option<std::sync::Arc<crate::session::SessionView>>,
 }
 
 /// One refresh's result; the base rides along so the header and its changeset land together.
@@ -105,6 +107,7 @@ pub fn build(input: &WorldInput) -> Result<WorldSnapshot> {
     let entries = match input.tab {
         // The whole worktree (ignored included), with expanded ignored dirs loaded lazily.
         Tab::AllFiles => all_files_entries(input, &changeset.files)?,
+        Tab::Session => input.session.as_ref().map(|v| v.entries()).unwrap_or_default(),
         // `Changes` (the `PR` tab never builds a snapshot).
         _ => changeset.files.values().map(Entry::from_changed).collect(),
     };
@@ -342,6 +345,7 @@ fn merge_paths(
             entries.extend(fresh);
             entries
         }
+        Tab::Session => last.entries.clone(),
         _ => files.values().map(Entry::from_changed).collect(),
     };
     Ok(WorldSnapshot {

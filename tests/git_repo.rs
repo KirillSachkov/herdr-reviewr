@@ -48,6 +48,7 @@ fn world_input(repo: &Path, scope: Scope, base: Option<&str>, turn: Option<&str>
         turn_baseline: turn.map(str::to_string),
         commit_pick: None,
         toggled_dirs: std::collections::HashSet::default(),
+        session: None,
     }
 }
 
