@@ -142,6 +142,16 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
 
     if !existing.is_empty() {
         return match action {
+            // Own fork: a toggle shows a pane hidden behind a focus change before it closes one.
+            Action::Toggle if !existing.iter().any(|id| focused(&panes, id)) => {
+                let zoom = matches!(
+                    config.toggle_placement(),
+                    TogglePlacement::Overlay | TogglePlacement::Zoomed
+                );
+                herdr::show_pane(existing[0], zoom)
+                    .map(|()| Some(format!("showed {} in {ws}", existing[0])))
+                    .map_err(|_| refused(format!("herdr could not show {} in {ws}", existing[0])))
+            }
             Action::Close | Action::Toggle => close_all(&existing, ws).map(Some),
             Action::Open | Action::AutoOpen => {
                 Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))))
@@ -305,6 +315,11 @@ fn is_review_ui(process: &Process) -> bool {
         |name: &str| if cfg!(windows) { name.eq_ignore_ascii_case(BINARY) } else { name == BINARY };
     let named = process.argv0.iter().chain(argv.first()).any(|exe| same(program_name(exe)));
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
+}
+
+/// Own fork: whether the user has pane `id` focused.
+fn focused(panes: &PaneList, id: &str) -> bool {
+    panes.panes.iter().any(|p| p.pane_id == id && p.focused)
 }
 
 /// Close every pane in `existing` concurrently; a pane already gone counts as closed.

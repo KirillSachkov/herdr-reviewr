@@ -1412,3 +1412,26 @@ fn a_refusal_names_the_rejected_live_cwd_too() {
         format!("reviewr: not a git repo: '<no cwd>' (live cwd '{}')\n", dir.path().display())
     );
 }
+
+// --- Own fork: a toggle shows a pane hidden behind a focus change before it closes one.
+
+#[test]
+fn a_toggle_shows_a_hidden_review_pane_and_closes_a_focused_one() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("config.toml"), "toggle_placement = \"overlay\"\n").unwrap();
+    procinfo(dir.path(), "w1:p5", &json!([review_ui()]));
+    // The agent took focus inside the zoomed tab: the overlay lives on, unseen.
+    panes(dir.path(), &json!([{"pane_id": "w1:p1", "focused": true}, {"pane_id": "w1:p5"}]));
+    let output = run_with_context("toggle", dir.path(), &repo_context());
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "reviewr: showed w1:p5 in workspace-1\n");
+    let calls = herdr_calls(dir.path());
+    assert!(calls.contains("plugin pane focus w1:p5"), "{calls}");
+    assert!(calls.contains("pane zoom w1:p5 --on"), "{calls}");
+    assert!(!calls.contains("pane close"), "a hidden pane keeps its comments: {calls}");
+    // Shown and focused, the next toggle closes it.
+    reset(dir.path());
+    panes(dir.path(), &json!([{"pane_id": "w1:p1"}, {"pane_id": "w1:p5", "focused": true}]));
+    let output = run_with_context("toggle", dir.path(), &repo_context());
+    assert_eq!(stdout(&output), "reviewr: closed w1:p5 in workspace-1\n");
+}

@@ -222,6 +222,9 @@ pub(crate) struct PaneEntry {
     pub(crate) foreground_cwd: Option<String>,
     #[serde(default, deserialize_with = "non_empty")]
     label: Option<String>,
+    /// Own fork: whether the user has this pane focused, so a toggle can tell hidden from shown.
+    #[serde(default)]
+    pub(crate) focused: bool,
 }
 
 impl PaneList {
@@ -334,6 +337,15 @@ pub(crate) fn open_plugin_pane(open: &PaneOpen) -> Result<OpenedPane, HerdrError
 /// Close pane `pane` by id with `pane close`, which reaches any pane.
 pub(crate) fn close_pane(pane: &str) -> Result<(), HerdrError> {
     call(&["pane", "close", pane]).map(drop)
+}
+
+/// Own fork: bring plugin pane `pane` to the front, zoomed over its tab when `zoom`.
+pub(crate) fn show_pane(pane: &str, zoom: bool) -> Result<(), HerdrError> {
+    call(&["plugin", "pane", "focus", pane])?;
+    if zoom {
+        call(&["pane", "zoom", pane, "--on"])?;
+    }
+    Ok(())
 }
 
 /// Set tab `tab`'s label.

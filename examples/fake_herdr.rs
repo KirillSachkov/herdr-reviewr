@@ -31,7 +31,8 @@ fn main() -> ExitCode {
                 thread::sleep(Duration::from_secs(30));
             }
             let opened = if dir.join("opened").exists() {
-                format!(r#",{{"pane_id":"{OPENED}"}}"#)
+                // herdr focuses the pane it opens.
+                format!(r#",{{"pane_id":"{OPENED}","focused":true}}"#)
             } else {
                 String::new()
             };

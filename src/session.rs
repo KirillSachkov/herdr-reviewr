@@ -762,9 +762,11 @@ pub fn with_link(view: &SessionView, repo: &Path, path: &Path) -> SessionView {
     view
 }
 
-/// Whether this pane runs inside Herdr, where a session can exist; standalone it never does.
+/// Whether this pane runs inside Herdr with its CLI on, where a session can exist.
+/// Tests and the idle check switch the CLI off with `HERDR_BIN_PATH=false`.
 pub fn available() -> bool {
-    std::env::var_os("HERDR_PANE_ID").is_some_and(|p| !p.is_empty())
+    let cli_off = std::env::var("HERDR_BIN_PATH").is_ok_and(|b| b.is_empty() || b == "false");
+    std::env::var_os("HERDR_PANE_ID").is_some_and(|p| !p.is_empty()) && !cli_off
 }
 
 /// One Herdr CLI call's JSON answer.
