@@ -29,6 +29,8 @@ pub enum Action {
     /// Own fork: the `Session` tab and its AI summary.
     TabSession,
     Summarize,
+    ScopeSession,
+    Submit,
     Wrap,
     Rendered,
     NavigatorPosition,
@@ -154,7 +156,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 46] = [
+const ACTIONS: [(Action, &str, &[Key]); 48] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -178,6 +180,8 @@ const ACTIONS: [(Action, &str, &[Key]); 46] = [
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
     (Action::TabSession, "tab-session", &[Key::plain('4')]),
     (Action::Summarize, "summarize", &[Key::plain('A')]),
+    (Action::ScopeSession, "scope-session", &[Key::plain('a')]),
+    (Action::Submit, "submit", &[Key::plain('S')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),
@@ -195,7 +199,7 @@ const ACTIONS: [(Action, &str, &[Key]); 46] = [
     (Action::Find, "find", &[Key::ctrl('f')]),
     (Action::GotoLine, "goto-line", &[Key::plain(':')]),
     (Action::Keys, "keys", &[Key::plain('?')]),
-    (Action::Send, "send", &[Key::plain('s'), Key::plain('S')]),
+    (Action::Send, "send", &[Key::plain('s')]),
     (Action::Copy, "copy", &[Key::plain('y'), Key::plain('Y')]),
     (Action::OpenPr, "open-pr", &[Key::plain('o')]),
     (Action::Refresh, "refresh", &[Key::plain('r')]),
@@ -322,7 +326,7 @@ mod tests {
     fn defaults_bind_every_action_and_hint_is_first_key() {
         let keymap = Keymap::default();
         assert_eq!(keymap.action_for(Key::plain('c')), Some(Action::Comment));
-        assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Send));
+        assert_eq!(keymap.action_for(Key::plain('S')), Some(Action::Submit));
         assert_eq!(keymap.action_for(Key::plain('m')), Some(Action::Rendered));
         assert_eq!(keymap.action_for(Key::plain('p')), Some(Action::NavigatorPosition));
         assert_eq!(keymap.action_for(Key::plain('z')), Some(Action::NavigatorHide));
@@ -382,7 +386,6 @@ mod tests {
 
         let keymap = Keymap::resolve(&[(Action::Send, vec![Key::plain('x')])]).unwrap();
         assert_eq!(keymap.action_for(Key::plain('s')), None);
-        assert_eq!(keymap.action_for(Key::plain('S')), None);
         assert_eq!(keymap.action_for(Key::plain('x')), Some(Action::Send));
     }
 

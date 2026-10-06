@@ -1927,6 +1927,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             (Some(K::Down), _) => app.list_move(1),
             (Some(K::Up), _) => app.list_move(-1),
             (Some(K::Send), _) => app.send_to_agent(),
+            (Some(K::Submit), _) => app.submit_to_agent(),
             (Some(K::Copy), _) => {
                 app.export(&Clipboard);
             }
@@ -1941,7 +1942,8 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
         match action {
             K::Summarize if app.tab == crate::app::Tab::Session => app.summary_request = true,
             K::OpenPr if app.tab == crate::app::Tab::Session => app.open_artifact(),
-            K::Refresh if app.tab == crate::app::Tab::Session => {
+            K::ScopeSession => app.set_scope(Scope::Session)?,
+            K::Refresh if app.tab == crate::app::Tab::Session || app.scope == Scope::Session => {
                 app.session_request = true;
                 app.refresh_commanded = true;
             }
@@ -1991,6 +1993,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::Edit => app.start_edit(),
             K::Delete if app.focus == Focus::Diff => app.delete_comment(),
             K::Send => app.send_to_agent(),
+            K::Submit => app.submit_to_agent(),
             K::Copy => {
                 app.export(&Clipboard);
             }

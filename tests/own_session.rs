@@ -104,3 +104,75 @@ fn the_session_tab_keeps_its_place_across_the_other_file_tabs() {
     assert_eq!(app.file_cursor, cursor, "the cursor returns where it was");
     assert!(render(&app).contains("шаг один"));
 }
+
+#[test]
+fn the_session_scope_diffs_from_before_the_session_and_reaches_outside_the_repo() {
+    use herdr_reviewr::model::{ChangeKind, Scope};
+    use herdr_reviewr::session::SessionChange;
+    let r = Repo::init();
+    r.write("notes.md", "before session\n");
+    r.commit_all("init");
+    r.write("notes.md", "after session\n");
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = outside.path().canonicalize().unwrap().join("profile.md");
+    std::fs::write(&elsewhere, "new rule\n").unwrap();
+    let mut app = app_on(&r);
+    app.set_scope(Scope::Session).unwrap();
+    assert!(app.session_request, "the scope asks for the session");
+    let change = |key: String, kind, before: &str| SessionChange {
+        key,
+        kind,
+        additions: 1,
+        deletions: 1,
+        git: false,
+        before: Some(before.into()),
+    };
+    app.land_session(SessionView {
+        changes: vec![
+            change("notes.md".into(), ChangeKind::Modified, "before session\n"),
+            change(elsewhere.display().to_string(), ChangeKind::Added, ""),
+        ],
+        ..view(&r)
+    });
+    land_world(&mut app);
+    let out = render(&app);
+    assert!(out.contains("[session]"), "the scope chip:\n{out}");
+    assert!(out.contains("profile.md"), "a file outside the repo:\n{out}");
+    assert!(out.contains("new rule"), "its content, all new:\n{out}");
+    app.move_cursor(1).unwrap();
+    let out = render(&app);
+    assert!(out.contains("before session") && out.contains("after session"), "both sides:\n{out}");
+}
+
+#[test]
+fn a_diagram_wider_than_the_pane_clips_instead_of_wrapping() {
+    let t = herdr_reviewr::theme::resolve(Some("catppuccin"));
+    let hl = herdr_reviewr::highlight::Highlighter::new(t.syntax);
+    let wide = format!("┌{}┐", "─".repeat(60));
+    let text = format!("```text\n{wide}\n│ box │\n```\n");
+    let out = herdr_reviewr::markdown::render(&text, 40, &hl, &t.palette);
+    let lines: Vec<String> = out
+        .lines
+        .iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+        .filter(|l: &String| !l.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2, "one row per source line, never wrapped: {lines:?}");
+    assert!(lines[0].ends_with('›'), "the cut is marked: {lines:?}");
+    assert_eq!(lines[1].trim_end(), "  │ box │", "a line that fits is whole: {lines:?}");
+    let narrow = herdr_reviewr::markdown::render("```text\n│ box │\n```\n", 40, &hl, &t.palette);
+    assert!(!narrow.lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains('›'))));
+}
+
+#[test]
+fn an_alert_shows_its_label_and_drops_the_marker() {
+    let t = herdr_reviewr::theme::resolve(Some("catppuccin"));
+    let hl = herdr_reviewr::highlight::Highlighter::new(t.syntax);
+    let out =
+        herdr_reviewr::markdown::render("> [!WARNING]\n> Нужно решение.\n", 60, &hl, &t.palette);
+    let text: Vec<String> =
+        out.lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
+    assert!(text.iter().any(|l| l.contains("⚠ Warning")), "{text:?}");
+    assert!(text.iter().any(|l| l.contains("Нужно решение.")), "{text:?}");
+    assert!(!text.iter().any(|l| l.contains("[!WARNING]")), "{text:?}");
+}

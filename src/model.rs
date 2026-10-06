@@ -8,6 +8,8 @@ pub enum Scope {
     LastTurn,
     /// A picked run of commits, diffed `A^` against `B`.
     Commits,
+    /// Own fork: everything this tab's agent session changed, from before the session (decision 5).
+    Session,
 }
 
 impl Scope {
@@ -17,6 +19,7 @@ impl Scope {
             Scope::Branch => "branch",
             Scope::LastTurn => "last turn",
             Scope::Commits => "commits",
+            Scope::Session => "session",
         }
     }
 
@@ -27,6 +30,7 @@ impl Scope {
             Scope::Branch => "branch",
             Scope::LastTurn => "last-turn",
             Scope::Commits => "commits",
+            Scope::Session => "session",
         }
     }
 
@@ -37,7 +41,8 @@ impl Scope {
             Scope::Uncommitted => Scope::Branch,
             Scope::Branch => Scope::LastTurn,
             Scope::LastTurn => Scope::Commits,
-            Scope::Commits => Scope::Uncommitted,
+            // Own fork: `session` is reached by its key, never by the chip.
+            Scope::Commits | Scope::Session => Scope::Uncommitted,
         }
     }
 }

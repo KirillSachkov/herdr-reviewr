@@ -92,6 +92,8 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
+    // Own fork: `> [!NOTE]` alerts, which reports use for what needs the owner.
+    opts.insert(Options::ENABLE_GFM);
     let mut line_starts = vec![0usize];
     line_starts.extend(text.char_indices().filter(|(_, c)| *c == '\n').map(|(i, _)| i + 1));
     let expanded: HashSet<String> = expanded.iter().cloned().collect();
@@ -435,9 +437,12 @@ impl Renderer<'_> {
                 self.heading_text = Some(String::new());
                 self.styles.push(self.heading_style(level));
             }
-            Tag::BlockQuote(_) => {
+            Tag::BlockQuote(kind) => {
                 self.flush_block(true);
                 self.quote += 1;
+                if let Some(kind) = kind {
+                    self.emit_alert_label(kind);
+                }
             }
             Tag::List(start) => {
                 // "- a" followed by a nested list flushes "a" before the depth changes.
@@ -1121,6 +1126,14 @@ impl Renderer<'_> {
         let (fence, close) = (self.block_src, self.block_end);
         let block_start = fence + usize::from(fenced);
         let last = highlighted.len().saturating_sub(1);
+        // Own fork: a block wider than the pane clips instead of wrapping, so a diagram keeps its shape.
+        let budget =
+            self.budget(self.prefix(self.marker.as_deref()).1.width() + CODE_INDENT.width());
+        let width = |line: &Vec<_>| -> usize {
+            line.iter().map(|s: &crate::diff::Span| sanitize(&s.text).width()).sum()
+        };
+        let clip = highlighted.iter().any(|line| width(line) > budget);
+        let more = Style::default().fg(self.p.ink(Ink::Accent, Fill::Base));
         for (i, line) in highlighted.into_iter().enumerate() {
             self.block_src = if i == 0 { fence } else { block_start + i };
             self.block_end = if fenced && i == last { close } else { block_start + i };
@@ -1129,10 +1142,25 @@ impl Renderer<'_> {
                 .into_iter()
                 .map(|s| (sanitize(&s.text), Style::default().fg(crate::ui::rgb(s.color))))
                 .collect();
+            let fragments = if clip { clip_fragments(fragments, budget, more) } else { fragments };
             self.emit_fragments(fragments, CODE_INDENT);
         }
         self.row_lines = None;
         self.needs_blank = true;
+    }
+
+    /// Own fork: an alert's label line, `⚠ Warning` and the like, in the quote's bar.
+    fn emit_alert_label(&mut self, kind: pulldown_cmark::BlockQuoteKind) {
+        use pulldown_cmark::BlockQuoteKind as K;
+        let (label, ink) = match kind {
+            K::Note => ("ⓘ Note", Ink::Accent),
+            K::Tip => ("✦ Tip", Ink::Accent),
+            K::Important => ("❗ Important", Ink::Warning),
+            K::Warning => ("⚠ Warning", Ink::Warning),
+            K::Caution => ("⛔ Caution", Ink::Warning),
+        };
+        let style = Style::default().fg(self.p.ink(ink, Fill::Base)).add_modifier(Modifier::BOLD);
+        self.emit_fragments(vec![(label.to_string(), style)], "");
     }
 
     fn emit_mermaid_placeholder(&mut self, content: &str) {
@@ -1427,6 +1455,41 @@ fn html_attr(tag: &str, key: &str) -> Option<String> {
 }
 
 /// Hostile characters as a visible placeholder, tabs as spaces.
+/// Own fork: `fragments` cut to `budget` columns, a `›` in the last one marking the cut.
+fn clip_fragments(
+    fragments: Vec<(String, Style)>,
+    budget: usize,
+    more: Style,
+) -> Vec<(String, Style)> {
+    let total: usize = fragments.iter().map(|(t, _)| t.width()).sum();
+    if total <= budget {
+        return fragments;
+    }
+    let mut room = budget.saturating_sub(1);
+    let mut out = Vec::new();
+    for (text, style) in fragments {
+        let mut kept = String::new();
+        for c in text.chars() {
+            let w = char_width(c);
+            if w > room {
+                room = 0;
+                break;
+            }
+            room -= w;
+            kept.push(c);
+        }
+        if !kept.is_empty() {
+            out.push((kept, style));
+        }
+        if room == 0 {
+            break;
+        }
+    }
+    let used: usize = out.iter().map(|(t, _): &(String, Style)| t.width()).sum();
+    out.push((format!("{}›", " ".repeat(budget.saturating_sub(used + 1))), more));
+    out
+}
+
 fn sanitize(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {

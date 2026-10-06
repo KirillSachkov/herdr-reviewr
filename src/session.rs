@@ -71,6 +71,19 @@ pub struct Artifact {
     pub note: Option<String>,
 }
 
+/// One file the session changed, keyed like an artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionChange {
+    pub key: String,
+    pub kind: ChangeKind,
+    pub additions: u32,
+    pub deletions: u32,
+    /// From the own worktree's Git, diffed against `base`; else from the transcript.
+    pub git: bool,
+    /// The text before the session's first edit, when the transcript holds it.
+    pub before: Option<String>,
+}
+
 /// The agent the tab shows, as Herdr lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
@@ -96,6 +109,10 @@ pub struct SessionView {
     /// The agent's unanswered `AskUserQuestion`.
     pub question: Option<String>,
     pub artifacts: Vec<Artifact>,
+    /// Every file the session changed, for the `session` scope (decision 5).
+    pub changes: Vec<SessionChange>,
+    /// The own worktree's merge-base, the old side of its Git changes.
+    pub base: Option<String>,
     pub summary: Option<desk::Summary>,
     /// Why there is nothing to show, when the load found no session.
     pub problem: Option<String>,
@@ -145,6 +162,51 @@ impl SessionView {
             (Some(_), Some(first)) => format!("Агент ответил: {first}"),
             _ => "Нужно от вас: —".into(),
         }
+    }
+
+    /// The `session` scope's changeset; it carries no ends, its sides come from [`Self::sides`].
+    pub fn changeset(&self) -> crate::world::Changeset {
+        let files = self
+            .changes
+            .iter()
+            .map(|c| {
+                let file = ChangedFile {
+                    path: c.key.clone(),
+                    kind: c.kind,
+                    additions: c.additions,
+                    deletions: c.deletions,
+                    previous_path: None,
+                    binary: false,
+                    old_size: 0,
+                    new_size: None,
+                };
+                (c.key.clone(), file)
+            })
+            .collect();
+        crate::world::Changeset { files, ends: None }
+    }
+
+    /// The `session` scope's two sides of `key`: before the session, and on disk now.
+    pub fn sides(&self, repo: &Path, key: &str) -> Result<(String, String), crate::diff::Notice> {
+        let Some(change) = self.changes.iter().find(|c| c.key == key) else {
+            return Ok((String::new(), String::new()));
+        };
+        if change.git
+            && let Some(base) = &self.base
+        {
+            return match crate::git::diff_sides(repo, base, None, key, None) {
+                Ok(crate::git::DiffSides::Text { old, new }) => Ok((old, new)),
+                Ok(crate::git::DiffSides::Binary) => Err(crate::diff::Notice::Binary),
+                Err(_) => Err(crate::diff::Notice::Unreadable),
+            };
+        }
+        let new = read_text(&repo.join(key))?;
+        let old = match &change.before {
+            Some(before) => before.clone(),
+            // No state before the session (Codex): `HEAD` stands in, inside the repo.
+            None => head_text(repo, key).unwrap_or_default(),
+        };
+        Ok((old, new))
     }
 
     /// The text behind a pseudo path, `None` for a real file.
@@ -316,6 +378,8 @@ pub fn load(repo: &Path) -> SessionView {
     view.question.clone_from(&trace.question);
     view.summary = desk::cached_summary(&agent.session);
     view.artifacts = artifacts(repo, &agent, &trace);
+    view.base = desk::own_worktree(&agent.cwd).and_then(|_| merge_base(repo));
+    view.changes = changes(repo, &agent, &trace);
     view.agent = Some(agent);
     view
 }
@@ -386,6 +450,70 @@ fn artifacts(repo: &Path, agent: &Agent, trace: &desk::Trace) -> Vec<Artifact> {
     }
     out.sort_by(|a, b| a.tier.cmp(&b.tier).then_with(|| a.key.cmp(&b.key)));
     out
+}
+
+/// The session's changed files; one changed and changed back is left out (decision 48).
+fn changes(repo: &Path, agent: &Agent, trace: &desk::Trace) -> Vec<SessionChange> {
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let mut out: Vec<SessionChange> = desk::changes(trace, &agent.cwd)
+        .into_iter()
+        .filter_map(|f| {
+            let abs = f.path.canonicalize().unwrap_or_else(|_| f.path.clone());
+            let git = f.source == "git";
+            let now = std::fs::read_to_string(&abs).ok();
+            if !git && f.before.is_some() && f.before == now {
+                return None;
+            }
+            let kind = match f.letter {
+                'A' => ChangeKind::Added,
+                'D' => ChangeKind::Deleted,
+                _ if now.is_none() => ChangeKind::Deleted,
+                _ => ChangeKind::Modified,
+            };
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            Some(SessionChange {
+                key: key_of(&root, &abs),
+                kind,
+                additions: count(f.added),
+                deletions: count(f.removed),
+                git,
+                before: f.before,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out.dedup_by(|a, b| a.key == b.key);
+    out
+}
+
+/// The branch scope's merge-base, which the own worktree's Git changes diff against.
+fn merge_base(repo: &Path) -> Option<String> {
+    let resolution = crate::git::resolve_base(repo, None).ok()?;
+    crate::git::merge_base(repo, resolution.status.winner.as_ref()?.oid())
+}
+
+fn read_text(path: &Path) -> Result<String, crate::diff::Notice> {
+    match std::fs::read(path) {
+        Ok(bytes) if crate::diff::over_byte_budget(bytes.len()) => {
+            Err(crate::diff::Notice::TooLarge)
+        }
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| crate::diff::Notice::Binary),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+/// `key` at `HEAD`, for a file inside the repo.
+fn head_text(repo: &Path, key: &str) -> Option<String> {
+    if Path::new(key).is_absolute() {
+        return None;
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("HEAD:{key}")])
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// The tier by decision 11; `None` for a path the session only mentioned or showed.
@@ -507,6 +635,52 @@ fn find_agent(repo: &Path) -> Result<Agent, String> {
         status: chosen["agent_status"].as_str().unwrap_or_default().to_string(),
         found_by,
     })
+}
+
+/// The tab `pane` sits in now, read live since a pane can move; the launch tab as a fallback.
+pub fn pane_tab(pane: &str) -> Option<String> {
+    herdr(&["pane", "get", pane])
+        .and_then(|v| v["result"]["pane"]["tab_id"].as_str().map(str::to_string))
+        .or_else(|| std::env::var("HERDR_TAB_ID").ok())
+}
+
+/// Submit `text` to the agent in `pane` as a message (`S`, decision 8); refused while it asks.
+pub fn submit(pane: &str, text: &str) -> anyhow::Result<()> {
+    let bin = std::env::var("HERDR_BIN_PATH")
+        .ok()
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "herdr".into());
+    let out = Command::new(bin).args(["agent", "prompt", pane, text]).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let answer = String::from_utf8_lossy(&out.stdout);
+    if answer.contains("agent_blocked") {
+        anyhow::bail!("answer the agent's question first");
+    }
+    anyhow::bail!("herdr agent prompt failed: {}", String::from_utf8_lossy(&out.stderr).trim())
+}
+
+/// The `S` destination: the comments go in as a submitted message.
+#[derive(Debug)]
+pub struct Prompt {
+    pub pane: String,
+    pub name: String,
+}
+
+impl crate::export::ExportTarget for Prompt {
+    fn export(&self, text: &str) -> anyhow::Result<()> {
+        submit(&self.pane, &format!("Замечания ревью:\n\n{text}"))
+    }
+    fn label(&self) -> &'static str {
+        "agent prompt"
+    }
+    fn success_message(&self, count: usize) -> String {
+        format!("submitted {} to {}", crate::export::counted_comments(count), self.name)
+    }
+    fn failure_message(&self, error: &anyhow::Error, copy: &str) -> String {
+        format!("{error}, press {copy} to copy")
+    }
 }
 
 /// One Herdr CLI call's JSON answer.

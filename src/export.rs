@@ -52,7 +52,7 @@ pub fn send_failure(error: &herdr::SendError, agent: Option<&str>, copy: &str) -
     format!("{cause}, press {copy} to copy")
 }
 
-pub(crate) fn counted_comments(count: usize) -> String {
+pub fn counted_comments(count: usize) -> String {
     let noun = if count == 1 { "comment" } else { "comments" };
     format!("{count} {noun}")
 }

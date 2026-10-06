@@ -428,6 +428,13 @@ pub fn send_target(ids: &PaneIds) -> Result<SendTarget, SendError> {
     let agents = agent_list()?;
     // Candidates: agents in our workspace other than our pane, in herdr's own order.
     let picked = candidates(&agents, ws.as_deref(), me.as_deref());
+    // Own fork: the agent in this pane's own tab takes the send without a picker (decision 9).
+    let tab = me.as_deref().and_then(crate::session::pane_tab);
+    let in_tab: Vec<&&AgentPane> =
+        picked.iter().filter(|a| tab.as_deref() == Some(a.tab_id.as_str())).collect();
+    if let [own] = in_tab.as_slice() {
+        return Ok(SendTarget::One(own.choice(&HashMap::new())));
+    }
     match picked.len() {
         0 => Err(SendError::NoAgent),
         // The sole-agent send shows no row, so only the picker pays for the tab-label call.

@@ -11,6 +11,14 @@ fn main() {
     for a in &view.artifacts {
         println!("{:?} {:?} {} {}", a.tier, a.letter, a.key, a.note.as_deref().unwrap_or(""));
     }
+    println!("changes (base {:?}):", view.base);
+    for c in &view.changes {
+        let before = c.before.as_ref().map(String::len);
+        println!(
+            "  {:?} +{} -{} git={} before={before:?} {}",
+            c.kind, c.additions, c.deletions, c.git, c.key
+        );
+    }
     if std::env::args().any(|a| a == "--summary") {
         let started = std::time::Instant::now();
         let mut view = view.clone();

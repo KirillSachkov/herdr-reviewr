@@ -150,6 +150,10 @@ fn scope_build(input: &WorldInput, head: Option<String>) -> Result<ScopeBuild> {
             };
             Ok(ScopeBuild { branch_base: resolution.status, ..build })
         }
+        Scope::Session => Ok(ScopeBuild {
+            changeset: input.session.as_ref().map(|v| v.changeset()).unwrap_or_default(),
+            ..ScopeBuild::default()
+        }),
         Scope::Commits => {
             // A tag without a pick builds the empty changeset.
             let Some(pick) = &input.commit_pick else { return Ok(ScopeBuild::default()) };
@@ -312,12 +316,13 @@ fn merge_paths(
     fresh: Vec<ChangedFile>,
     ends: Option<DiffEnds>,
 ) -> Result<WorldSnapshot> {
-    let files: BTreeMap<String, ChangedFile> = if input.scope == Scope::Commits {
-        last.changeset.files.clone()
-    } else {
-        let kept = last.changeset.files.values().filter(|f| !f.touched_by(paths));
-        kept.cloned().chain(fresh).map(|f| (f.path.clone(), f)).collect()
-    };
+    let files: BTreeMap<String, ChangedFile> =
+        if matches!(input.scope, Scope::Commits | Scope::Session) {
+            last.changeset.files.clone()
+        } else {
+            let kept = last.changeset.files.values().filter(|f| !f.touched_by(paths));
+            kept.cloned().chain(fresh).map(|f| (f.path.clone(), f)).collect()
+        };
     let entries = match input.tab {
         Tab::AllFiles => {
             let batch: Vec<String> = paths.iter().cloned().collect();

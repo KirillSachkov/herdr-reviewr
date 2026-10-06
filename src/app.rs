@@ -642,6 +642,8 @@ pub struct App {
     /// Own fork: the `Session` tab's data, and the loads the frame loop owes it.
     pub session: std::sync::Arc<crate::session::SessionView>,
     pub session_request: bool,
+    /// Own fork: the next send submits (`S`), carried through the agent picker.
+    submit_next: bool,
     pub summary_request: bool,
     session_seeded: Option<String>,
     /// The active scope's changed files and the ends they were diffed between, on every tab.
@@ -866,6 +868,7 @@ impl App {
             third: TabStash::default(),
             session: std::sync::Arc::default(),
             session_request: false,
+            submit_next: false,
             summary_request: false,
             session_seeded: None,
             changeset: Changeset::default(),
@@ -1221,7 +1224,8 @@ impl App {
             base_epoch: self.base_epoch,
             turn_baseline: self.herdr.last_turn.tree().map(str::to_string),
             commit_pick: self.commit_pick.clone(),
-            session: (self.tab == Tab::Session).then(|| self.session.clone()),
+            session: (self.tab == Tab::Session || self.scope == Scope::Session)
+                .then(|| self.session.clone()),
             // `Changes` never reads the toggled set, so a toggle there invalidates nothing.
             toggled_dirs: if self.tab == Tab::AllFiles {
                 self.toggled_dirs.clone()
@@ -1741,6 +1745,9 @@ impl App {
     /// `path`'s sides from the landed build's record: a notice, or one `git diff` of the scope's ends.
     fn content_sides(&self, path: &str) -> Result<(String, String), crate::diff::Notice> {
         use crate::diff::Notice;
+        if self.scope == Scope::Session {
+            return self.session.sides(&self.repo, path);
+        }
         // A path outside the landed changeset is a stale row: empty until the next reconcile.
         let (Some(annotation), Some(ends)) = (self.changeset.files.get(path), &self.changeset.ends)
         else {
@@ -2507,6 +2514,7 @@ impl App {
             return Ok(());
         }
         if self.scope != scope && !self.composing() {
+            self.session_request |= scope == Scope::Session;
             self.scope = scope;
             self.rebase_changes()?;
             // An explicit switch reveals the cursor (a refresh does not).
@@ -2816,6 +2824,10 @@ impl App {
         view.epoch = self.session.epoch.wrapping_add(1);
         let id = view.agent.as_ref().map(|a| a.session.clone());
         self.session = std::sync::Arc::new(view);
+        if self.scope == Scope::Session && self.tab == Tab::Changes {
+            self.cache = DiffCache::new();
+            self.request_world_refresh(false);
+        }
         if self.tab == Tab::Session {
             // Code starts folded once per session; the reviewer's toggles then stay.
             if id.is_some() && self.session_seeded != id {
@@ -4724,6 +4736,15 @@ fn armed_row(rows: &[AgentChoice], last_sent: Option<&str>) -> usize {
 
 impl App {
     /// `Send`: one agent sends, several open the picker, none points at the clipboard.
+    /// Own fork: `S` — send like `s`, but submitted as a message (decision 8).
+    pub fn submit_to_agent(&mut self) {
+        self.submit_next = true;
+        self.send_to_agent();
+        if self.mode != Mode::Picker {
+            self.submit_next = false;
+        }
+    }
+
     pub fn send_to_agent(&mut self) {
         if self.store.is_empty() {
             self.status = "no comments yet".to_string();
@@ -4755,6 +4776,7 @@ impl App {
 
     /// Close the picker onto the view it opened over.
     pub fn close_picker(&mut self) {
+        self.submit_next = false;
         if self.mode == Mode::Picker {
             self.mode = std::mem::replace(&mut self.picker_over, Mode::Normal);
         }
@@ -4778,7 +4800,9 @@ impl App {
     /// Send to the highlighted agent and close either way; a failure keeps the comments.
     pub fn picker_pick(&mut self) {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
+        let submit = self.submit_next;
         self.close_picker();
+        self.submit_next = submit;
         self.export_to_agent(&agent);
     }
 
@@ -5056,7 +5080,14 @@ impl App {
     /// Export to one decided pane; only a delivery records it as `last used`.
     fn export_to_agent(&mut self, agent: &AgentChoice) {
         let target = Agent { pane: agent.pane_id.clone(), name: agent.name.clone() };
-        if self.export(&target) {
+        let submit =
+            crate::session::Prompt { pane: agent.pane_id.clone(), name: agent.name.clone() };
+        let sent = if std::mem::take(&mut self.submit_next) {
+            self.export(&submit)
+        } else {
+            self.export(&target)
+        };
+        if sent {
             self.last_sent_pane = Some(agent.pane_id.clone());
         }
     }
