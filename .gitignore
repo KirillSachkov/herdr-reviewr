@@ -26,3 +26,6 @@ __pycache__/
 
 # own fork: the linked plugin binary
 /own/herdr-plugin/bin/
+
+# own fork: agent reports (skill report)
+/.reports/
