@@ -82,7 +82,7 @@ fn the_summary_reads_as_markdown_and_an_artifact_as_its_content() {
     let out = render(&app);
     assert!(out.contains("Сводка сессии"), "the summary opens first:\n{out}");
     assert!(
-        out.contains("`A` строит") || out.contains("A строит"),
+        out.contains("`i` строит") || out.contains("i строит"),
         "it says how to build it:\n{out}"
     );
     // Down past the group row to the plan.
@@ -198,4 +198,33 @@ fn a_local_link_opens_its_file_in_files_or_under_the_session_links() {
     // A URL and a missing path are not local files.
     assert!(!app.open_local("https://example.com/a.md"));
     assert!(!app.open_local("no/such/file.md"));
+}
+
+#[test]
+fn keys_work_on_the_russian_layout_and_the_summary_key_shows_in_the_footer() {
+    use herdr_reviewr::keymap::{Action, Key, Keymap};
+    let keys = Keymap::default();
+    assert_eq!(keys.action_for(Key::plain('ш')), Some(Action::Summarize), "ш is i");
+    assert_eq!(keys.action_for(Key::plain('ф')), Some(Action::ScopeSession), "ф is a");
+    assert_eq!(keys.action_for(Key::plain('Ы')), Some(Action::Submit), "Ы is S");
+    assert_eq!(keys.action_for(Key::plain('с')), Some(Action::Comment), "с is c");
+    assert_eq!(keys.action_for(Key::plain('.')), Some(Action::Search), "the / key types . there");
+    let r = Repo::init();
+    let app = session_app(&r);
+    let out = render(&app);
+    assert!(out.contains("i сводка"), "the footer offers the summary:\n{out}");
+    assert!(out.contains("Сводка · не построена"), "the row says it is not built:\n{out}");
+}
+
+#[test]
+fn a_building_summary_shows_in_the_list_the_bar_and_the_summary() {
+    let r = Repo::init();
+    let mut app = session_app(&r);
+    app.summary_building(true);
+    let out = render(&app);
+    assert!(out.contains("Сводка · ⟳ строится"), "{out}");
+    assert!(out.contains("⟳ сводка строится 0 с"), "{out}");
+    assert!(out.contains("Сводка строится, 5–30 секунд"), "{out}");
+    app.summary_building(false);
+    assert!(!render(&app).contains("строится"));
 }

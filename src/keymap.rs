@@ -57,6 +57,15 @@ pub enum Action {
     QuitDiscard,
 }
 
+/// Own fork: the Latin-layout key under a Russian-layout character (ЙЦУКЕН on QWERTY).
+fn latin_key(key: Key) -> Option<Key> {
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбюёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮЁ.,";
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~/?";
+    let KeyCode::Char(c) = key.code else { return None };
+    let at = RU.chars().position(|r| r == c)?;
+    Some(Key { code: KeyCode::Char(EN.chars().nth(at)?), ..key })
+}
+
 /// A key's base: a printable character or a named key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyCode {
@@ -179,7 +188,7 @@ const ACTIONS: [(Action, &str, &[Key]); 48] = [
     (Action::TabAllFiles, "tab-all-files", &[Key::plain('2')]),
     (Action::TabPr, "tab-pr", &[Key::plain('3')]),
     (Action::TabSession, "tab-session", &[Key::plain('4')]),
-    (Action::Summarize, "summarize", &[Key::plain('A')]),
+    (Action::Summarize, "summarize", &[Key::plain('i'), Key::plain('A')]),
     (Action::ScopeSession, "scope-session", &[Key::plain('a')]),
     (Action::Submit, "submit", &[Key::plain('S')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
@@ -304,7 +313,11 @@ impl Keymap {
     /// The action `key` fires, if any.
     #[must_use]
     pub fn action_for(&self, key: Key) -> Option<Action> {
-        self.bindings.iter().find(|(_, keys)| keys.contains(&key)).map(|(action, _)| *action)
+        let found = |key: Key| {
+            self.bindings.iter().find(|(_, keys)| keys.contains(&key)).map(|(action, _)| *action)
+        };
+        // Own fork: a key the Russian layout typed means its key on the Latin one.
+        found(key).or_else(|| latin_key(key).and_then(found))
     }
 
     /// The action's hint key: the first bound key.

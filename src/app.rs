@@ -562,6 +562,8 @@ pub enum FooterAction {
     Refresh,
     Tabs,
     Quit,
+    /// Own fork: build the Session tab's AI summary.
+    Summarize,
 }
 
 /// Where a footer action sits: row 1, or a `?` band.
@@ -2923,6 +2925,19 @@ impl App {
         Ok(())
     }
 
+    /// Own fork: mark the AI summary as building or done; the list row and summary say so.
+    pub fn summary_building(&mut self, building: bool) {
+        let mut view = (*self.session).clone();
+        view.summarizing = building.then(std::time::Instant::now);
+        self.session = std::sync::Arc::new(view);
+        if self.tab == Tab::Session {
+            self.rebuild_file_rows();
+            if self.diff_path.as_deref() == Some(crate::session::SUMMARY) {
+                self.set_file_view(crate::session::SUMMARY);
+            }
+        }
+    }
+
     /// Own fork: mark the session view as loading, keeping what it shows.
     pub fn session_loading(&mut self, loading: bool) {
         let mut view = (*self.session).clone();
@@ -4739,6 +4754,10 @@ impl App {
             out.insert(at, (A::EditFile, Do));
         }
 
+        // Own fork: the Session tab's own keys sit in row 1, the summary first.
+        if self.tab == Tab::Session {
+            out.insert(1.min(out.len()), (A::Summarize, Do));
+        }
         // An armed crossing leads, so the reviewer sees the next press leaves the file.
         if let Some(forward) = self.armed_cross() {
             out[0].1 = Do;

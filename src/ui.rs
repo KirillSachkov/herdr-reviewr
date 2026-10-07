@@ -2814,6 +2814,14 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             (keys.join("·"), "tabs")
         }
         A::Quit => (hint(K::Quit), "quit"),
+        A::Summarize => {
+            let label = if app.session.summarizing.is_some() {
+                "⟳ сводка…"
+            } else {
+                "сводка"
+            };
+            (hint(K::Summarize), label)
+        }
     };
     (k, l.into())
 }

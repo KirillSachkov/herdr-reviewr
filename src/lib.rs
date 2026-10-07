@@ -841,7 +841,10 @@ fn spawn_session_work(app: &mut App, tx: &crate::wake::Sender<SessionLanding>) {
             app.status = "no session to summarize".into();
             return;
         }
-        app.status = "building the summary, 10–30 s…".into();
+        if app.session.summarizing.is_some() {
+            return;
+        }
+        app.summary_building(true);
         let (view, tx) = ((*app.session).clone(), tx.clone());
         std::thread::spawn(move || {
             drop(tx.send(SessionLanding::Summary(crate::session::summarize(&view))));
@@ -852,14 +855,22 @@ fn spawn_session_work(app: &mut App, tx: &crate::wake::Sender<SessionLanding>) {
 /// Own fork: land a session thread's result.
 fn land_session(app: &mut App, landing: SessionLanding) {
     match landing {
-        SessionLanding::View(view) => app.land_session(*view),
+        SessionLanding::View(mut view) => {
+            // A reload never hides a summary still building.
+            view.summarizing = app.session.summarizing;
+            app.land_session(*view);
+        }
         SessionLanding::Summary(Ok(summary)) => {
             let mut view = (*app.session).clone();
             view.summary = Some(summary);
+            view.summarizing = None;
             app.land_session(view);
-            app.status = "summary ready".into();
+            app.status = "сводка готова".into();
         }
-        SessionLanding::Summary(Err(e)) => app.status = format!("summary failed: {e}"),
+        SessionLanding::Summary(Err(e)) => {
+            app.summary_building(false);
+            app.status = format!("сводка не построена: {e}");
+        }
     }
 }
 
@@ -980,6 +991,8 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
             }
             let glyph_due = if app.tab == crate::app::Tab::Pr {
                 app.pr_refreshing()
+            } else if app.session.summarizing.is_some() {
+                true
             } else {
                 world_indicator(world_live.running.map(|at| (at.elapsed(), world_live.builds)))
             };
@@ -1336,6 +1349,11 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 if !left.is_zero() {
                     timeout = timeout.min(left);
                 }
+            }
+            // Own fork: a building summary repaints its seconds once a second, while on screen.
+            if let Some(started) = app.session.summarizing.filter(|_| app.pane_visible()) {
+                let into = started.elapsed().subsec_millis();
+                timeout = timeout.min(Duration::from_millis(u64::from(1000 - into)));
             }
             if let Some(wake) = glyph_wake {
                 timeout = timeout.min(wake.max(Duration::from_millis(15)));

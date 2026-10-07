@@ -133,6 +133,8 @@ pub struct SessionView {
     pub problem: Option<String>,
     /// Whether a load is running, for the summary's wording.
     pub loading: bool,
+    /// When the AI summary build started, while it runs.
+    pub summarizing: Option<std::time::Instant>,
 }
 
 impl PartialEq for SessionView {
@@ -173,7 +175,24 @@ impl SessionView {
             (None, Some(problem)) => parts.push(problem.clone()),
             (None, None) => {}
         }
+        if let Some(progress) = self.progress() {
+            parts.push(progress);
+        }
         parts.join(" · ")
+    }
+
+    /// The summary's list row: building, built at, or not built.
+    pub fn summary_label(&self) -> String {
+        match (&self.summarizing, &self.summary) {
+            (Some(_), _) => "Сводка · ⟳ строится".into(),
+            (None, Some(s)) => format!("Сводка · {}", s.at),
+            (None, None) => "Сводка · не построена".into(),
+        }
+    }
+
+    /// The bar's progress note while the summary builds, its seconds counting.
+    pub fn progress(&self) -> Option<String> {
+        self.summarizing.map(|at| format!("⟳ сводка строится {} с", at.elapsed().as_secs()))
     }
 
     /// The summary's line: what the agent needs from the owner.
@@ -255,6 +274,9 @@ impl SessionView {
             out.push('\n');
             return out;
         };
+        if self.summarizing.is_some() {
+            let _ = writeln!(out, "> [!NOTE]\n> ⟳ Сводка строится, 5–30 секунд.\n");
+        }
         let _ = writeln!(out, "**{}**\n", self.need());
         if let Some(task) = &self.header.task {
             let _ = writeln!(out, "- **Задача:** {task}");
@@ -283,11 +305,11 @@ impl SessionView {
             let _ = write!(out, "\n## Сейчас\n\n{}\n\n", s.now);
             let _ = writeln!(
                 out,
-                "*Сводка: {} · {} · {:.0} с. `A` — построить заново.*\n",
+                "*Сводка построена в {} · {} · {:.0} с. `i` — построить заново.*\n",
                 s.at, s.model, s.seconds
             );
         } else {
-            out.push_str("AI-сводка ещё не построена: `A` строит её за 10–30 секунд.\n\n");
+            out.push_str("AI-сводка ещё не построена: `i` строит её за 5–30 секунд.\n\n");
             if !self.first_prompt.is_empty() {
                 let _ =
                     write!(out, "## Поручение\n\n{}\n\n", quote(&clip(&self.first_prompt, 1200)));
@@ -338,7 +360,7 @@ pub fn rows<S: BuildHasher>(
         if entry.path == SUMMARY {
             out.push(Row {
                 depth: 0,
-                name: "Сводка".into(),
+                name: view.summary_label(),
                 kind: RowKind::File { index },
                 ignored: false,
             });
@@ -919,7 +941,7 @@ mod tests {
         let collapsed: HashSet<String> = [Group::Code.group_path()].into();
         let names: Vec<String> =
             rows(&view, &entries, &collapsed).into_iter().map(|r| r.name).collect();
-        assert_eq!(names, ["Сводка", "Артефакты · 1", "docs/a.md", "Код · 1"]);
+        assert_eq!(names, ["Сводка · не построена", "Артефакты · 1", "docs/a.md", "Код · 1"]);
     }
 
     #[test]
