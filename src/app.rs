@@ -564,6 +564,7 @@ pub enum FooterAction {
     Quit,
     /// Own fork: build the Session tab's AI summary.
     Summarize,
+    PickSession,
 }
 
 /// Where a footer action sits: row 1, or a `?` band.
@@ -648,6 +649,9 @@ pub struct App {
     submit_next: bool,
     pub summary_request: bool,
     session_seeded: Option<String>,
+    /// Own fork: the agent pane the owner picked for the Session tab, and whether the picker picks it.
+    pub session_pick: Option<String>,
+    picking_session: bool,
     /// The active scope's changed files and the ends they were diffed between, on every tab.
     changeset: Changeset,
     pub diff: FileDiff,
@@ -873,6 +877,8 @@ impl App {
             submit_next: false,
             summary_request: false,
             session_seeded: None,
+            session_pick: None,
+            picking_session: false,
             changeset: Changeset::default(),
             diff: FileDiff::empty(),
             visible: Vec::new(),
@@ -1871,6 +1877,8 @@ impl App {
             if self.tab == Tab::Pr {
                 self.request_pr_refresh(RefreshKind::Ambient);
             }
+            // Own fork: the Session tab re-reads its session, so a stale summary says so.
+            self.session_request |= self.tab == Tab::Session;
             self.search_dirty |= self.mode == Mode::Search;
         }
         Some(on)
@@ -4779,6 +4787,9 @@ impl App {
         // Own fork: the Session tab's own keys sit in row 1, the summary first.
         if self.tab == Tab::Session {
             out.insert(1.min(out.len()), (A::Summarize, Do));
+            if self.session.candidates.len() > 1 {
+                out.insert(2.min(out.len()), (A::PickSession, Do));
+            }
         }
         // An armed crossing leads, so the reviewer sees the next press leaves the file.
         if let Some(forward) = self.armed_cross() {
@@ -4888,6 +4899,27 @@ impl App {
         self.keymap().hint(crate::keymap::Action::Copy).label()
     }
 
+    /// Own fork: pick the agent the Session tab shows, among the tab's or the repo's agents.
+    pub fn open_session_picker(&mut self) {
+        let rows = self.session.candidates.clone();
+        if rows.len() < 2 {
+            self.status = "здесь один агент".into();
+            return;
+        }
+        let shown = self.session.agent.as_ref().map(|a| a.pane_id.clone());
+        self.open_picker(rows);
+        self.picking_session = self.mode == Mode::Picker;
+        if let Some(i) = shown.and_then(|p| self.picker_rows.iter().position(|r| r.pane_id == p)) {
+            self.picker_cursor = i;
+        }
+    }
+
+    /// Whether the open picker picks the Session tab's agent, not a send's.
+    #[must_use]
+    pub fn picking_session(&self) -> bool {
+        self.picking_session
+    }
+
     /// Open the agent picker over `rows`, armed on the last-sent agent.
     pub fn open_picker(&mut self, rows: Vec<AgentChoice>) {
         // Empty or nested, it would be a modal one `esc` cannot leave.
@@ -4903,6 +4935,7 @@ impl App {
     /// Close the picker onto the view it opened over.
     pub fn close_picker(&mut self) {
         self.submit_next = false;
+        self.picking_session = false;
         if self.mode == Mode::Picker {
             self.mode = std::mem::replace(&mut self.picker_over, Mode::Normal);
         }
@@ -4926,6 +4959,12 @@ impl App {
     /// Send to the highlighted agent and close either way; a failure keeps the comments.
     pub fn picker_pick(&mut self) {
         let Some(agent) = self.picker_rows.get(self.picker_cursor).cloned() else { return };
+        if self.picking_session {
+            self.close_picker();
+            self.session_pick = Some(agent.pane_id);
+            self.session_request = true;
+            return;
+        }
         let submit = self.submit_next;
         self.close_picker();
         self.submit_next = submit;

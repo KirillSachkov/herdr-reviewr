@@ -33,6 +33,7 @@ fn view(repo: &Repo) -> SessionView {
     };
     SessionView {
         agent: Some(Agent {
+            pane_id: "w1:p1".into(),
             kind: "claude".into(),
             session: "s1".into(),
             name: "own".into(),
@@ -227,4 +228,46 @@ fn a_building_summary_shows_in_the_list_the_bar_and_the_summary() {
     assert!(out.contains("Сводка строится, 5–30 секунд"), "{out}");
     app.summary_building(false);
     assert!(!render(&app).contains("строится"));
+}
+
+#[test]
+fn w_picks_the_agent_the_session_tab_shows_among_several() {
+    use herdr_reviewr::app::Mode;
+    use herdr_reviewr::herdr::AgentChoice;
+    let r = Repo::init();
+    let mut app = session_app(&r);
+    let choice = |pane: &str, name: &str| AgentChoice {
+        pane_id: pane.into(),
+        name: name.into(),
+        state: "idle".into(),
+        tab: "w1:t1".into(),
+    };
+    let mut v = view(&r);
+    v.candidates = vec![choice("w1:p1", "own"), choice("w1:p2", "other")];
+    app.land_session(v);
+    let out = render(&app);
+    assert!(out.contains("W агент"), "the footer offers the pick:\n{out}");
+    app.open_session_picker();
+    assert_eq!(app.mode, Mode::Picker);
+    assert!(render(&app).contains("агент вкладки «Сессия»"));
+    app.picker_move(1);
+    app.session_request = false;
+    app.picker_pick();
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!(app.session_pick.as_deref(), Some("w1:p2"));
+    assert!(app.session_request, "the pick reloads the tab");
+}
+
+#[test]
+fn a_summary_older_than_the_session_says_so() {
+    let r = Repo::init();
+    let mut app = session_app(&r);
+    let mut v = view(&r);
+    v.summary = Some(agent_desk::desk::Summary { at: "10:00".into(), ..Default::default() });
+    v.summary_stale = true;
+    app.land_session(v);
+    land_world(&mut app);
+    let out = render(&app);
+    assert!(out.contains("Сводка · 10:00 · устарела"), "{out}");
+    assert!(out.contains("Сессия продолжилась после сводки"), "{out}");
 }

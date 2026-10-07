@@ -837,9 +837,10 @@ enum SessionLanding {
 fn spawn_session_work(app: &mut App, tx: &crate::wake::Sender<SessionLanding>) {
     if std::mem::take(&mut app.session_request) && !app.session.loading {
         app.session_loading(true);
-        let (repo, tx) = (app.repo.clone(), tx.clone());
+        let (repo, pick, tx) = (app.repo.clone(), app.session_pick.clone(), tx.clone());
         std::thread::spawn(move || {
-            drop(tx.send(SessionLanding::View(Box::new(crate::session::load(&repo)))));
+            let view = crate::session::load(&repo, pick.as_deref());
+            drop(tx.send(SessionLanding::View(Box::new(view))));
         });
     }
     if std::mem::take(&mut app.summary_request) {
@@ -869,6 +870,7 @@ fn land_session(app: &mut App, landing: SessionLanding) {
         SessionLanding::Summary(Ok(summary)) => {
             let mut view = (*app.session).clone();
             view.summary = Some(summary);
+            view.summary_stale = false;
             view.summarizing = None;
             app.land_session(view);
             app.status = "сводка готова".into();
@@ -1987,6 +1989,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
     if let Some(action) = action {
         match action {
             K::Summarize if app.tab == crate::app::Tab::Session => app.summary_request = true,
+            K::PickSession if app.tab == crate::app::Tab::Session => app.open_session_picker(),
             K::OpenPr if app.tab == crate::app::Tab::Session => app.open_artifact(),
             K::ScopeSession => app.set_scope(Scope::Session)?,
             K::Refresh if app.tab == crate::app::Tab::Session || app.scope == Scope::Session => {
@@ -2051,7 +2054,7 @@ fn dispatch_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> Re
             K::GotoLine => app.open_line(),
             K::Keys => app.toggle_keys(),
             // Inert here; `quit-discard` only answers the quit question.
-            K::Delete | K::OpenPr | K::QuitDiscard | K::Summarize => {}
+            K::Delete | K::OpenPr | K::QuitDiscard | K::Summarize | K::PickSession => {}
         }
         return Ok(());
     }

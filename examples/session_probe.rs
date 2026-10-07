@@ -4,7 +4,7 @@
 fn main() {
     let repo = std::env::args().nth(1).unwrap_or_else(|| ".".into());
     let started = std::time::Instant::now();
-    let view = herdr_reviewr::session::load(std::path::Path::new(&repo));
+    let view = herdr_reviewr::session::load(std::path::Path::new(&repo), None);
     println!("loaded in {:?}", started.elapsed());
     println!("agent: {:?}", view.agent);
     println!("{}", view.need());

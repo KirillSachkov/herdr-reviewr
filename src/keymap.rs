@@ -31,6 +31,7 @@ pub enum Action {
     Summarize,
     ScopeSession,
     Submit,
+    PickSession,
     Wrap,
     Rendered,
     NavigatorPosition,
@@ -165,7 +166,7 @@ impl Key {
 }
 
 /// Every action with its config name and default keys, the one table the keymap derives from.
-const ACTIONS: [(Action, &str, &[Key]); 48] = [
+const ACTIONS: [(Action, &str, &[Key]); 49] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -191,6 +192,7 @@ const ACTIONS: [(Action, &str, &[Key]); 48] = [
     (Action::Summarize, "summarize", &[Key::plain('i'), Key::plain('A')]),
     (Action::ScopeSession, "scope-session", &[Key::plain('a')]),
     (Action::Submit, "submit", &[Key::plain('S')]),
+    (Action::PickSession, "pick-session", &[Key::plain('W')]),
     (Action::Wrap, "wrap", &[Key::plain('w')]),
     (Action::Rendered, "rendered", &[Key::plain('m')]),
     (Action::NavigatorPosition, "navigator-position", &[Key::plain('p')]),

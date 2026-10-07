@@ -1,6 +1,7 @@
 //! Own fork: the `Session` tab — this Herdr tab's agent session, its artifacts, and summary.
 //! Decisions 3, 6, 7, 11 in `docs/own/decisions.md`; the data comes from agent-desk.
 
+use crate::herdr::AgentChoice;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::hash::BuildHasher;
@@ -100,6 +101,7 @@ pub struct SessionChange {
 /// The agent the tab shows, as Herdr lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Agent {
+    pub pane_id: String,
     pub kind: String,
     pub session: String,
     pub name: String,
@@ -140,6 +142,10 @@ pub struct SessionView {
     /// The own worktree's merge-base, the old side of its Git changes.
     pub base: Option<String>,
     pub summary: Option<desk::Summary>,
+    /// The agents this tab could show, when more than one: `W` picks.
+    pub candidates: Vec<crate::herdr::AgentChoice>,
+    /// Whether the session went on after the summary was built.
+    pub summary_stale: bool,
     /// Why there is nothing to show, when the load found no session.
     pub problem: Option<String>,
     /// Whether a load is running, for the summary's wording.
@@ -212,6 +218,7 @@ impl SessionView {
     pub fn summary_label(&self) -> String {
         match (&self.summarizing, &self.summary) {
             (Some(_), _) => "Сводка · ⟳ строится".into(),
+            (None, Some(s)) if self.summary_stale => format!("Сводка · {} · устарела", s.at),
             (None, Some(s)) => format!("Сводка · {}", s.at),
             (None, None) => "Сводка · не построена".into(),
         }
@@ -298,11 +305,19 @@ impl SessionView {
         let mut out = String::from("# Сводка сессии\n\n");
         let Some(agent) = &self.agent else {
             out.push_str(self.problem.as_deref().unwrap_or("Ищу агента этой вкладки…"));
-            out.push('\n');
+            out.push_str("\n\n");
+            for c in &self.candidates {
+                let _ = writeln!(out, "- {} · {}", c.name, c.state);
+            }
             return out;
         };
         if self.summarizing.is_some() {
             let _ = writeln!(out, "> [!NOTE]\n> ⟳ Сводка строится, 5–30 секунд.\n");
+        } else if self.summary_stale {
+            let _ = writeln!(
+                out,
+                "> [!WARNING]\n> Сессия продолжилась после сводки: `i` построит новую.\n"
+            );
         }
         let _ = writeln!(out, "**{}**\n", self.need());
         if let Some(task) = &self.header.task {
@@ -313,6 +328,10 @@ impl SessionView {
         }
         let name = if agent.name.is_empty() { &agent.kind } else { &agent.name };
         let _ = writeln!(out, "- **Агент:** {name} · {} · {}", agent.kind, agent.status);
+        if self.candidates.len() > 1 {
+            let others = self.candidates.len() - 1;
+            let _ = writeln!(out, "- **Ещё агентов здесь:** {others}, `W` — выбрать");
+        }
         for pr in &self.prs {
             let _ = writeln!(out, "- **PR:** {pr}");
         }
@@ -444,9 +463,11 @@ fn quote(text: &str) -> String {
 // ---- loading, off the frame loop ----
 
 /// Find this tab's agent and read its session; blocking (Herdr calls, the transcript).
-pub fn load(repo: &Path) -> SessionView {
+pub fn load(repo: &Path, pick: Option<&str>) -> SessionView {
     let mut view = SessionView::default();
-    let agent = match find_agent(repo) {
+    let (found, candidates) = find_agent(repo, pick);
+    view.candidates = candidates;
+    let agent = match found {
         Ok(agent) => agent,
         Err(problem) => {
             view.problem = Some(problem);
@@ -460,6 +481,7 @@ pub fn load(repo: &Path) -> SessionView {
     view.prs.clone_from(&trace.prs);
     view.question.clone_from(&trace.question);
     view.summary = desk::cached_summary(&agent.session);
+    view.summary_stale = view.summary.as_ref().is_some_and(|s| s.stale(&trace));
     view.artifacts = artifacts(repo, &agent, &trace);
     view.project = project(repo);
     view.base = desk::own_worktree(&agent.cwd).and_then(|_| merge_base(repo));
@@ -679,55 +701,72 @@ fn key_of(root: &Path, path: &Path) -> String {
 }
 
 /// This tab's agent; a pane outside any agent tab falls back to the workspace's agent in this repo.
-fn find_agent(repo: &Path) -> Result<Agent, String> {
-    let me = std::env::var("HERDR_PANE_ID")
-        .map_err(|_| "reviewr открыт вне Herdr: сессии нет".to_string())?;
+fn find_agent(repo: &Path, pick: Option<&str>) -> (Result<Agent, String>, Vec<AgentChoice>) {
+    let Ok(me) = std::env::var("HERDR_PANE_ID") else {
+        return (Err("reviewr открыт вне Herdr: сессии нет".into()), Vec::new());
+    };
     let tab = herdr(&["pane", "get", &me])
         .and_then(|v| v["result"]["pane"]["tab_id"].as_str().map(str::to_string))
         .or_else(|| std::env::var("HERDR_TAB_ID").ok());
     let workspace = me.split(':').next().unwrap_or_default().to_string();
-    let listed = herdr(&["agent", "list"]).ok_or("Herdr не ответил на agent list")?;
-    let agents: Vec<&Value> = listed["result"]["agents"]
-        .as_array()
-        .map(|a| a.iter().filter(|v| v["pane_id"].as_str() != Some(me.as_str())).collect())
-        .unwrap_or_default();
+    let Some(listed) = herdr(&["agent", "list"]) else {
+        return (Err("Herdr не ответил на agent list".into()), Vec::new());
+    };
     let session_of = |v: &Value| {
         v["agent_session"]["value"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
     };
-    let in_tab: Vec<&&Value> = agents
-        .iter()
-        .filter(|v| {
-            tab.is_some() && v["tab_id"].as_str() == tab.as_deref() && session_of(v).is_some()
+    let agents: Vec<&Value> = listed["result"]["agents"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|v| v["pane_id"].as_str() != Some(me.as_str()) && session_of(v).is_some())
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    let in_repo = |v: &&&Value| {
+    let in_repo = |v: &&Value| {
         v["workspace_id"].as_str() == Some(workspace.as_str())
-            && session_of(v).is_some()
             && v["cwd"]
                 .as_str()
                 .is_some_and(|c| Path::new(c).canonicalize().is_ok_and(|c| c.starts_with(&root)))
     };
-    let (chosen, found_by) = match in_tab.as_slice() {
-        [one] => (**one, "tab"),
-        [] => {
-            let near: Vec<&&Value> = agents.iter().filter(|v| in_repo(v)).collect();
-            match near.as_slice() {
-                [one] => (**one, "workspace"),
-                [] => return Err("В этой вкладке нет агента с сессией".into()),
-                _ => return Err("Во вкладке нет агента, а в workspace их несколько".into()),
-            }
-        }
-        _ => return Err("В этой вкладке несколько агентов".into()),
+    // The tab's own agents first; without one, this workspace's agents in the repo.
+    let in_tab: Vec<&Value> = agents
+        .iter()
+        .copied()
+        .filter(|v| tab.is_some() && v["tab_id"].as_str() == tab.as_deref())
+        .collect();
+    let (pool, found_by) = if in_tab.is_empty() {
+        (agents.iter().copied().filter(in_repo).collect::<Vec<_>>(), "workspace")
+    } else {
+        (in_tab, "tab")
     };
-    Ok(Agent {
+    let choices: Vec<AgentChoice> = pool
+        .iter()
+        .map(|v| AgentChoice {
+            pane_id: v["pane_id"].as_str().unwrap_or_default().to_string(),
+            name: v["name"].as_str().unwrap_or_default().to_string(),
+            state: v["agent_status"].as_str().unwrap_or_default().to_string(),
+            tab: v["tab_id"].as_str().unwrap_or_default().to_string(),
+        })
+        .collect();
+    let picked = pick.and_then(|p| pool.iter().find(|v| v["pane_id"].as_str() == Some(p)));
+    let chosen = match (picked, pool.as_slice()) {
+        (Some(v), _) | (None, [v]) => *v,
+        (None, []) => return (Err("В этой вкладке нет агента с сессией".into()), choices),
+        (None, _) => return (Err("Здесь несколько агентов: W — выбрать".into()), choices),
+    };
+    let agent = Agent {
+        pane_id: chosen["pane_id"].as_str().unwrap_or_default().to_string(),
         kind: chosen["agent"].as_str().unwrap_or_default().to_string(),
         session: session_of(chosen).unwrap_or_default(),
         name: chosen["name"].as_str().unwrap_or_default().to_string(),
         cwd: PathBuf::from(chosen["cwd"].as_str().unwrap_or_default()),
         status: chosen["agent_status"].as_str().unwrap_or_default().to_string(),
         found_by,
-    })
+    };
+    let choices = if choices.len() > 1 { choices } else { Vec::new() };
+    (Ok(agent), choices)
 }
 
 /// The tab `pane` sits in now, read live since a pane can move; the launch tab as a fallback.

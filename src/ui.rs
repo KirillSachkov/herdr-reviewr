@@ -2865,6 +2865,7 @@ fn action_key_label_en(app: &App, action: FooterAction) -> (String, String) {
             (keys.join("·"), "tabs")
         }
         A::Quit => (hint(K::Quit), "quit"),
+        A::PickSession => (hint(K::PickSession), "агент"),
         A::Summarize => {
             let label = if app.session.summarizing.is_some() {
                 "⟳ сводка…"
@@ -3264,6 +3265,9 @@ fn picker_trail(app: &App, row: &AgentChoice) -> String {
 }
 
 fn picker_title(app: &App) -> String {
+    if app.picking_session() {
+        return "агент вкладки «Сессия»".into();
+    }
     let n = app.store.len();
     let noun = if n == 1 { "comment" } else { "comments" };
     format!("send {n} {noun} to")
