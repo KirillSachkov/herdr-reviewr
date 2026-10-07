@@ -66,7 +66,7 @@ fn the_tab_lists_the_summary_then_artifacts_by_tier_with_code_folded() {
     let app = session_app(&r);
     let out = render(&app);
     assert!(out.contains("4 Сессия"), "the active tab is named:\n{out}");
-    assert!(out.contains("own (claude, idle)"), "the bar names the agent:\n{out}");
+    assert!(out.contains("● own · claude · свободен"), "the bar names the agent:\n{out}");
     assert!(out.contains("Нужно от вас: принять план"), "the summary says what is needed:\n{out}");
     assert!(out.contains("Сводка"), "the summary leads the list:\n{out}");
     assert!(out.contains("Артефакты · 1"), "a tier group:\n{out}");
@@ -173,7 +173,7 @@ fn an_alert_shows_its_label_and_drops_the_marker() {
         herdr_reviewr::markdown::render("> [!WARNING]\n> Нужно решение.\n", 60, &hl, &t.palette);
     let text: Vec<String> =
         out.lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect()).collect();
-    assert!(text.iter().any(|l| l.contains("⚠ Warning")), "{text:?}");
+    assert!(text.iter().any(|l| l.contains("⚠ Внимание")), "{text:?}");
     assert!(text.iter().any(|l| l.contains("Нужно решение.")), "{text:?}");
     assert!(!text.iter().any(|l| l.contains("[!WARNING]")), "{text:?}");
 }

@@ -353,6 +353,17 @@ pub(crate) fn rename_tab(tab: &str, label: &str) -> Result<(), HerdrError> {
     call(&["tab", "rename", tab, label]).map(drop)
 }
 
+/// Own fork: a Herdr notification, fired and forgotten on its own thread.
+pub(crate) fn notify(title: &str, body: &str) {
+    drop(herdr_on_thread(vec![
+        "notification".into(),
+        "show".into(),
+        title.into(),
+        "--body".into(),
+        body.into(),
+    ]));
+}
+
 /// How long a startup or exit path waits for herdr; the call itself runs on.
 const ANSWER_BOUND: Duration = Duration::from_secs(2);
 

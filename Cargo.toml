@@ -53,6 +53,10 @@ unicode-width = "0.2"
 # Program lookup the way a shell does it: the executable bit on unix, PATHEXT on Windows
 # (so `az` finds `az.cmd`), and never the current directory for a bare name.
 which = "8.0.6"
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 
 [target.'cfg(unix)'.dependencies]
 # Already in the tree through crossterm. The frame loop's wait on the terminal and the wake pipe,

@@ -1258,11 +1258,13 @@ pub fn hit_header(area: Rect, app: &App, keymap: &Keymap, col: u16, row: u16) ->
 fn tab_labels(keymap: &Keymap, forge: crate::git::Forge, active: Tab) -> Vec<(Tab, String)> {
     use crate::keymap::Action as K;
     let session = (Tab::Session, format!("{} Сессия", keymap.hint(K::TabSession).label()));
-    let lead = crate::session::available();
+    let lead = crate::session::russian();
+    let (changes, files) =
+        if lead { ("Изменения", "Файлы") } else { ("Changes", "Files") };
     let mut labels = if lead { vec![session.clone()] } else { Vec::new() };
     labels.extend([
-        (Tab::Changes, format!("{} Changes", keymap.hint(K::TabChanges).label())),
-        (Tab::AllFiles, format!("{} Files", keymap.hint(K::TabAllFiles).label())),
+        (Tab::Changes, format!("{} {changes}", keymap.hint(K::TabChanges).label())),
+        (Tab::AllFiles, format!("{} {files}", keymap.hint(K::TabAllFiles).label())),
         (Tab::Pr, format!("{} {}", keymap.hint(K::TabPr).label(), forge.abbr())),
     ]);
     if !lead && active == Tab::Session {
@@ -1432,13 +1434,23 @@ fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
         let mut spans = tab_bar_spans(app);
         let used: usize = spans.iter().map(Span::width).sum();
         let budget = (area.width as usize).saturating_sub(used + HEADER_LEAD.len()).max(1);
-        let line = truncate_width(&app.session.bar(&app.repo), budget);
-        let pad = budget.saturating_sub(line.width());
-        spans.push(Span::styled(
-            line,
-            bar.fg(p.ink(Ink::Accent, Fill::Bar)).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(" ".repeat(pad + HEADER_LEAD.len()), bar));
+        let mut left = budget;
+        for (i, (text, tone)) in app.session.bar_parts(&app.repo).into_iter().enumerate() {
+            use crate::session::Tone;
+            let text = if i == 0 { text } else { format!(" {text}") };
+            let text = truncate_width(&text, left);
+            left = left.saturating_sub(text.width());
+            let style = match tone {
+                Tone::Strong => bar.fg(p.ink(Ink::Accent, Fill::Bar)).add_modifier(Modifier::BOLD),
+                Tone::Accent => bar.fg(p.ink(Ink::Accent, Fill::Bar)),
+                Tone::Muted => bar.fg(p.ink(Ink::TextSecondary, Fill::Bar)),
+                Tone::Ok => bar.fg(p.ink(Ink::Added, Fill::Bar)),
+                Tone::Warning => bar.fg(p.ink(Ink::Warning, Fill::Bar)),
+                Tone::Danger => bar.fg(p.ink(Ink::Danger, Fill::Bar)),
+            };
+            spans.push(Span::styled(text, style));
+        }
+        spans.push(Span::styled(" ".repeat(left + HEADER_LEAD.len()), bar));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
@@ -1504,7 +1516,8 @@ const DIR_DOT_RESERVE: usize = 2;
 
 fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.palette();
-    let block = bordered("Files", app.focus == Focus::Files, p);
+    let ru = crate::session::russian();
+    let block = bordered(if ru { "Файлы" } else { "Files" }, app.focus == Focus::Files, p);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1512,7 +1525,7 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         let gone = app.commits_gone_message();
         let msg = match app.tab {
             Tab::AllFiles => "no files",
-            Tab::Session => "no session",
+            Tab::Session => "агент этой вкладки не найден",
             Tab::Changes if app.awaiting_turn() => app.turn_wait_message(),
             Tab::Changes if app.commits_gone() => gone.as_str(),
             _ => "no changes",
@@ -1813,6 +1826,12 @@ fn truncate_width(s: &str, max: usize) -> String {
     out
 }
 
+/// Own fork: a link destination fit for a title: control characters dropped, the scheme too.
+fn sanitize_title(url: &str) -> String {
+    let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).unwrap_or(url);
+    url.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// The visible stand-in for a line-ending CR: its caret notation, as `less` and vim show it.
 pub const CR_MARKER: &str = "^M";
 
@@ -1830,7 +1849,12 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
         .to_string(),
     };
     if app.rendered_active() {
-        title.push_str(" · rendered");
+        title.push_str(if crate::session::russian() { " · вид" } else { " · rendered" });
+    }
+    // Own fork: the cursor line's link names its destination here, in place of the text.
+    if let Some(url) = app.cursor_link() {
+        title.push_str(" · ⏎ ");
+        title.push_str(&sanitize_title(&url));
     }
     let block = bordered(&title, app.focus == Focus::Diff, p);
     let inner = block.inner(area);
@@ -1955,6 +1979,22 @@ fn render_diff_view(frame: &mut Frame, app: &App, area: Rect) {
     let body_h = if finding { height.saturating_sub(1) } else { height };
     let out: Vec<Line> = slots.iter().map(&mut line_for).collect();
     frame.render_widget(Paragraph::new(out), Rect { height: body_h as u16, ..inner });
+    // Own fork: pictures paint over their blank rows, after the gutter.
+    if !app.rendered_pictures().is_empty() {
+        let rows = slots.iter().take(body_h).map(|slot| match *slot {
+            Slot::Code { row, seg: 0 } => match app.visible.get(row) {
+                Some(Row::Rendered { kind: RenderedKind::Block { line, .. }, .. }) => {
+                    app.rendered_meta(*line).and_then(|m| m.picture)
+                }
+                _ => None,
+            },
+            _ => None,
+        });
+        let runs = crate::images::runs(rows);
+        let prefix = gutter_prefix_width(gutter_w) as u16;
+        let area = Rect { x: inner.x + prefix, width: inner.width.saturating_sub(prefix), ..inner };
+        crate::images::overlay(frame, app.rendered_pictures(), &runs, area);
+    }
     if finding {
         let band = Rect { y: inner.y + body_h as u16, height: 1, ..inner };
         render_find_band(frame, app, band);
@@ -2045,7 +2085,12 @@ fn render_row(row: &Row, layout: RowLayout<'_>, state: RowState) -> Vec<Line<'st
         let on = row_fill(cursor, selected, focused, Fill::Base);
         let (num_color, plus) = (pal.ink(num_ink, on), pal.ink(Ink::Comment, on));
         // Only the lead line is numbered; the bar cell shows the change mark.
-        let num = if lead { src.to_string() } else { String::new() };
+        // Own fork: by its own first line, so a code block's first line skips its fence's number.
+        let first = match kind {
+            RenderedKind::Block { source: (own, _), .. } if *own > 0 => *own,
+            _ => *src,
+        };
+        let num = if lead { first.to_string() } else { String::new() };
         let (bar, bar_color) = match kind {
             RenderedKind::Block { bar: None, .. } => (" ", pal.mark(Ink::Border, on)),
             RenderedKind::Block { bar: Some(b), .. } => ("▌", pal.mark(bar_ink(*b), on)),
@@ -2708,8 +2753,14 @@ mod tests {
     }
 }
 
-/// A footer action's key and label; an empty label shows the key alone.
+/// A footer action's key and label; own fork: in Russian inside Herdr.
 fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
+    let (key, label) = action_key_label_en(app, action);
+    if crate::session::russian() { (key, crate::session::ru(&label)) } else { (key, label) }
+}
+
+/// A footer action's key and label; an empty label shows the key alone.
+fn action_key_label_en(app: &App, action: FooterAction) -> (String, String) {
     use crate::keymap::Action as K;
     use FooterAction as A;
     // A rebindable action's hint is its first bound key.
@@ -2907,8 +2958,10 @@ fn footer_lines(app: &App, w: usize) -> Vec<Line<'static>> {
         };
         // Row 1 holds the `do` label, so its overflow takes a blank one.
         lines.extend(render_band(app, w, "", Band::Do, &overflow));
-        lines.extend(render_band(app, w, "go", Band::Go, &of_band(Band::Go)));
-        lines.extend(render_band(app, w, "move", Band::Move, &of_band(Band::Move)));
+        let ru = crate::session::russian();
+        let (go, mv) = if ru { ("идти", "ход") } else { ("go", "move") };
+        lines.extend(render_band(app, w, go, Band::Go, &of_band(Band::Go)));
+        lines.extend(render_band(app, w, mv, Band::Move, &of_band(Band::Move)));
     }
     lines
 }

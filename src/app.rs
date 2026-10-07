@@ -1670,7 +1670,12 @@ impl App {
             rows.push(Row::Rendered {
                 src: meta.source_line as u32,
                 src_end: meta.source_end as u32,
-                text: line.spans.iter().map(|s| s.content.as_ref()).collect(),
+                // Own fork: a heading's rule is drawing, not text to copy or find.
+                text: if meta.rule {
+                    String::new()
+                } else {
+                    line.spans.iter().map(|s| s.content.as_ref()).collect()
+                },
                 kind: RenderedKind::Block { source, wrap, line: i as u32, bar: None, hides: None },
             });
         }
@@ -2173,13 +2178,26 @@ impl App {
         width: usize,
         open: &HashSet<String>,
     ) -> crate::markdown::Rendered {
-        self.markdown_cache.borrow_mut().get_expanded(
-            text,
-            width,
-            &self.highlighter,
-            &self.palette,
-            open,
-        )
+        // Own fork: a picture's relative path reads against the shown file's folder.
+        let base = self
+            .diff_path
+            .as_deref()
+            .map(|p| self.repo.join(p))
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+        crate::images::with_base(base, || {
+            self.markdown_cache.borrow_mut().get_expanded(
+                text,
+                width,
+                &self.highlighter,
+                &self.palette,
+                open,
+            )
+        })
+    }
+
+    /// Own fork: the rendered view's pictures and each line's picture row.
+    pub(crate) fn rendered_pictures(&self) -> &[std::sync::Arc<crate::images::Picture>] {
+        &self.rendered.doc.pictures
     }
 
     /// Render one PR thread body, its disclosures keyed apart from the others'.
@@ -2875,15 +2893,19 @@ impl App {
         true
     }
 
-    /// Own fork: follow the first link on the rendered line under the cursor (`enter`).
-    pub fn follow_cursor_link(&mut self) {
+    /// Own fork: the first link on the rendered line under the cursor.
+    pub fn cursor_link(&self) -> Option<std::sync::Arc<str>> {
         let Some(Row::Rendered { kind: RenderedKind::Block { line, .. }, .. }) =
             self.visible.get(self.diff_cursor)
         else {
-            return;
+            return None;
         };
-        let url = self.rendered_meta(*line).and_then(|m| m.links.first()).map(|l| l.url.clone());
-        if let Some(url) = url {
+        self.rendered_meta(*line).and_then(|m| m.links.first()).map(|l| l.url.clone())
+    }
+
+    /// Own fork: follow the first link on the rendered line under the cursor (`enter`).
+    pub fn follow_cursor_link(&mut self) {
+        if let Some(url) = self.cursor_link() {
             self.open_link(&url);
         }
     }

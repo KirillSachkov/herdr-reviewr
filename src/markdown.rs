@@ -34,6 +34,8 @@ pub struct Rendered {
     pub disclosures: Vec<Disclosure>,
     /// Every code block's source range, fences included, which review treats as one unit.
     pub code_blocks: Vec<(usize, usize)>,
+    /// Own fork: the pictures the lines' `picture` rows draw.
+    pub pictures: Vec<std::sync::Arc<crate::images::Picture>>,
 }
 
 /// One `<details>` element's source lines: open tag, first body line, close tag or file end.
@@ -57,6 +59,10 @@ pub struct LineMeta {
     pub gap: bool,
     /// The source lines this line's own text comes from; a gap's is its block's first.
     pub lines: (usize, usize),
+    /// Own fork: a gap that draws the rule under an `h1` or `h2`; it copies as blank.
+    pub rule: bool,
+    /// Own fork: the picture and its row this blank line shows.
+    pub picture: Option<(usize, u16)>,
 }
 
 /// A `<details>` summary's click target, keyed by summary and repeat count (`Details#1`).
@@ -123,6 +129,9 @@ pub fn render_expanded<S: std::hash::BuildHasher>(
         links: Vec::new(),
         urls: Vec::new(),
         heading_text: None,
+        heading_level: None,
+        fields: None,
+        pending_rule: None,
         images: Vec::new(),
         code: None,
         table: None,
@@ -268,6 +277,11 @@ struct Renderer<'a> {
     urls: Vec<std::sync::Arc<str>>,
     /// The heading's prose for its slug, without link destinations, as GitHub slugs.
     heading_text: Option<String>,
+    /// Own fork: the open heading's level, for the rule under `h1` and `h2`.
+    heading_level: Option<HeadingLevel>,
+    /// Own fork: a paragraph of `Key: value` lines keeps its lines; `Some(true)` at a line start.
+    fields: Option<bool>,
+    pending_rule: Option<&'static str>,
     /// Open images: alt-text start, heading length to roll back to, destination.
     images: Vec<(usize, usize, String)>,
     code: Option<CodeBlock>,
@@ -375,6 +389,14 @@ impl Renderer<'_> {
                 } else if !self.emitting() {
                 } else if let Some(code) = &mut self.code {
                     code.content.push_str(&t);
+                } else if self.fields == Some(true) {
+                    self.fields = Some(false);
+                    let at = t.find(':').map_or(0, |at| at + 1);
+                    let key = self.current_style().fg(self.p.ink(Ink::TextSecondary, Fill::Base));
+                    if at > 0 {
+                        self.push_text(&t[..at], key);
+                    }
+                    self.push_text(&t[at..], self.current_style());
                 } else {
                     self.push_text(&t, self.current_style());
                 }
@@ -390,6 +412,11 @@ impl Renderer<'_> {
                 self.push_code_span(&t, &range, style);
             }
             Event::SoftBreak if self.collecting_summary() => self.append_summary(" "),
+            Event::SoftBreak if self.emitting() && self.fields.is_some() => {
+                let style = self.current_style();
+                self.push_chunk("\n".into(), style, None);
+                self.fields = Some(true);
+            }
             Event::SoftBreak if self.emitting() => self.push_text(" ", self.current_style()),
             Event::HardBreak if self.emitting() && !self.collecting_summary() => {
                 let style = self.current_style();
@@ -433,8 +460,13 @@ impl Renderer<'_> {
             }
         }
         match tag {
+            Tag::Paragraph => {
+                let src = self.source.get(range).unwrap_or_default();
+                self.fields = is_field_block(src).then_some(true);
+            }
             Tag::Heading { level, .. } => {
                 self.heading_text = Some(String::new());
+                self.heading_level = Some(level);
                 self.styles.push(self.heading_style(level));
             }
             Tag::BlockQuote(kind) => {
@@ -510,7 +542,10 @@ impl Renderer<'_> {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph => self.flush_block(true),
+            TagEnd::Paragraph => {
+                self.flush_block(true);
+                self.fields = None;
+            }
             TagEnd::Heading(_) => self.end_heading(),
             TagEnd::BlockQuote(_) => {
                 self.flush_block(true);
@@ -648,7 +683,8 @@ impl Renderer<'_> {
         self.p.readable(Color::Rgb(r, g, b), on)
     }
 
-    /// Close a link, appending its destination dim when the text differs.
+    /// Close a link; own fork: its destination shows only when the text is empty, the title
+    /// names it for the cursor's line.
     fn end_link(&mut self) {
         self.styles.pop();
         let Some((id, start)) = self.links.pop() else {
@@ -656,7 +692,7 @@ impl Renderer<'_> {
         };
         let dest = self.urls[id].clone();
         let text: String = self.chunks_mut()[start..].iter().map(|c| c.text.as_str()).collect();
-        if !dest.is_empty() && text != *dest {
+        if !dest.is_empty() && text.trim().is_empty() {
             let style = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
             // The dim destination shares the click target with the text.
             self.push_chunk(format!(" ({})", sanitize(&dest)), style, Some(id));
@@ -686,6 +722,16 @@ impl Renderer<'_> {
             };
             let style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
             self.push_chunk(label.to_string(), style, self.current_link());
+            return;
+        }
+        if self.table.is_none()
+            && self.heading_text.is_none()
+            && let Some(pic) = self.picture(crate::images::Source::File(dest))
+        {
+            self.flush_block(false);
+            self.blank_before_block();
+            self.emit_picture(pic);
+            self.needs_blank = true;
             return;
         }
         let alt = sanitize(alt);
@@ -799,6 +845,7 @@ impl Renderer<'_> {
             {
                 self.flush_block(true);
                 self.heading_text = Some(String::new());
+                self.heading_level = Some(html_heading_level(h));
                 self.styles.push(self.heading_style(html_heading_level(h)));
             }
             ("h1" | "h2" | "h3" | "h4" | "h5" | "h6", true, _) => self.end_heading(),
@@ -816,6 +863,16 @@ impl Renderer<'_> {
         }
         self.flush_block(true);
         self.styles.pop();
+        self.heading_rule();
+    }
+
+    /// Own fork: the gap under an `h1` (heavy) and an `h2` draws a rule, as GitHub does.
+    fn heading_rule(&mut self) {
+        self.pending_rule = match self.heading_level.take() {
+            Some(HeadingLevel::H1) => Some("━"),
+            Some(HeadingLevel::H2) => Some("─"),
+            _ => None,
+        };
     }
 
     fn finish_summary(&mut self) {
@@ -974,6 +1031,8 @@ impl Renderer<'_> {
             details: self.pending_details.take(),
             gap: false,
             lines: own,
+            rule: false,
+            picture: None,
         });
         self.out.lines.push(line);
     }
@@ -985,6 +1044,7 @@ impl Renderer<'_> {
 
     /// A blank line between blocks, which never takes a pending anchor.
     fn blank_before_block(&mut self) {
+        let rule = self.pending_rule.take();
         if self.needs_blank && !self.out.lines.is_empty() {
             let bars = "▎".repeat(self.quote.min(MAX_NEST));
             self.out.meta.push(LineMeta {
@@ -994,15 +1054,21 @@ impl Renderer<'_> {
                 details: None,
                 gap: true,
                 lines: (self.block_src, self.block_src),
+                rule: rule.is_some(),
+                picture: None,
             });
-            self.out.lines.push(if bars.is_empty() {
+            let muted = Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base));
+            let mut line = if bars.is_empty() {
                 Line::default()
             } else {
-                Line::from(Span::styled(
-                    bars,
-                    Style::default().fg(self.p.ink(Ink::TextMuted, Fill::Base)),
-                ))
-            });
+                Line::from(Span::styled(bars, muted))
+            };
+            if let Some(glyph) = rule {
+                let budget = self.budget(line.width());
+                let style = Style::default().fg(self.p.mark(Ink::Border, Fill::Base));
+                line.push_span(Span::styled(glyph.repeat(budget), style));
+            }
+            self.out.lines.push(line);
         }
         self.needs_blank = false;
     }
@@ -1116,6 +1182,11 @@ impl Renderer<'_> {
         };
         self.blank_before_block();
         if lang.as_deref().is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
+            if let Some(pic) = self.picture(crate::images::Source::Mermaid(&content)) {
+                self.emit_picture(pic);
+                self.needs_blank = true;
+                return;
+            }
             self.emit_mermaid_placeholder(&content);
             self.needs_blank = true;
             return;
@@ -1153,14 +1224,44 @@ impl Renderer<'_> {
     fn emit_alert_label(&mut self, kind: pulldown_cmark::BlockQuoteKind) {
         use pulldown_cmark::BlockQuoteKind as K;
         let (label, ink) = match kind {
-            K::Note => ("ⓘ Note", Ink::Accent),
-            K::Tip => ("✦ Tip", Ink::Accent),
-            K::Important => ("❗ Important", Ink::Warning),
-            K::Warning => ("⚠ Warning", Ink::Warning),
-            K::Caution => ("⛔ Caution", Ink::Warning),
+            K::Note => ("ⓘ Заметка", Ink::Accent),
+            K::Tip => ("✦ Совет", Ink::Accent),
+            K::Important => ("❗ Важно", Ink::Warning),
+            K::Warning => ("⚠ Внимание", Ink::Warning),
+            K::Caution => ("⛔ Осторожно", Ink::Danger),
         };
         let style = Style::default().fg(self.p.ink(ink, Fill::Base)).add_modifier(Modifier::BOLD);
         self.emit_fragments(vec![(label.to_string(), style)], "");
+    }
+
+    /// Own fork: the picture for `source` at the block's width, on the pane's background.
+    fn picture(
+        &self,
+        source: crate::images::Source<'_>,
+    ) -> Option<std::sync::Arc<crate::images::Picture>> {
+        if !crate::images::enabled() {
+            return None;
+        }
+        let bg = match self.p.fill(Fill::Base) {
+            Color::Rgb(r, g, b) => (r, g, b),
+            _ => (0x1e, 0x1e, 0x2e),
+        };
+        let cols = self.budget(self.prefix(self.marker.as_deref()).1.width());
+        crate::images::picture(source, cols, bg)
+    }
+
+    /// Own fork: a picture's rows, blank lines the frame paints it over.
+    fn emit_picture(&mut self, pic: std::sync::Arc<crate::images::Picture>) {
+        let at = self.out.pictures.len();
+        let marker = self.take_marker();
+        let (first, cont) = self.prefix(marker.as_deref());
+        for row in 0..pic.rows {
+            self.push_plain_line(Line::from(if row == 0 { first.clone() } else { cont.clone() }));
+            if let Some(meta) = self.out.meta.last_mut() {
+                meta.picture = Some((at, row));
+            }
+        }
+        self.out.pictures.push(pic);
     }
 
     fn emit_mermaid_placeholder(&mut self, content: &str) {
@@ -1368,6 +1469,21 @@ fn mermaid_kind(content: &str) -> Option<&str> {
         return Some(word);
     }
     None
+}
+
+/// Own fork: whether a paragraph is two or more `Key: value` lines, like a report's header.
+fn is_field_block(src: &str) -> bool {
+    let lines: Vec<&str> = src.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    lines.len() >= 2
+        && lines.iter().all(|line| {
+            line.split_once(':').is_some_and(|(key, rest)| {
+                let words = key.split_whitespace().count();
+                (1..=3).contains(&words)
+                    && key.width() <= 24
+                    && !key.contains(['`', '[', '*', '_', '<', '/'])
+                    && (rest.is_empty() || rest.starts_with(' '))
+            })
+        })
 }
 
 fn html_heading_level(name: &str) -> HeadingLevel {
@@ -1695,10 +1811,23 @@ mod tests {
         let crlf = render(md, 80, &hl, &p);
         let lf = render(&md.replace("\r\n", "\n"), 80, &hl, &p);
         let t = texts(&crlf.lines);
-        assert_eq!(t, ["T", "", "A paragraph that wraps.", "", "a │ b", "─────", "1 │ 2"]);
+        let rule = "━".repeat(80);
+        assert_eq!(t, ["T", &rule, "A paragraph that wraps.", "", "a │ b", "─────", "1 │ 2"]);
         assert_eq!(t, texts(&lf.lines));
         let lines = |r: &Rendered| r.meta.iter().map(|m| m.lines).collect::<Vec<_>>();
         assert_eq!(lines(&crlf), lines(&lf), "the same source lines");
+    }
+
+    #[test]
+    fn a_paragraph_of_key_value_lines_keeps_its_lines() {
+        // Own fork: a report header reads as fields, not one run-on paragraph.
+        let (hl, p) = setup();
+        let lines = render_lines("Статус: ждёт\nЗадача: [#20](https://x.dev/20)\n", 80, &hl, &p);
+        assert_eq!(texts(&lines), vec!["Статус: ждёт", "Задача: #20"]);
+        let key = lines[0].spans.iter().find(|s| s.content == "Статус:").unwrap();
+        assert_eq!(key.style.fg, Some(p.ink(Ink::TextSecondary, Fill::Base)));
+        let prose = render_lines("Он сказал: да\nи ушёл домой\n", 80, &hl, &p);
+        assert_eq!(texts(&prose), vec!["Он сказал: да и ушёл домой"]);
     }
 
     #[test]
@@ -1816,13 +1945,14 @@ mod tests {
     }
 
     #[test]
-    fn link_text_carries_a_dim_destination_when_it_differs() {
+    fn link_text_hides_its_destination_unless_empty() {
+        // Own fork: the title names the cursor line's destination instead.
         let (hl, p) = setup();
         let lines = render_lines("see [the run](https://ci.example/1)", 80, &hl, &p);
-        let text = text_of(&lines[0]);
-        assert_eq!(text, "see the run (https://ci.example/1)");
-        let dest = lines[0].spans.iter().find(|s| s.content.contains("ci.example")).unwrap();
-        assert_eq!(dest.style.fg, Some(p.ink(Ink::TextMuted, Fill::Base)));
+        assert_eq!(text_of(&lines[0]), "see the run");
+        let lines = render_lines("see [](https://ci.example/1)", 80, &hl, &p);
+        assert_eq!(text_of(&lines[0]), "see (https://ci.example/1)");
+        let lines = render_lines("see [the run](https://ci.example/1)", 80, &hl, &p);
         let label = lines[0].spans.iter().find(|s| s.content.contains("the run")).unwrap();
         assert!(label.style.add_modifier.contains(Modifier::UNDERLINED));
 
@@ -2147,7 +2277,6 @@ mod tests {
         let r = render(md, 16, &hl, &p);
         let t = texts(&r.lines);
         let at = |needle: &str| r.meta[t.iter().position(|l| l.contains(needle)).unwrap()].lines;
-        assert_eq!(at("://example.com/a"), (2, 2), "the url follows line 2's text: {t:?}");
         assert_eq!(at("x code one code"), (4, 5), "`code` and `one` from line 4: {t:?}");
         assert_eq!(at("two y"), (5, 5), "{t:?}");
         // Container prefixes never shift a span's piece onto the wrong line.
@@ -2314,15 +2443,15 @@ mod tests {
     }
 
     #[test]
-    fn meta_carries_link_spans_including_the_dim_destination() {
+    fn meta_carries_link_spans() {
         let (hl, p) = setup();
         let r = render("see [the run](https://ci.example/1) now", 80, &hl, &p);
         let line = texts(&r.lines).remove(0);
         let spans: &[LinkSpan] = &r.meta[0].links;
-        assert_eq!(spans.len(), 1, "text and destination fuse into one click target");
+        assert_eq!(spans.len(), 1);
         let s = &spans[0];
         assert_eq!(&*s.url, "https://ci.example/1");
-        assert_eq!(&line[s.start..s.end], "the run (https://ci.example/1)");
+        assert_eq!(&line[s.start..s.end], "the run");
     }
 
     #[test]

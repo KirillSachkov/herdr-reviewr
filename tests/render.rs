@@ -1612,8 +1612,8 @@ fn a_block_is_numbered_on_its_content_never_on_the_gap_above_it() {
     // A quote's second paragraph: its `▎` gap row is no content, so the number sits on `b`.
     assert!(out.contains("  3 ▎ b"), "the quote's block numbers its text:\n{out}");
     assert!(!out.lines().any(|l| l.contains("  3 ▎ ") && !l.contains('b')), "{out}");
-    // A fenced block owns its fences and numbers its code.
-    assert!(out.contains("  5   let x = 1;"), "the code block numbers its code:\n{out}");
+    // Own fork: a code line carries its own number, not its fence's.
+    assert!(out.contains("  6   let x = 1;"), "the code block numbers its code:\n{out}");
 }
 
 #[test]

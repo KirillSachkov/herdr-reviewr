@@ -15,6 +15,7 @@ pub mod gitlab;
 pub mod herdr;
 pub mod herdr_socket;
 pub mod highlight;
+pub mod images;
 mod input;
 pub mod keymap;
 #[macro_use]
@@ -77,6 +78,11 @@ pub fn run() -> Result<()> {
     let mut app = app_for(&cfg, &initial_config);
 
     let mut terminal = ratatui::init();
+    // Own fork: inside Herdr, ask for the graphics protocol before input starts.
+    if crate::session::available() {
+        images::detect();
+        images::warm();
+    }
     // `ratatui::init` claimed the screen and raw mode; the input modes are left.
     claim_input_modes();
     // Paint before the first load, so a hung `git` never leaves herdr's blank pane (issue #4).
@@ -866,6 +872,11 @@ fn land_session(app: &mut App, landing: SessionLanding) {
             view.summarizing = None;
             app.land_session(view);
             app.status = "сводка готова".into();
+            // Built while the pane was hidden: Herdr says so where the owner looks.
+            if !app.pane_visible() {
+                let project = app.session.bar_parts(&app.repo).into_iter().next();
+                herdr::notify("Сводка готова", &project.map(|(name, _)| name).unwrap_or_default());
+            }
         }
         SessionLanding::Summary(Err(e)) => {
             app.summary_building(false);
@@ -1046,7 +1057,13 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                 if std::mem::take(&mut repaint_whole) {
                     invalidate_screen(terminal)?;
                 }
-                terminal.draw(|f| age_due = ui::render_frame(f, app))?;
+                // Own fork: one synchronized update per frame; Herdr holds a torn one back.
+                let begin = ratatui::crossterm::terminal::BeginSynchronizedUpdate;
+                let _ = ratatui::crossterm::execute!(terminal.backend_mut(), begin);
+                let drawn = terminal.draw(|f| age_due = ui::render_frame(f, app)).map(|_| ());
+                let end = ratatui::crossterm::terminal::EndSynchronizedUpdate;
+                let _ = ratatui::crossterm::execute!(terminal.backend_mut(), end);
+                drawn?;
             }
             let age_due = age_due.map(|due| Instant::now() + due);
 

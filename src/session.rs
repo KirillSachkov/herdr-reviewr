@@ -109,6 +109,17 @@ pub struct Agent {
     pub found_by: &'static str,
 }
 
+/// A tone for one part of the Session bar, mapped to a color role when painted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Strong,
+    Accent,
+    Muted,
+    Ok,
+    Warning,
+    Danger,
+}
+
 /// What one load found; lands on the frame loop and is shared with the world worker.
 #[derive(Clone, Debug, Default)]
 pub struct SessionView {
@@ -161,24 +172,40 @@ impl SessionView {
 
     /// The tab bar's line: the project, its branch, and the agent (decision 20).
     pub fn bar(&self, repo: &Path) -> String {
+        let parts: Vec<String> = self.bar_parts(repo).into_iter().map(|(t, _)| t).collect();
+        parts.join(" ")
+    }
+
+    /// The bar in toned parts: project, branch, the agent's state dot and name, the progress.
+    pub fn bar_parts(&self, repo: &Path) -> Vec<(String, Tone)> {
         // Painted every frame, so the fallback before a load reads no git.
         let project = self.project.clone().unwrap_or_else(|| Project {
             name: repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             branch: String::new(),
         });
-        let mut parts = vec![project.name];
+        let mut parts = vec![(project.name, Tone::Strong)];
         if !project.branch.is_empty() {
-            parts.push(project.branch);
+            parts.push((format!("· {}", project.branch), Tone::Accent));
         }
         match (&self.agent, &self.problem) {
-            (Some(a), _) => parts.push(format!("{} ({}, {})", a.name, a.kind, a.status)),
-            (None, Some(problem)) => parts.push(problem.clone()),
+            (Some(a), _) => {
+                let (word, tone) = match a.status.as_str() {
+                    "working" => ("работает", Tone::Warning),
+                    "blocked" => ("ждёт тебя", Tone::Danger),
+                    "done" => ("готово", Tone::Ok),
+                    "idle" => ("свободен", Tone::Ok),
+                    other => (other, Tone::Muted),
+                };
+                parts.push(("  ●".into(), tone));
+                parts.push((format!("{} · {} · {word}", a.name, a.kind), Tone::Muted));
+            }
+            (None, Some(problem)) => parts.push((format!("· {problem}"), Tone::Warning)),
             (None, None) => {}
         }
         if let Some(progress) = self.progress() {
-            parts.push(progress);
+            parts.push((format!(" · {progress}"), Tone::Warning));
         }
-        parts.join(" · ")
+        parts
     }
 
     /// The summary's list row: building, built at, or not built.
@@ -862,6 +889,70 @@ pub fn available() -> bool {
     std::env::var_os("HERDR_PANE_ID").is_some_and(|p| !p.is_empty()) && !cli_off
 }
 
+/// Whether the chrome speaks Russian: the owner's pane inside Herdr, asked once.
+pub fn russian() -> bool {
+    static RU: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *RU.get_or_init(available)
+}
+
+/// A footer or title word in Russian; a count after the word (`send 3`) carries over.
+pub fn ru(label: &str) -> String {
+    let (word, tail) = match label.rsplit_once(' ') {
+        Some((w, n)) if n.chars().all(|c| c.is_ascii_digit()) => (w, format!(" {n}")),
+        _ => (label, String::new()),
+    };
+    if let Some(n) = word.strip_prefix("quit (").and_then(|r| r.strip_suffix(" pending)")) {
+        return format!("выйти ({n} не отправлено)");
+    }
+    let word = match word {
+        "comment" => "комментарий",
+        "select" => "выделить",
+        "clear" => "снять",
+        "edit" => "изменить",
+        "edit file" => "править файл",
+        "delete" => "удалить",
+        "jump" => "к комментарию",
+        "expand fold" | "expand" => "раскрыть",
+        "collapse" => "свернуть",
+        "next file" => "следующий файл",
+        "prev file" => "предыдущий файл",
+        "hunk" => "блок",
+        "file" => "файл",
+        "diff" => "просмотр",
+        "files" => "список",
+        "source" => "исходник",
+        "rendered" => "вид",
+        "layout" => "раскладка",
+        "show" => "показать список",
+        "hide" => "скрыть список",
+        "scope" => "режим",
+        "send" => "вставить",
+        "comments" => "комментарии",
+        "copy" => "копировать",
+        "save" => "сохранить",
+        "newline" => "новая строка",
+        "cancel" => "отмена",
+        "close" => "закрыть",
+        "base" => "база",
+        "commits" => "коммиты",
+        "open" => "открыть",
+        "open ↗" => "открыть ↗",
+        "search" => "поиск",
+        "find" => "найти",
+        "line" => "строка",
+        "go" => "перейти",
+        "wrap" => "перенос",
+        "unwrap" => "без переноса",
+        "move" => "ход",
+        "code" => "код",
+        "refresh" => "обновить",
+        "tabs" => "вкладки",
+        "quit" => "выйти",
+        other => other,
+    };
+    format!("{word}{tail}")
+}
+
 /// One Herdr CLI call's JSON answer.
 fn herdr(args: &[&str]) -> Option<Value> {
     let bin = std::env::var("HERDR_BIN_PATH")
@@ -967,5 +1058,13 @@ mod tests {
     fn keys_are_repo_relative_inside_and_absolute_outside() {
         assert_eq!(key_of(Path::new("/r"), Path::new("/r/docs/a.md")), "docs/a.md");
         assert_eq!(key_of(Path::new("/r"), Path::new("/tmp/x.md")), "/tmp/x.md");
+    }
+
+    #[test]
+    fn footer_words_read_in_russian_with_their_counts() {
+        assert_eq!(ru("send 3"), "вставить 3");
+        assert_eq!(ru("quit (2 pending)"), "выйти (2 не отправлено)");
+        assert_eq!(ru("open ↗"), "открыть ↗");
+        assert_eq!(ru("сводка"), "сводка");
     }
 }

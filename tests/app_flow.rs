@@ -9492,15 +9492,15 @@ fn the_rendered_cursor_keeps_its_source_line_and_wrap() {
         (format!("{para}\n"), "2nd", format!("# T\n\n{para}\n"), "2nd", 60, 60, "2nd"),
         // And the block above goes again.
         (format!("# T\n\n{para}\n"), "2nd", format!("{para}\n"), "2nd", 60, 60, "2nd"),
-        // A wrapped link url holds its row through a poll and a resize.
+        // A wrapped link's text holds its row through a poll and a resize (own fork: no url shown).
         (
             link.to_string(),
-            "://example.com/a",
+            "more words",
             link.replace("later", "later edited"),
-            "://example.com/a",
+            "more words",
             16,
             17,
-            "//example.com/a/b",
+            "more words",
         ),
     ];
     for (before, at, rewrite, after, width, then, resized) in cases {
