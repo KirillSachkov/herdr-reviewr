@@ -762,6 +762,35 @@ pub fn with_link(view: &SessionView, repo: &Path, path: &Path) -> SessionView {
     view
 }
 
+/// The mark an open request carries in its paste, so a draft never swallows it.
+const OPEN_MARK: &str = "⟦reviewr-open⟧ ";
+
+/// The paste that asks a running reviewr to open `path`.
+pub fn open_request(path: &str) -> String {
+    format!("{OPEN_MARK}{path}")
+}
+
+/// The path an open request pastes, `None` for any other paste.
+pub fn parse_open_request(text: &str) -> Option<&str> {
+    text.strip_prefix(OPEN_MARK).map(str::trim)
+}
+
+/// A clicked link or selected text as an absolute path with its line, resolved from `cwd`.
+pub fn request_path(raw: &str, cwd: Option<&str>) -> Option<String> {
+    let raw = raw.trim().trim_matches(|c| matches!(c, '`' | '"' | '\'' | '(' | ')' | '<' | '>'));
+    // `file:///abs`, `file://host/abs`, and Codex's `vscode://file/abs:12`.
+    let raw = match raw.strip_prefix("file://") {
+        Some(rest) => &rest[rest.find('/')?..],
+        None => raw.strip_prefix("vscode://file").unwrap_or(raw),
+    };
+    let base = cwd.map(PathBuf::from).unwrap_or_default();
+    let (path, line) = resolve_link(raw, &base, &base)?;
+    Some(match line {
+        Some(line) => format!("{}:{line}", path.display()),
+        None => path.display().to_string(),
+    })
+}
+
 /// Whether this pane runs inside Herdr with its CLI on, where a session can exist.
 /// Tests and the idle check switch the CLI off with `HERDR_BIN_PATH=false`.
 pub fn available() -> bool {
@@ -849,6 +878,25 @@ mod tests {
         let names: Vec<String> =
             rows(&view, &entries, &collapsed).into_iter().map(|r| r.name).collect();
         assert_eq!(names, ["Сводка", "Артефакты · 1", "docs/a.md", "Код · 1"]);
+    }
+
+    #[test]
+    fn a_clicked_or_selected_path_resolves_from_the_agents_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/plan.md"), "x\n").unwrap();
+        let cwd = root.to_str();
+        let abs = root.join("docs/plan.md").display().to_string();
+        assert_eq!(request_path("docs/plan.md", cwd), Some(abs.clone()));
+        assert_eq!(request_path("`docs/plan.md:12`", cwd), Some(format!("{abs}:12")));
+        assert_eq!(request_path(&format!("file://{abs}"), None), Some(abs.clone()));
+        assert_eq!(request_path(&format!("file://host{abs}"), None), Some(abs.clone()));
+        assert_eq!(request_path(&format!("vscode://file{abs}:3"), None), Some(format!("{abs}:3")));
+        assert_eq!(request_path("docs/none.md", cwd), None);
+        let pasted = open_request(&abs);
+        assert_eq!(parse_open_request(&pasted), Some(abs.as_str()));
+        assert_eq!(parse_open_request("plain paste"), None);
     }
 
     #[test]

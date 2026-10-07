@@ -38,6 +38,8 @@ enum Action {
     Open,
     Close,
     AutoOpen,
+    /// Own fork: open a path clicked (`open-link`) or selected (`open-selection`) in a pane.
+    OpenPath,
 }
 
 impl Action {
@@ -47,6 +49,7 @@ impl Action {
             "open" => Some(Self::Open),
             "close" => Some(Self::Close),
             "auto-open" => Some(Self::AutoOpen),
+            "open-link" | "open-selection" => Some(Self::OpenPath),
             _ => None,
         }
     }
@@ -140,6 +143,9 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
     let existing = reviewr_panes(&panes)
         .ok_or_else(|| refused(format!("herdr pane process-info failed in {ws}")))?;
 
+    if action == Action::OpenPath {
+        return open_path(&config, &target, &panes, &existing).map(Some);
+    }
     if !existing.is_empty() {
         return match action {
             // Own fork: a toggle shows a pane hidden behind a focus change before it closes one.
@@ -153,7 +159,7 @@ fn act(action: Action) -> Result<Option<String>, Stop> {
                     .map_err(|_| refused(format!("herdr could not show {} in {ws}", existing[0])))
             }
             Action::Close | Action::Toggle => close_all(&existing, ws).map(Some),
-            Action::Open | Action::AutoOpen => {
+            Action::Open | Action::AutoOpen | Action::OpenPath => {
                 Ok(Some(format!("already open ({}) in {ws}", existing.join(" "))))
             }
         };
@@ -315,6 +321,38 @@ fn is_review_ui(process: &Process) -> bool {
         |name: &str| if cfg!(windows) { name.eq_ignore_ascii_case(BINARY) } else { name == BINARY };
     let named = process.argv0.iter().chain(argv.first()).any(|exe| same(program_name(exe)));
     named && NonUiRun::from_args(argv.get(1..).unwrap_or_default()).is_none()
+}
+
+/// Own fork: show a reviewr pane, opening one if none, and paste it the clicked or selected path.
+fn open_path(
+    config: &PluginConfig,
+    target: &Target,
+    panes: &PaneList,
+    existing: &[&str],
+) -> Result<String, Stop> {
+    let ws = target.ws.as_str();
+    let context: Value = var("HERDR_PLUGIN_CONTEXT_JSON")
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default();
+    let raw = var("HERDR_PLUGIN_CLICKED_URL")
+        .or_else(|| text(&context, "/selected_text"))
+        .ok_or_else(|| refused("no clicked link or selected text"))?;
+    let path = crate::session::request_path(&raw, target.cwd.as_deref())
+        .ok_or_else(|| refused(format!("not a file: {raw}")))?;
+    let pane = if let Some(id) = existing.first() {
+        let zoom =
+            matches!(config.toggle_placement(), TogglePlacement::Overlay | TogglePlacement::Zoomed);
+        herdr::show_pane(id, zoom).map_err(|_| refused(format!("herdr could not show {id}")))?;
+        (*id).to_string()
+    } else {
+        open(Action::Open, config, target, panes)?;
+        let listed = PaneList::of(ws).map_err(|_| refused("herdr pane list failed"))?;
+        let fresh = reviewr_panes(&listed).unwrap_or_default();
+        fresh.first().map(|id| (*id).to_string()).ok_or_else(|| refused("no reviewr pane"))?
+    };
+    herdr::paste(&pane, &crate::session::open_request(&path))
+        .map_err(|_| refused(format!("herdr could not deliver the path to {pane}")))?;
+    Ok(format!("sent {path} to {pane} in {ws}"))
 }
 
 /// Own fork: whether the user has pane `id` focused.

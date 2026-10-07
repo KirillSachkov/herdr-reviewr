@@ -638,6 +638,17 @@ pub fn send_text(pane: &str, text: &str) -> Result<(), SendError> {
     Ok(socket_call(socket, request)?)
 }
 
+/// Own fork: paste `text` into pane `pane` whatever runs there, as `send_text` does for agents.
+pub(crate) fn paste(pane: &str, text: &str) -> Result<(), HerdrError> {
+    let Some(socket) = var_os("HERDR_SOCKET_PATH") else { return Err(HerdrError::Unanswered) };
+    let request = serde_json::json!({
+        "id": "reviewr:paste",
+        "method": "pane.send_text",
+        "params": {"pane_id": pane, "text": pasted(text)},
+    });
+    socket_call(socket, request.to_string())
+}
+
 /// One request line answered by one reply line, on its own thread, bounded by [`SEND_BOUND`].
 fn socket_call(socket: OsString, request: String) -> Result<(), HerdrError> {
     reply_outcome(&socket_exchange(socket, request, SEND_BOUND)?)

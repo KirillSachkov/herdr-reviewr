@@ -1428,6 +1428,13 @@ fn event_loop(terminal: &mut DefaultTerminal, app: &mut App, cfg: &Config) -> Re
                         );
                     }
                     // Bracketed paste: insert at the caret while composing, ignored otherwise.
+                    // Own fork: an open request from the `open-link`/`open-selection` actions.
+                    Event::Paste(text) if crate::session::parse_open_request(&text).is_some() => {
+                        let path = crate::session::parse_open_request(&text).unwrap_or_default();
+                        if !app.open_local(path) {
+                            app.status = format!("no such file: {path}");
+                        }
+                    }
                     Event::Paste(text) => {
                         app.input_paste(&text);
                         logln!("paste {} chars -> composing={}", text.len(), app.composing());

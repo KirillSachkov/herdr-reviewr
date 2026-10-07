@@ -30,3 +30,29 @@ id = "close"
 title = "reviewr-own: close pane"
 contexts = ["pane", "workspace"]
 command = ["bin/herdr-reviewr", "--action", "close"]
+
+# Open a path from an agent's pane in reviewr (decision 19): Ctrl+click on an OSC 8 file link,
+# or select a path and press the key bound to open-selection.
+[[actions]]
+id = "open-link"
+title = "reviewr-own: open clicked file"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewr", "--action", "open-link"]
+
+[[actions]]
+id = "open-selection"
+title = "reviewr-own: open selected path"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewr", "--action", "open-selection"]
+
+[[link_handlers]]
+id = "file"
+title = "Open in reviewr"
+pattern = "^file://"
+action = "open-link"
+
+[[link_handlers]]
+id = "vscode-file"
+title = "Open in reviewr"
+pattern = "^vscode://file/"
+action = "open-link"

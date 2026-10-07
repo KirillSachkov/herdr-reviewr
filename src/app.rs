@@ -2852,6 +2852,7 @@ impl App {
             return false;
         };
         if self.composing() {
+            self.status = "finish the comment first, then open the link".into();
             return true;
         }
         let root = self.repo.canonicalize().unwrap_or_else(|_| self.repo.clone());
