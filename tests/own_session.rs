@@ -66,7 +66,8 @@ fn the_tab_lists_the_summary_then_artifacts_by_tier_with_code_folded() {
     let app = session_app(&r);
     let out = render(&app);
     assert!(out.contains("4 Сессия"), "the active tab is named:\n{out}");
-    assert!(out.contains("Нужно от вас: принять план"), "the need line tops the tab:\n{out}");
+    assert!(out.contains("own (claude, idle)"), "the bar names the agent:\n{out}");
+    assert!(out.contains("Нужно от вас: принять план"), "the summary says what is needed:\n{out}");
     assert!(out.contains("Сводка"), "the summary leads the list:\n{out}");
     assert!(out.contains("Артефакты · 1"), "a tier group:\n{out}");
     assert!(out.contains("plan.md"), "its file:\n{out}");

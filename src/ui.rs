@@ -1425,18 +1425,18 @@ fn tab_bar_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 fn render_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
-    // Own fork: the `Session` tab shows what the agent needs in place of the scope.
+    // Own fork: the `Session` tab shows the project, branch and agent in place of the scope.
     if app.tab == Tab::Session {
         let p = app.palette();
         let bar = Style::default().bg(p.fill(Fill::Bar));
         let mut spans = tab_bar_spans(app);
         let used: usize = spans.iter().map(Span::width).sum();
         let budget = (area.width as usize).saturating_sub(used + HEADER_LEAD.len()).max(1);
-        let need = truncate_width(&app.session.need(), budget);
-        let pad = budget.saturating_sub(need.width());
+        let line = truncate_width(&app.session.bar(&app.repo), budget);
+        let pad = budget.saturating_sub(line.width());
         spans.push(Span::styled(
-            need,
-            bar.fg(p.ink(Ink::Warning, Fill::Bar)).add_modifier(Modifier::BOLD),
+            line,
+            bar.fg(p.ink(Ink::Accent, Fill::Bar)).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(" ".repeat(pad + HEADER_LEAD.len()), bar));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);

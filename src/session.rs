@@ -122,6 +122,8 @@ pub struct SessionView {
     /// The agent's unanswered `AskUserQuestion`.
     pub question: Option<String>,
     pub artifacts: Vec<Artifact>,
+    /// The project this pane reviews, for the tab bar.
+    pub project: Option<Project>,
     /// Every file the session changed, for the `session` scope (decision 5).
     pub changes: Vec<SessionChange>,
     /// The own worktree's merge-base, the old side of its Git changes.
@@ -155,7 +157,26 @@ impl SessionView {
         out
     }
 
-    /// The line the tab bar shows: what the agent needs from the owner.
+    /// The tab bar's line: the project, its branch, and the agent (decision 20).
+    pub fn bar(&self, repo: &Path) -> String {
+        // Painted every frame, so the fallback before a load reads no git.
+        let project = self.project.clone().unwrap_or_else(|| Project {
+            name: repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            branch: String::new(),
+        });
+        let mut parts = vec![project.name];
+        if !project.branch.is_empty() {
+            parts.push(project.branch);
+        }
+        match (&self.agent, &self.problem) {
+            (Some(a), _) => parts.push(format!("{} ({}, {})", a.name, a.kind, a.status)),
+            (None, Some(problem)) => parts.push(problem.clone()),
+            (None, None) => {}
+        }
+        parts.join(" · ")
+    }
+
+    /// The summary's line: what the agent needs from the owner.
     pub fn need(&self) -> String {
         if let Some(problem) = &self.problem {
             return problem.clone();
@@ -250,11 +271,8 @@ impl SessionView {
         if let Some(s) = &self.summary {
             let _ = write!(out, "## О чём\n\n{}\n\n## Что сделано\n\n", s.about);
             for done in &s.done {
-                let files: Vec<String> = done
-                    .files
-                    .iter()
-                    .map(|f| format!("[{}](<{}>)", short_path(f), f.display()))
-                    .collect();
+                let files: Vec<String> =
+                    done.files.iter().map(|f| format!("[{0}](<{0}>)", short_path(f))).collect();
                 let tail = if files.is_empty() {
                     String::new()
                 } else {
@@ -394,6 +412,7 @@ pub fn load(repo: &Path) -> SessionView {
     view.question.clone_from(&trace.question);
     view.summary = desk::cached_summary(&agent.session);
     view.artifacts = artifacts(repo, &agent, &trace);
+    view.project = project(repo);
     view.base = desk::own_worktree(&agent.cwd).and_then(|_| merge_base(repo));
     view.changes = changes(repo, &agent, &trace);
     view.agent = Some(agent);
@@ -760,6 +779,29 @@ pub fn with_link(view: &SessionView, repo: &Path, path: &Path) -> SessionView {
         view.artifacts.push(Artifact { key, abs, tier: Tier::Linked, letter: None, note: None });
     }
     view
+}
+
+/// The project a pane reviews: the main checkout's name, its worktree, and the branch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Project {
+    pub name: String,
+    pub branch: String,
+}
+
+/// `repo`'s project; a linked worktree reads as `main-name ⎇ worktree-dir`.
+pub fn project(repo: &Path) -> Option<Project> {
+    let root = agent_desk::git::root(repo).ok()?;
+    let main = agent_desk::git::worktree_paths(&root).ok().and_then(|p| p.into_iter().next());
+    let base =
+        |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = match main.and_then(|m| m.canonicalize().ok()) {
+        Some(main) if main != root => format!("{} ⎇ {}", base(&main), base(&root)),
+        _ => base(&root),
+    };
+    let branch = agent_desk::git::text(&root, &["branch", "--show-current"])
+        .map(|b| b.trim().to_string())
+        .unwrap_or_default();
+    Some(Project { name, branch })
 }
 
 /// The mark an open request carries in its paste, so a draft never swallows it.

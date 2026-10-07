@@ -386,13 +386,19 @@ impl PaneIds {
     }
 }
 
+/// Own fork: the pane label names the project, so every tab shows where the review is.
+fn own_label() -> String {
+    let project = std::env::current_dir().ok().and_then(|dir| crate::session::project(&dir));
+    project.map_or_else(|| LABEL.to_string(), |p| format!("{LABEL} · {}", p.name))
+}
+
 /// Stamp our pane's `reviewr` label unless the user named it; best effort, never waited on.
 pub fn label_pane(ids: &PaneIds) {
     let (Some(ws), Some(pane)) = (ids.workspace.clone(), ids.pane.clone()) else { return };
     thread::spawn(move || {
         // An unreadable listing stamps anyway: the rename fails too, and both log.
         if current_label(&ws, &pane).is_none() {
-            let _ = call(&["pane", "rename", &pane, LABEL]);
+            let _ = call(&["pane", "rename", &pane, &own_label()]);
         }
     });
 }
@@ -402,7 +408,7 @@ pub fn clear_pane_label(ids: &PaneIds) {
     let (Some(ws), Some(pane)) = (ids.workspace.clone(), ids.pane.clone()) else { return };
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        if current_label(&ws, &pane).as_deref() == Some(LABEL) {
+        if current_label(&ws, &pane).is_some_and(|label| label == own_label()) {
             let _ = call(&["pane", "rename", &pane, "--clear"]);
         }
         let _ = tx.send(());
